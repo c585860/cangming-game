@@ -10,12 +10,16 @@ const Tiles = preload("res://scripts/undead_tiles.gd")
 const Lighting = preload("res://scripts/lighting.gd")
 const LightGeometry = preload("res://scripts/light_geometry.gd")
 const SceneLighting = preload("res://scripts/scene_lighting.gd")
+const Weather = preload("res://scripts/weather.gd")
+const WeatherFx = preload("res://scripts/weather_fx.gd")
 const ZOOMS := [20, 25, 32, 40, 48]
 const SITE_NAMES := {&"merchant": "药商沈青", &"ferryman": "渡夫", &"altar": "吐纳石台", &"herb": "清露草", &"door": "门"}
 const SEASON_KEYS := {"春": "spring", "夏": "summer", "秋": "autumn", "冬": "winter"}
 const NONE := Vector2i(-1, -1)
+const MAX_FOOTPRINTS := 180
 
 var world: World
+var weather: Weather
 var route: Array = []
 var route_head := 0
 var bounds: Rect2i
@@ -27,6 +31,7 @@ var zoom := 2
 var cell := 32
 var scene_lighting := SceneLighting.new()
 var markers := Control.new()
+var weather_fx := WeatherFx.new()
 var lighting_key: Array = []
 var geometry_key: Array = []
 var surface_key: Array = []
@@ -37,14 +42,22 @@ var cells: Dictionary = {}
 var below_cells: Dictionary = {}
 var current_season := "spring"
 var can_read_upper_levels := false
+var roofs_enabled := true
+var roof_tiles: Dictionary = {}
+var revealed_interior: Dictionary = {}
+var footprints: Array[Dictionary] = []
+var _last_player_pos := NONE
+var _step_parity := 0
 
 
-func build(model: World) -> void:
+func build(model: World, weather_model: Weather = null) -> void:
 	world = model
+	weather = weather_model if weather_model != null else Weather.new()
 	can_read_upper_levels = world.has_method("terrain_at_level")
 	invalidate_lightmap()
 	bounds = Rect2i(Vector2i.ZERO, world.city_size)
 	view_center = world.pos
+	_last_player_pos = world.pos
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	clip_contents = true
 	scene_lighting.build(self)
@@ -52,11 +65,47 @@ func build(model: World) -> void:
 	add_child(markers)
 	markers.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	markers.draw.connect(_draw_markers)
+	add_child(weather_fx)
+	weather_fx.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_exited.connect(_clear_hover)
 	resized.connect(_update_view)
 
 
+func clear_footprints() -> void:
+	footprints.clear()
+	_last_player_pos = world.pos if world != null else NONE
+
+
+func _record_snow_step(from_pos: Vector2i, to_pos: Vector2i) -> void:
+	if world == null or weather == null or world.floor != 0 or weather.snow_cover <= 0.15:
+		return
+	var delta := to_pos - from_pos
+	if delta == Vector2i.ZERO or delta.length_squared() > 4:
+		return
+	if not cells.has(from_pos):
+		return
+	var data: Array = cells[from_pos]
+	if Lighting.enclosed(data) or data[0] in ["~", "W", " "]:
+		return
+	var dir := Vector2(delta).normalized()
+	_step_parity += 1
+	var side := -1.0 if (_step_parity & 1) == 0 else 1.0
+	footprints.append({
+		"pos": from_pos,
+		"dir": dir,
+		"side": side,
+		"minute": world.minutes,
+		"floor": world.floor,
+	})
+	if footprints.size() > MAX_FOOTPRINTS:
+		footprints = footprints.slice(footprints.size() - MAX_FOOTPRINTS)
+
+
 func follow(p: Vector2i) -> void:
+	if world != null and world.pos != _last_player_pos:
+		if _last_player_pos != NONE:
+			_record_snow_step(_last_player_pos, world.pos)
+		_last_player_pos = world.pos
 	if view_center != p:
 		hovered = NONE
 	view_center = p
@@ -117,6 +166,12 @@ func invalidate_lightmap() -> void:
 	emitter_herbs = -1
 
 
+func invalidate_weather() -> void:
+	lighting_key.clear()
+	surface_key.clear()
+	queue_redraw()
+
+
 func _collect_sites(region: Rect2i) -> Dictionary:
 	var sites := {}
 	if world.floor != 0:
@@ -136,17 +191,61 @@ func _collect_characters(visible: Rect2i) -> Array:
 		for y in range(visible.position.y, visible.end.y):
 			for x in range(visible.position.x, visible.end.x):
 				var p := Vector2i(x, y)
+				if roof_tiles.has(p):
+					continue
 				var site: StringName = world.site_at(p)
 				if site == &"merchant" or site == &"ferryman":
 					list.append([p, site])
-	if visible.has_point(world.pos):
+	if visible.has_point(world.pos) and not roof_tiles.has(world.pos):
 		list.append([world.pos, &"player"])
 	return list
+
+
+func _compute_roof_cover(props: Rect2i) -> void:
+	revealed_interior.clear()
+	roof_tiles.clear()
+	if not roofs_enabled or world.floor != 0:
+		return
+	# If the player is inside an enclosed building (or crossing its threshold), reveal that connected building.
+	var start := world.pos
+	if cells.has(start) and Lighting.enclosed(cells[start]):
+		var queue: Array[Vector2i] = [start]
+		revealed_interior[start] = true
+		var head := 0
+		while head < queue.size():
+			var cur := queue[head]
+			head += 1
+			for step: Vector2i in Lighting.CARDINAL:
+				var nxt := cur + step
+				if revealed_interior.has(nxt) or not cells.has(nxt):
+					continue
+				if Lighting.enclosed(cells[nxt]):
+					revealed_interior[nxt] = true
+					queue.append(nxt)
+	# Cover all other enclosed building interiors & north/west/east walls with pitched roofs,
+	# leaving the south street-facing facade walls, windows, and doorways visible beneath the eaves.
+	var scan := props.grow(1).intersection(geometry_area)
+	for y in range(scan.position.y, scan.end.y):
+		for x in range(scan.position.x, scan.end.x):
+			var p := Vector2i(x, y)
+			if revealed_interior.has(p) or not cells.has(p):
+				continue
+			var data: Array = cells[p]
+			if not Lighting.enclosed(data):
+				continue
+			var tile: String = data[0]
+			var south_out := not Lighting.enclosed(cells.get(p + Vector2i.DOWN, []))
+			if south_out and tile in ["#", "w", "O", "D", "o"]:
+				continue
+			roof_tiles[p] = true
 
 
 func _update_lightmap(visible: Rect2i, props: Rect2i) -> void:
 	var sky := CanglingCalendar.at_minute(world.minutes)
 	current_season = SEASON_KEYS.get(sky.season, "spring")
+	weather.sync(sky, world.seed, false)
+	if weather.snow_cover < 0.12 and not footprints.is_empty():
+		footprints.clear()
 	var z: int = world.floor
 	var layers := maxi(1, 3 - z) if can_read_upper_levels and z >= 0 else 1
 	var reach := LightGeometry.REACH + SceneLighting.LIGHT_MARGIN + 1
@@ -172,21 +271,25 @@ func _update_lightmap(visible: Rect2i, props: Rect2i) -> void:
 		lighting_key.clear()
 		surface_key.clear()
 		emitter_area = Rect2i()
+	_compute_roof_cover(props)
 	var characters := _collect_characters(visible)
-	var mask_key: Array = [props, visible.position, size, cell, current_season, world.pos, characters.size()]
+	var mask_key: Array = [props, visible.position, size, cell, current_season, world.pos,
+		characters.size(), roofs_enabled, roof_tiles.size(), revealed_interior.size()]
 	if mask_key != surface_key:
 		scene_lighting.update_surfaces(cells, props, visible.position, size, cell,
-			world.seed ^ (z * 0x65bd4e97), current_season, characters)
+			world.seed ^ (z * 0x65bd4e97), current_season, characters, roof_tiles)
 		surface_key = mask_key
 	if not emitter_area.encloses(props) or emitter_herbs != world.herbs:
 		emitter_area = geometry_area.grow(-SceneLighting.PointLighting.REACH).merge(props).intersection(geometry_area)
 		var sites := _collect_sites(emitter_area.grow(SceneLighting.PointLighting.REACH).intersection(geometry_area))
 		scene_lighting.update_emitters(cells, geometry_area, emitter_area, sites, world.seed ^ (z * 0x65bd4e97))
 		emitter_herbs = world.herbs
-	var key: Array = [visible, world.minutes]
+	var key: Array = [visible, world.minutes, weather.current_kind, int(round(weather.wetness * 100.0)),
+		int(round(weather.snow_cover * 100.0)), int(round(weather.rain * 100.0)), int(round(weather.snow * 100.0))]
 	if key != lighting_key:
 		var tints := Lighting.calculate_ambient(cells, props.grow(1).intersection(bounds), sky, z)
-		scene_lighting.update_light(tints, geometry_area, visible, sky, z)
+		scene_lighting.update_light(tints, geometry_area, visible, sky, z, weather)
+		weather_fx.configure(weather.rain if z == 0 else 0.0, weather.snow if z == 0 else 0.0, scene_lighting.current_daylight)
 		lighting_key = key
 	scene_lighting.set_view(geometry_area, visible, size, cell, world.pos)
 
@@ -220,26 +323,55 @@ func _draw() -> void:
 							draw_rect(Rect2(o, Vector2(cell * 0.35, cell)), Color(0.02, 0.04, 0.05, 0.32))
 	for y in range(visible.position.y, visible.end.y):
 		for x in range(visible.position.x, visible.end.x):
-			Art.ground(self, cells, Vector2i(x, y), seed, current_season)
+			var p := Vector2i(x, y)
+			if roof_tiles.has(p):
+				continue
+			Art.ground(self, cells, p, seed, current_season)
 	for y in range(props.position.y, props.end.y):
 		for x in range(props.position.x, props.end.x):
 			var p := Vector2i(x, y)
+			if roof_tiles.has(p):
+				continue
 			Art.walls(self, cells, p, seed, current_season, lit_strength)
 			Art.detail(self, world, cells, p, seed, current_season, emitters, lit_strength)
+	if not roof_tiles.is_empty():
+		for y in range(props.position.y, props.end.y):
+			for x in range(props.position.x, props.end.x):
+				var p := Vector2i(x, y)
+				if roof_tiles.has(p):
+					Art.roof_tile(self, cells, roof_tiles, p, seed)
 	if world.floor == 0:
 		for y in range(visible.position.y, visible.end.y):
 			for x in range(visible.position.x, visible.end.x):
 				var p := Vector2i(x, y)
+				if roof_tiles.has(p):
+					continue
 				var site: StringName = world.site_at(p)
 				if site in [&"merchant", &"ferryman", &"altar", &"herb"]:
 					Art.site_landmark(self, p, site, lit_strength)
-	if visible.has_point(world.pos):
+	if visible.has_point(world.pos) and not roof_tiles.has(world.pos):
 		Art.character(self, world.pos, &"player")
 	markers.queue_redraw()
 
 
 func _draw_markers() -> void:
 	var visible := Rect2i(view_origin, view_size).intersection(bounds)
+	# Snow footprints drawn right above snow blanket and dimmed smoothly by daylight.
+	if weather != null and weather.snow_cover > 0.15 and world.floor == 0 and not footprints.is_empty():
+		var snow_alpha := smoothstep(0.15, 0.45, weather.snow_cover)
+		var day := scene_lighting.current_daylight
+		for step: Dictionary in footprints:
+			if int(step["floor"]) != world.floor:
+				continue
+			var fp: Vector2i = step["pos"]
+			if not visible.has_point(fp) or roof_tiles.has(fp):
+				continue
+			var age := maxi(0, world.minutes - int(step["minute"]))
+			var fade := clampf(1.0 - float(age) / 180.0, 0.0, 1.0) * snow_alpha
+			if fade <= 0.03:
+				continue
+			var origin := Vector2((fp - view_origin) * cell)
+			Art.snow_footprint(markers, origin, float(cell), step["dir"], float(step["side"]), fade, day)
 	for i in range(route_head, mini(route_head + 150, route.size())):
 		var p: Vector2i = route[i]
 		if visible.has_point(p):

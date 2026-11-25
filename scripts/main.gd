@@ -6,6 +6,7 @@ const Survey = preload("res://scripts/survey.gd")
 const Atlas = preload("res://scripts/city_atlas.gd")
 const Items = preload("res://scripts/item_ui.gd")
 const CanglingCalendar = preload("res://scripts/cangling_calendar.gd")
+const Weather = preload("res://scripts/weather.gd")
 const UI = preload("res://scripts/ui_theme.gd")
 const INK := UI.INK_IVORY
 const SOFT := UI.INK_SOFT
@@ -14,10 +15,13 @@ const LINE := UI.BORDER_JADE
 const NONE := Vector2i(-1, -1)
 
 var world := World.new()
+var weather := Weather.new()
 var board: Board
 var time_text: Label
 var phase_pill: PanelContainer
 var phase_label: Label
+var weather_pill: PanelContainer
+var weather_label: Label
 var location_text: Label
 var floor_label: Label
 var quest_text: Label
@@ -49,6 +53,7 @@ var period_key: Key = KEY_NONE
 
 func _ready() -> void:
 	world.setup(randi())
+	weather.sync(CanglingCalendar.at_minute(world.minutes), world.seed, true)
 	var ui_font := SystemFont.new()
 	ui_font.font_names = PackedStringArray(["Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", "sans-serif"])
 	theme = Theme.new()
@@ -78,7 +83,7 @@ func _build_ui() -> void:
 	header_panel.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_HEADER, UI.BORDER_JADE, 4, 12, 7, 1))
 	layout.add_child(header_panel)
 	var top := HBoxContainer.new()
-	top.add_theme_constant_override("separation", 10)
+	top.add_theme_constant_override("separation", 8)
 	header_panel.add_child(top)
 	UI.seal_stamp(top, "沧")
 	var title_box := HBoxContainer.new()
@@ -87,8 +92,13 @@ func _build_ui() -> void:
 	top.add_child(title_box)
 	var title := _label(title_box, "沧菱城", 22, GOLD)
 	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	var subtitle := _label(title_box, "沧溟修真界 · 云梦水乡", 13, UI.INK_DIM)
+	var subtitle := _label(title_box, "云梦水乡 · 古镇", 13, UI.INK_DIM)
 	subtitle.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+
+	weather_pill = PanelContainer.new()
+	weather_pill.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	weather_label = _label(weather_pill, "晴朗", 13, GOLD)
+	top.add_child(weather_pill)
 
 	phase_pill = PanelContainer.new()
 	phase_pill.size_flags_vertical = Control.SIZE_SHRINK_CENTER
@@ -98,7 +108,7 @@ func _build_ui() -> void:
 	for spec in [["大地图", "map"], ["背包", "inventory"], ["角色", "character"], ["菜单", "pause"]]:
 		var nav := _button(top, spec[0], _show_overlay.bind(spec[1]))
 		nav.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		nav.custom_minimum_size = Vector2(76, 32)
+		nav.custom_minimum_size = Vector2(72, 32)
 
 	# Main split: Framed Viewport + Scroll Sidebar
 	var center := HBoxContainer.new()
@@ -114,7 +124,7 @@ func _build_ui() -> void:
 	board = Board.new()
 	board.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	board.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	board.build(world)
+	board.build(world, weather)
 	board_frame.add_child(board)
 	board.cell_clicked.connect(_map_clicked)
 	board.context_requested.connect(_open_actions)
@@ -148,7 +158,7 @@ func _build_ui() -> void:
 	minimap.build(world)
 	map_frame.add_child(minimap)
 
-	# Realm & Resources Card
+	# Status & Resources Card
 	var status_card := PanelContainer.new()
 	status_card.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_CARD, UI.BORDER_SOFT, 4, 9, 7, 1))
 	side.add_child(status_card)
@@ -156,11 +166,11 @@ func _build_ui() -> void:
 	var stat_head := HBoxContainer.new()
 	stat_head.add_theme_constant_override("separation", 6)
 	status_col.add_child(stat_head)
-	var stat_title := _label(stat_head, "◈ 道途状态", 13, SOFT)
+	var stat_title := _label(stat_head, "◈ 行旅状态", 13, SOFT)
 	stat_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	realm_badge = PanelContainer.new()
-	realm_badge.add_theme_stylebox_override("panel", UI.pill_box(Color("1b2b25"), UI.JADE, 8, 1))
-	realm_label = _label(realm_badge, "凡人", 12, UI.JADE)
+	realm_badge.add_theme_stylebox_override("panel", UI.pill_box(Color("1b221e"), UI.BORDER_JADE, 8, 1))
+	realm_label = _label(realm_badge, "平民", 12, SOFT)
 	stat_head.add_child(realm_badge)
 	stats_text = _label(status_col, "", 14, INK)
 	resources_text = _label(status_col, "", 13, SOFT)
@@ -193,7 +203,7 @@ func _build_ui() -> void:
 	footer.add_child(foot_row)
 	status_text = _label(foot_row, "", 13, GOLD)
 	status_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var hints := _label(foot_row, "左键寻路 · 右键交互 · 滚轮缩放 · . 候时 · L 环视 · M 舆图", 12, UI.INK_DIM)
+	var hints := _label(foot_row, "左键寻路 · 右键交互 · 滚轮缩放 · . 候时 · L 环视 · M 舆图 · K 调试", 12, UI.INK_DIM)
 	hints.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 
 	action_menu = PopupMenu.new()
@@ -239,7 +249,7 @@ func _button(parent: Node, text: String, callback: Callable, primary := false) -
 	var button := Button.new()
 	button.text = text
 	button.focus_mode = Control.FOCUS_NONE
-	button.custom_minimum_size.y = 35
+	button.custom_minimum_size.y = 34
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	UI.style_button(button, primary)
 	parent.add_child(button)
@@ -259,16 +269,21 @@ func _floor_name(z: int) -> String:
 
 func _refresh() -> void:
 	var sky := CanglingCalendar.at_minute(world.minutes)
-	time_text.text = CanglingCalendar.time_label(world.minutes)
+	weather.sync(sky, world.seed, false)
+	time_text.text = "%s · %s" % [CanglingCalendar.time_label(world.minutes), weather.label()]
 	var phase := UI.phase_info(sky)
 	phase_label.text = phase[0]
 	phase_label.add_theme_color_override("font_color", phase[1])
 	phase_pill.add_theme_stylebox_override("panel", UI.pill_box(phase[2], phase[1].darkened(0.25), 9, 2))
+	var wb := weather.badge()
+	weather_label.text = wb[0]
+	weather_label.add_theme_color_override("font_color", wb[1])
+	weather_pill.add_theme_stylebox_override("panel", UI.pill_box(wb[2], wb[1].darkened(0.25), 9, 2))
 	location_text.text = world.location(world.pos)
 	floor_label.text = _floor_name(world.floor)
 	quest_text.text = world.quest_text
 	var cultivated := world.quest == 4
-	realm_label.text = "引气一层" if cultivated else "凡人"
+	realm_label.text = "引气一层" if cultivated else "平民"
 	realm_label.add_theme_color_override("font_color", UI.JADE if cultivated else UI.INK_SOFT)
 	realm_badge.add_theme_stylebox_override("panel", UI.pill_box(
 		Color("173129") if cultivated else Color("1b221e"),
@@ -384,6 +399,8 @@ func _new_game(field: LineEdit, error_label: Label) -> void:
 		error_label.text = "种子须为 0 至 4294967295 的整数。"
 		return
 	world.setup(randi() if text.is_empty() else text.to_int())
+	weather.set_override(-1, CanglingCalendar.at_minute(world.minutes), world.seed, true)
+	board.clear_footprints()
 	board.invalidate_lightmap()
 	atlas_cells.clear()
 	look_at = NONE
@@ -410,6 +427,7 @@ func _save() -> void:
 func _load() -> void:
 	_stop()
 	if world.load_game(World.SAVE_PATH):
+		board.clear_footprints()
 		board.invalidate_lightmap()
 		atlas_cells.clear()
 		look_at = NONE
@@ -441,6 +459,57 @@ func _advance_wait() -> void:
 	if wait_remaining == 0:
 		wait_timer.stop()
 		status_text.text = "静候结束。"
+
+
+func _debug_jump_time_of_day(target_hour: int, target_minute: int) -> void:
+	var cur := posmod(world.minutes, CanglingCalendar.MINUTES_PER_DAY)
+	var target := target_hour * 60 + target_minute
+	var delta := posmod(target - cur, CanglingCalendar.MINUTES_PER_DAY)
+	if delta == 0:
+		delta = CanglingCalendar.MINUTES_PER_DAY
+	world.advance_time(delta)
+	board.invalidate_weather()
+	status_text.text = "调试：时间已跳转至 %02d:%02d。" % [target_hour, target_minute]
+	_refresh()
+
+
+func _debug_jump_season(season_index: int) -> void:
+	var sky := CanglingCalendar.at_minute(world.minutes)
+	var cur_day := posmod(int(sky.day_index), CanglingCalendar.DAYS_PER_YEAR)
+	var target_day := season_index * CanglingCalendar.DAYS_PER_SEASON + 15
+	var delta_days := posmod(target_day - cur_day, CanglingCalendar.DAYS_PER_YEAR)
+	if delta_days == 0:
+		delta_days = CanglingCalendar.DAYS_PER_YEAR
+	world.advance_time(delta_days * CanglingCalendar.MINUTES_PER_DAY)
+	weather.sync(CanglingCalendar.at_minute(world.minutes), world.seed, true)
+	board.invalidate_weather()
+	status_text.text = "调试：季节已切换至%s季。" % CanglingCalendar.SEASONS[season_index]
+	_refresh()
+
+
+func _debug_advance(delta_minutes: int, label_text: String) -> void:
+	world.advance_time(delta_minutes)
+	board.invalidate_weather()
+	status_text.text = "调试：时间推进 %s。" % label_text
+	_refresh()
+
+
+func _debug_set_weather(kind: int) -> void:
+	var sky := CanglingCalendar.at_minute(world.minutes)
+	weather.set_override(kind, sky, world.seed, true)
+	if weather.snow_cover <= 0.12:
+		board.clear_footprints()
+	board.invalidate_weather()
+	var name := "自动（随天时季节）" if kind < 0 else weather.label()
+	status_text.text = "调试：天气已切换为「%s」。" % name
+	_refresh()
+
+
+func _debug_toggle_roofs() -> void:
+	board.roofs_enabled = not board.roofs_enabled
+	board.invalidate_weather()
+	status_text.text = "调试：室外自动覆瓦屋顶已%s。" % ("开启" if board.roofs_enabled else "关闭")
+	_refresh()
 
 
 func _close_overlay() -> void:
@@ -477,6 +546,15 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		overlay.offset_right = -14
 		overlay.offset_top = 14
 		overlay.offset_bottom = -14
+	elif kind == "debug":
+		overlay.anchor_left = 0.20
+		overlay.anchor_right = 0.80
+		overlay.anchor_top = 0.09
+		overlay.anchor_bottom = 0.91
+		overlay.offset_left = 0
+		overlay.offset_right = 0
+		overlay.offset_top = 0
+		overlay.offset_bottom = 0
 	else:
 		overlay.anchor_left = 0.26
 		overlay.anchor_right = 0.74
@@ -494,8 +572,8 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 	var heading := HBoxContainer.new()
 	heading.add_theme_constant_override("separation", 10)
 	contents.add_child(heading)
-	var glyphs := {"map": "图", "inventory": "囊", "character": "道", "pause": "卷", "wait": "时", "new": "始"}
-	var titles := {"map": "沧菱城舆图", "inventory": "随身行囊", "character": "修士名帖", "pause": "行旅名录", "wait": "静候天时", "new": "重开行旅"}
+	var glyphs := {"map": "图", "inventory": "囊", "character": "名", "pause": "卷", "wait": "时", "new": "始", "debug": "调"}
+	var titles := {"map": "沧菱城舆图", "inventory": "随身行囊", "character": "行旅名帖", "pause": "行旅名录", "wait": "静候天时", "new": "重开行旅", "debug": "调试菜单（K）"}
 	UI.seal_stamp(heading, glyphs[kind])
 	var title := _label(heading, titles[kind], 21, GOLD)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -515,13 +593,14 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 			contents.add_child(card)
 			var info := _column(card, 8)
 			_stat_row(info, "身份", "凡俗旅人", INK)
-			_stat_row(info, "境界", "引气一层" if world.quest == 4 else "凡人", UI.JADE if world.quest == 4 else GOLD)
 			_stat_row(info, "所在", "%s · %s" % [world.location(world.pos), _floor_name(world.floor)], INK)
+			_stat_row(info, "天时天气", "%s · %s" % [CanglingCalendar.time_label(world.minutes), weather.label()], GOLD)
 			_stat_row(info, "资财", "铜钱 %d 文 · 清露草 %d 株" % [world.coins, world.herbs], GOLD)
 			_stat_row(info, "行囊水壶", "%d / %d 毫升" % [world.bottle_water(), world.bottle_capacity()], SOFT)
 		"pause":
 			_button(contents, "继续行旅", _close_overlay, true)
 			_button(contents, "静候天时…", _show_overlay.bind("wait"))
+			_button(contents, "调试菜单（K）…", _show_overlay.bind("debug"))
 			_button(contents, "记入竹简（存档）", func(): _close_overlay(); _save())
 			_button(contents, "重拾旧录（读档）", func(): _close_overlay(); _load())
 			_button(contents, "另择城势（新旅程）", _show_overlay.bind("new"))
@@ -540,6 +619,82 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 			_button(contents, "生成沧菱城", _new_game.bind(field, error_label), true)
 			field.text_submitted.connect(func(_text: String): _new_game(field, error_label))
 			field.grab_focus()
+		"debug":
+			_build_debug_menu(contents)
+
+
+func _build_debug_menu(contents: VBoxContainer) -> void:
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	contents.add_child(scroll)
+	var body := _column(scroll, 12)
+	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var summary := PanelContainer.new()
+	summary.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_CARD, UI.BORDER_JADE, 4, 12, 8, 1))
+	body.add_child(summary)
+	var scol := _column(summary, 3)
+	_label(scol, "当前天时：%s" % CanglingCalendar.time_label(world.minutes), 14, GOLD)
+	_label(scol, "当前天气：%s（%s） · 积水 %.0f%% · 积雪 %.0f%%" % [
+		weather.label(),
+		"自动" if weather.override_kind < 0 else "锁定",
+		weather.wetness * 100.0, weather.snow_cover * 100.0], 13, SOFT)
+
+	# Time of day presets
+	_label(body, "◈ 时间点跳转", 14, GOLD)
+	var time_grid := GridContainer.new()
+	time_grid.columns = 3
+	time_grid.add_theme_constant_override("h_separation", 8)
+	time_grid.add_theme_constant_override("v_separation", 8)
+	body.add_child(time_grid)
+	for preset in [["拂晓 05:30", 5, 30], ["清晨 07:20", 7, 20], ["正午 12:00", 12, 0],
+			["午后 15:30", 15, 30], ["黄昏 17:45", 17, 45], ["子夜 00:30", 0, 30]]:
+		_button(time_grid, preset[0], func(): _debug_jump_time_of_day(preset[1], preset[2]); _close_overlay())
+
+	var step_row := HBoxContainer.new()
+	step_row.add_theme_constant_override("separation", 8)
+	body.add_child(step_row)
+	for step_spec in [["+1 小时", 60], ["+3 小时", 180], ["+6 小时", 360], ["+1 天", 1440]]:
+		_button(step_row, step_spec[0], func(): _debug_advance(step_spec[1], step_spec[0]); _close_overlay())
+
+	# Season jump
+	_label(body, "◈ 切换季节", 14, GOLD)
+	var season_row := HBoxContainer.new()
+	season_row.add_theme_constant_override("separation", 8)
+	body.add_child(season_row)
+	for i in range(CanglingCalendar.SEASONS.size()):
+		var sname: String = CanglingCalendar.SEASONS[i]
+		_button(season_row, sname + "季", func(): _debug_jump_season(i); _close_overlay())
+
+	# Weather overrides
+	_label(body, "◈ 切换天气（雨天即显积水反光，雪天即覆雪留脚印）", 14, GOLD)
+	var weather_grid := GridContainer.new()
+	weather_grid.columns = 3
+	weather_grid.add_theme_constant_override("h_separation", 8)
+	weather_grid.add_theme_constant_override("v_separation", 8)
+	body.add_child(weather_grid)
+	var weather_specs := [
+		["自动（随季节）", -1],
+		["晴朗", Weather.Kind.CLEAR],
+		["多云阴天", Weather.Kind.CLOUDY],
+		["烟雨（细雨）", Weather.Kind.LIGHT_RAIN],
+		["大雨（深积水）", Weather.Kind.HEAVY_RAIN],
+		["小雪（薄雪）", Weather.Kind.LIGHT_SNOW],
+		["大雪（厚雪脚印）", Weather.Kind.HEAVY_SNOW],
+	]
+	for spec in weather_specs:
+		var is_active: bool = (spec[1] == -1 and weather.override_kind < 0) or (spec[1] >= 0 and weather.override_kind == spec[1])
+		_button(weather_grid, spec[0], func(): _debug_set_weather(spec[1]); _close_overlay(), is_active)
+
+	# Visual options
+	_label(body, "◈ 画面与建筑调试", 14, GOLD)
+	var opt_row := HBoxContainer.new()
+	opt_row.add_theme_constant_override("separation", 8)
+	body.add_child(opt_row)
+	_button(opt_row, "室外自动覆瓦屋顶：%s" % ("开" if board.roofs_enabled else "关"),
+		func(): _debug_toggle_roofs(); _close_overlay(), board.roofs_enabled)
+	_button(opt_row, "清空雪地脚印", func(): board.clear_footprints(); board.queue_redraw(); _close_overlay())
 
 
 func _stat_row(parent: Node, label_text: String, value_text: String, value_color: Color) -> void:
@@ -594,7 +749,7 @@ func _build_atlas(contents: VBoxContainer) -> void:
 
 	side.add_child(UI.hairline())
 	_label(side, "◈ 图例与操作", 13, SOFT)
-	_label(side, "● 金点：城中地标\n● 玉点：修士所在\n滚轮缩放 · 中键拖拽 · 右键前往", 13, UI.INK_DIM, true)
+	_label(side, "● 金点：城中地标\n● 玉点：旅人所在\n滚轮缩放 · 中键拖拽 · 右键前往", 13, UI.INK_DIM, true)
 
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -659,7 +814,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if not event is InputEventKey or not event.pressed:
 		return
 	var key: Key = event.physical_keycode
-	var views := {KEY_M: "map", KEY_I: "inventory", KEY_C: "character"}
+	var views := {KEY_M: "map", KEY_I: "inventory", KEY_C: "character", KEY_K: "debug"}
 	if not event.echo and views.has(key):
 		_show_overlay(views[key])
 		get_viewport().set_input_as_handled()

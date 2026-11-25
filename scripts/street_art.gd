@@ -377,6 +377,94 @@ static func site_landmark(board: Control, p: Vector2i, site: StringName, lit_str
 		character(board, p, site)
 
 
+static func roof_tile(board: Control, cells: Dictionary, roof_tiles: Dictionary, p: Vector2i, seed: int) -> void:
+	var o := _cell_origin(board, p)
+	var s := float(board.cell)
+	var data: Array = cells[p]
+	var multi_story := (int(data[3]) & 4) != 0
+	var north_d := 0
+	while north_d < 12 and roof_tiles.has(p + Vector2i(0, -(north_d + 1))):
+		north_d += 1
+	var south_d := 0
+	while south_d < 12 and roof_tiles.has(p + Vector2i(0, south_d + 1)):
+		south_d += 1
+	var rel := north_d - south_d
+	var is_ridge := absi(rel) <= 1 and (north_d + south_d) >= 2
+	var north_slope := rel < -1
+	var roll := _hash(p, seed ^ 0x29c71)
+	var jitter := (float(roll % 9) - 4.0) * 0.005
+
+	var base := Color(0.20 + jitter, 0.26 + jitter, 0.30 + jitter) if north_slope else Color(0.27 + jitter, 0.34 + jitter, 0.39 + jitter)
+	if multi_story:
+		base = base.darkened(0.08)
+	var rib_dark := base.darkened(0.28)
+	var rib_light := base.lightened(0.14)
+	var ridge_col := Color("637279") if multi_story else Color("58676e")
+	var ridge_hi := Color("88979d")
+
+	# Base slate roof tile plane
+	board.draw_rect(Rect2(o, Vector2(s, s)), base)
+
+	# Horizontal clay tile course steps
+	var courses := 3
+	for c in range(1, courses):
+		var cy := o.y + s * float(c) / float(courses)
+		board.draw_line(Vector2(o.x, cy), Vector2(o.x + s, cy), rib_dark, 1.0)
+
+	# Vertical interlocking Jiangnan clay tile ribs (瓦垄)
+	var ribs := maxi(4, int(round(s / 7.5)))
+	for i in range(ribs):
+		var rx := o.x + s * (float(i) + 0.5) / float(ribs)
+		board.draw_line(Vector2(rx, o.y), Vector2(rx, o.y + s), rib_dark, 1.0)
+		board.draw_line(Vector2(rx + 1.0, o.y), Vector2(rx + 1.0, o.y + s), Color(rib_light.r, rib_light.g, rib_light.b, 0.55), 1.0)
+
+	# Central pitched roof ridge beam (正脊)
+	if is_ridge:
+		var ry := o.y + s * 0.36 if rel <= 0 else o.y + s * 0.10
+		var rh := maxf(3.0, s * 0.24)
+		board.draw_rect(Rect2(o.x, ry, s, rh), ridge_col)
+		board.draw_rect(Rect2(o.x, ry, s, maxf(1.5, rh * 0.32)), ridge_hi)
+		board.draw_rect(Rect2(o.x, ry + rh, s, maxf(2.0, s * 0.08)), Color(0.05, 0.08, 0.10, 0.42))
+
+	# Outer roof edges & Jiangnan pale-plaster gable trims (山墙封边)
+	var n_edge := not roof_tiles.has(p + Vector2i.UP)
+	var s_edge := not roof_tiles.has(p + Vector2i.DOWN)
+	var w_edge := not roof_tiles.has(p + Vector2i.LEFT)
+	var e_edge := not roof_tiles.has(p + Vector2i.RIGHT)
+	var trim := maxf(2.5, s * 0.12)
+	if n_edge:
+		board.draw_rect(Rect2(o.x, o.y, s, trim), ridge_col)
+		board.draw_rect(Rect2(o.x, o.y, s, maxf(1.0, trim * 0.35)), ridge_hi)
+	if s_edge:
+		board.draw_rect(Rect2(o.x, o.y + s - trim, s, trim), rib_dark)
+		board.draw_rect(Rect2(o.x, o.y + s, s, maxf(2.5, s * 0.12)), Color(0.04, 0.06, 0.08, 0.44))
+	if w_edge:
+		board.draw_rect(Rect2(o.x, o.y, trim, s), Color("c4bca8"))
+		board.draw_rect(Rect2(o.x, o.y, maxf(1.2, trim * 0.38), s), Color("58646a"))
+	if e_edge:
+		board.draw_rect(Rect2(o.x + s - trim, o.y, trim, s), Color("b4ac98"))
+		board.draw_rect(Rect2(o.x + s - maxf(1.2, trim * 0.38), o.y, maxf(1.2, trim * 0.38), s), Color("465156"))
+		board.draw_rect(Rect2(o.x + s, o.y, maxf(2.0, s * 0.09), s), Color(0.04, 0.06, 0.08, 0.32))
+
+
+static func snow_footprint(canvas: Control, origin: Vector2, cell_size: float, dir: Vector2,
+		side: float, alpha: float, daylight: float) -> void:
+	if alpha <= 0.02:
+		return
+	var angle := dir.angle() if dir.length_squared() > 0.01 else 0.0
+	var perp := Vector2(-sin(angle), cos(angle))
+	var center := origin + Vector2.ONE * (cell_size * 0.5) + perp * (side * cell_size * 0.13)
+	var length := maxf(3.2, cell_size * 0.21)
+	var width := maxf(2.0, cell_size * 0.11)
+	var bright := lerpf(0.28, 1.0, daylight)
+	var indent := Color(0.32 * bright, 0.43 * bright, 0.56 * bright, 0.52 * alpha)
+	var rim := Color(0.92 * bright, 0.96 * bright, 1.0 * bright, 0.36 * alpha)
+	canvas.draw_set_transform(center, angle, Vector2.ONE)
+	canvas.draw_rect(Rect2(Vector2(-length * 0.5, -width * 0.5) + Vector2(0.8, 0.8), Vector2(length, width)), rim)
+	canvas.draw_rect(Rect2(Vector2(-length * 0.5, -width * 0.5), Vector2(length, width)), indent)
+	canvas.draw_set_transform(Vector2.ZERO)
+
+
 static func character(board: Control, p: Vector2i, role: StringName, target: Control = null) -> void:
 	var dest: Control = target if target != null else board
 	var masking := dest.has_method("surface_id")

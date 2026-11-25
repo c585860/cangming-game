@@ -34,6 +34,11 @@ vec3 shade_river(vec3 lit, vec2 world, vec2 local, float water, float sun, float
 	reflected += sun_color * sun * sun_energy * river_glint(normal, eye, sun_ray) * 1.18;
 	reflected += vec3(0.64, 0.79, 1.0) * moon * moon_energy * river_glint(normal, eye, moon_ray) * 1.50;
 	reflected += lamp * smoothstep(-0.06, 0.24, normal.y) * 0.26;
+	// Raindrop concentric ripples across the river during rain.
+	if (rain_level > 0.04) {
+		float r_rip = rain_ripples(world * 1.15, TIME);
+		reflected += (sky_reflection + lamp * 0.75 + vec3(0.22)) * r_rip * rain_level * 0.28;
+	}
 	// Wet shore detail only on the water side, with breaks that travel downstream.
 	float edge_detail = 1.0 - smoothstep(0.05, 0.55, abs(edge - 0.26));
 	float streak = smoothstep(0.34, 0.78, noise2(world * vec2(1.39, 2.60) - vec2(0.12, 0.94) * TIME));

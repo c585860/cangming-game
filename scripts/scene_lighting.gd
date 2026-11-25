@@ -32,6 +32,7 @@ var air := ShaderMaterial.new()
 var layer := ColorRect.new()
 var active_emitters: Dictionary = {}
 var current_lamp_power := 0.0
+var current_daylight := 1.0
 
 
 func build(board: Control) -> void:
@@ -117,7 +118,7 @@ func set_geometry(cells: Dictionary, area: Rect2i, layers: int, z: int, seed: in
 
 
 func update_surfaces(cells: Dictionary, props: Rect2i, origin: Vector2i, screen: Vector2, cell: int, seed: int,
-		season: String = "spring", characters: Array = []) -> void:
+		season: String = "spring", characters: Array = [], roof_tiles: Dictionary = {}) -> void:
 	var resolution := Vector2i(screen.ceil()).max(Vector2i(2, 2))
 	if mask_view.size != resolution:
 		mask_view.size = resolution
@@ -129,6 +130,7 @@ func update_surfaces(cells: Dictionary, props: Rect2i, origin: Vector2i, screen:
 	surface_mask.seed = seed
 	surface_mask.season = season
 	surface_mask.characters = characters
+	surface_mask.roof_tiles = roof_tiles
 	surface_mask.queue_redraw()
 	mask_view.render_target_update_mode = SubViewport.UPDATE_ONCE
 
@@ -140,7 +142,13 @@ func update_emitters(cells: Dictionary, area: Rect2i, region: Rect2i, sites: Dic
 	active_emitters = data[2]
 
 
-func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Dictionary, z: int) -> void:
+func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Dictionary, z: int, weather: RefCounted = null) -> void:
+	var rain_level := float(weather.rain) if weather != null else 0.0
+	var snow_level := float(weather.snow) if weather != null else 0.0
+	var cloud_cover := float(weather.cloud) if weather != null else 0.0
+	var wetness := float(weather.wetness) if weather != null else 0.0
+	var snow_cover := float(weather.snow_cover) if weather != null else 0.0
+
 	var image := Image.create_empty(area.size.x, area.size.y, false, Image.FORMAT_RGBA8)
 	image.fill(Color(0.0, 0.0, 0.0, 0.0))
 	for p: Vector2i in tints:
@@ -152,6 +160,7 @@ func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Diction
 	if direction.length_squared() < 0.01:
 		direction = Vector2.DOWN
 	var strength := smoothstep(0.0, deg_to_rad(6.0), altitude) * (0.40 + 0.26 * sin(maxf(altitude, 0.0)))
+	strength *= 1.0 - cloud_cover * 0.78
 	if z < 0:
 		strength = 0.0
 	var sunlight_enabled := strength > 0.0001
@@ -193,7 +202,7 @@ func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Diction
 	var moon_direction: Vector2 = sky.moon_direction
 	var moon_rise := maxf(0.016, tan(clampf(moon_altitude, 0.0, deg_to_rad(89.0))))
 	var moon_energy := float(sky.moonlight) * 1.35 * smoothstep(0.0, deg_to_rad(7.0), moon_altitude)
-	moon_energy *= 1.0 - smoothstep(deg_to_rad(-6.0), 0.0, altitude)
+	moon_energy *= (1.0 - smoothstep(deg_to_rad(-6.0), 0.0, altitude)) * (1.0 - cloud_cover * 0.65)
 	if z != 0:
 		moon_energy = 0.0
 	var moon_active := moon_energy > 0.0001 && not sunlight_enabled
@@ -214,11 +223,24 @@ func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Diction
 	air.set_shader_parameter("light_span", Vector2(span))
 	air.set_shader_parameter("light_margin", float(LIGHT_MARGIN))
 	var sky_level := Lighting._natural_light(sky)
-	var sky_strength := smoothstep(4.3, 85.0, sky_level) * 0.86 if z >= 0 else 0.0
+	var sky_strength := smoothstep(4.3, 85.0, sky_level) * (0.86 - 0.16 * cloud_cover) if z >= 0 else 0.0
+	current_daylight = clampf(sky_strength * 1.35, 0.0, 1.0)
 	air.set_shader_parameter("sky_energy", sky_strength)
 	air.set_shader_parameter("indoor_daylight", sky_strength * smoothstep(deg_to_rad(-6.0), deg_to_rad(2.0), altitude))
-	air.set_shader_parameter("sky_color", Vector3(0.80, 0.90, 1.0).lerp(Vector3(1.0, 0.78, 0.57), float(sky.sun_warmth) * 0.40))
-	current_lamp_power = 1.0 if z < 0 else 1.0 - smoothstep(5.0, 18.0, sky_level)
+	var base_sky := Vector3(0.80, 0.90, 1.0).lerp(Vector3(1.0, 0.78, 0.57), float(sky.sun_warmth) * 0.40 * (1.0 - cloud_cover * 0.7))
+	base_sky = base_sky.lerp(Vector3(0.74, 0.83, 0.88), rain_level * 0.55)
+	base_sky = base_sky.lerp(Vector3(0.86, 0.92, 0.98), snow_level * 0.50)
+	air.set_shader_parameter("sky_color", base_sky)
+	# Compute outdoor ambient color for roof tiles (mirrors Lighting.calculate_ambient).
+	var out_level := maxf(sky_level - Lighting.AMBIENT_LOW, 0.0)
+	var out_day := 1.0 - exp(-out_level / 56.0)
+	var out_twilight := 1.0 - exp(-out_level / 9.0)
+	var daylight_tint := Color.WHITE.lerp(Color(1.0, 0.78, 0.57), float(sky.sun_warmth) * 0.75 * (1.0 - cloud_cover * 0.7))
+	var out_hue := Color(0.74, 0.81, 1.0).lerp(daylight_tint, out_twilight)
+	var out_bright := (0.23 + out_twilight * 0.17 + out_day * 0.42) * (1.0 - cloud_cover * 0.14)
+	air.set_shader_parameter("outdoor_ambient", Vector3(out_hue.r * out_bright, out_hue.g * out_bright, out_hue.b * out_bright))
+	# Rainy overcast turns town lanterns on earlier at dusk.
+	current_lamp_power = 1.0 if z < 0 else clampf((1.0 - smoothstep(5.0, 18.0 + cloud_cover * 18.0, sky_level)) + rain_level * 0.18, 0.0, 1.0)
 	air.set_shader_parameter("lamp_power", current_lamp_power)
 	air.set_shader_parameter("sun_ray", sun_ray)
 	air.set_shader_parameter("sun_color", sun_color)
@@ -227,8 +249,14 @@ func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Diction
 	air.set_shader_parameter("moon_energy", moon_energy if moon_active else 0.0)
 	var season_mist := 1.15 if sky.season == "春" else 0.82 if sky.season == "夏" else 1.05 if sky.season == "秋" else 0.92
 	var season_tint := Vector3(0.98, 1.02, 0.99) if sky.season == "春" else Vector3(1.01, 1.01, 0.97) if sky.season == "夏" else Vector3(1.05, 0.98, 0.90) if sky.season == "秋" else Vector3(0.92, 0.97, 1.05)
+	season_tint = season_tint.lerp(Vector3(0.91, 0.96, 1.02), rain_level * 0.45)
+	season_tint = season_tint.lerp(Vector3(0.93, 0.97, 1.04), snow_cover * 0.45)
 	air.set_shader_parameter("season_tint", season_tint)
-	air.set_shader_parameter("mist_time", (0.28 + 0.68 * morning + 0.37 * evening) * season_mist if z == 0 else 0.0)
+	air.set_shader_parameter("mist_time", ((0.28 + 0.68 * morning + 0.37 * evening) * season_mist + 0.48 * rain_level + 0.22 * snow_level) if z == 0 else 0.0)
+	air.set_shader_parameter("rain_level", rain_level)
+	air.set_shader_parameter("wetness", wetness)
+	air.set_shader_parameter("snow_cover", snow_cover)
+	air.set_shader_parameter("cloud_cover", cloud_cover)
 
 
 func set_view(area: Rect2i, visible: Rect2i, screen: Vector2, cell: int, player: Vector2i) -> void:
