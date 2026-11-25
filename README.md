@@ -1,6 +1,7 @@
-# 沧菱城 Cangling City
+# 沧溟修真界
 
 独立的修真题材回合制城市探索游戏，使用 Godot 4.5 与 C++ GDExtension 开发。
+基于
 
 **项目作者／来源：c585860**  
 **交流 QQ 群：1001568760**  
@@ -36,7 +37,6 @@ $env:GODOT_EXE = "C:\Tools\Godot\Godot_v4.5.1-stable_win64.exe"
 .\play.cmd
 ```
 
-当前扩展配置面向 Windows x86_64。仓库不上传引擎、编译产物、Godot 缓存、个人存档或本地测试目录。
 
 ## 目录
 
