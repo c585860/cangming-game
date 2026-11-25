@@ -122,7 +122,7 @@ static func ground(board: Control, cells: Dictionary, p: Vector2i, seed: int, se
 static func walls(board: Control, cells: Dictionary, p: Vector2i, seed: int, _season := "spring",
 		night_warmth := 0.0) -> void:
 	var tile: String = cells[p][0]
-	if tile in ["#", "w", "O", "D", "o", "f"]:
+	if tile in ["#", "w", "O", "%", "D", "o", "f"]:
 		ChineseArch.draw_wall_segment(board, cells, p, seed, night_warmth)
 
 
@@ -189,7 +189,8 @@ static func _draw_bridge_rails(board: Control, cells: Dictionary, p: Vector2i, e
 
 
 static func detail(board: Control, world: RefCounted, cells: Dictionary, p: Vector2i, seed: int,
-		season := "spring", emitters: Dictionary = {}, lit_strength := 0.0) -> void:
+		season := "spring", emitters: Dictionary = {}, lit_strength := 0.0,
+		props_map: Dictionary = {}, use_props_map := false) -> void:
 	var tile: String = cells[p][0]
 	var roll := _hash(p, seed)
 	var masking := board.has_method("surface_id")
@@ -224,7 +225,7 @@ static func detail(board: Control, world: RefCounted, cells: Dictionary, p: Vect
 		board.draw_circle(o + Vector2(s * 0.52, s * 0.33), maxf(1.4, s * 0.065),
 			Color(1.0, 0.86, 0.45, 0.78 + 0.22 * lit_strength))
 	if world != null and tile not in [" ", "F"]:
-		var item: String = world.prop_at(p)
+		var item: String = String(props_map.get(p, "")) if use_props_map else String(world.prop_at(p))
 		if not item.is_empty():
 			# Beds already render integrated Chinese pillows & brocade quilts; keep bedding lootable without smearing flat western sprites over the bed.
 			if not (tile == "b" and item in ["pillow", "blanket", "sheet_cotton", "quilt"]):

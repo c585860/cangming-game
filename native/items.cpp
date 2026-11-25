@@ -46,6 +46,10 @@ Dictionary make_item_dict(int i, int count) {
     row["is_food"] = (def.category == ItemCategory::Food);
     row["is_drink"] = (def.category == ItemCategory::Drink);
     row["is_clothing"] = (def.category == ItemCategory::Clothing);
+    row["is_tool"] = (def.category == ItemCategory::Tool);
+    row["is_book"] = (def.category == ItemCategory::Book);
+    row["is_medical"] = (def.category == ItemCategory::Medical);
+    row["bash_dmg"] = def.bash_dmg;
     row["weight_g"] = def.weight_g;
     row["volume_ml"] = def.volume_ml;
     row["kcal"] = def.kcal;
@@ -110,6 +114,70 @@ String CanglingWorld::prop_at(Vector2i p) {
         if (count[i]) return cat[i].tile;
     }
     return {};
+}
+
+Dictionary CanglingWorld::props_in_rect(Rect2i area) {
+    Dictionary out;
+    const Rect2i clipped = area.intersection(Rect2i(0, 0, city_size, city_size));
+    if (clipped.size.x <= 0 || clipped.size.y <= 0) return out;
+    const SectorGridSnapshot snap = city.snapshot_sectors(clipped);
+    const auto &cat = item_catalog();
+    const bool allow_spawn = (city.layout >= 2);
+    const int x0 = clipped.position.x;
+    const int y0 = clipped.position.y;
+    const int x1 = x0 + clipped.size.x;
+    const int y1 = y0 + clipped.size.y;
+
+    for (int y = y0; y < y1; ++y) {
+        const int sy = y / sector_size;
+        const int ly = y - sy * sector_size;
+        for (int x = x0; x < x1; ++x) {
+            const Vector2i p(x, y);
+            const int64_t k = key(p, floor);
+            char tile = ' ';
+            char surf = '\0';
+            const int sx = x / sector_size;
+            const Block *blk = snap.at(sx, sy);
+            const int lidx = ly * sector_size + (x - sx * sector_size);
+            if (blk) {
+                tile = level_tiles(*blk, floor)[lidx];
+                surf = level_surfaces(*blk, floor)[lidx];
+            }
+            if (!tile_overrides.empty()) {
+                if (const auto ov = tile_overrides.find(k); ov != tile_overrides.end()) {
+                    tile = ov->second;
+                }
+            }
+            if ((tile == 'D' || tile == 'w') && !doors.empty() && doors.count(k)) {
+                tile = (tile == 'D') ? 'o' : 'O';
+            }
+            if (tile == ' ' || tile == 'F') continue;
+            if (is_openable_container(tile) && open_containers.count(k) == 0 && tile != 'r') continue;
+
+            // Fast skip: tiles with no stored_items and non-spawning terrain (grass, roads, walls, water, floor)
+            const auto sit = stored_items.find(k);
+            const bool has_stored = (sit != stored_items.end());
+            const bool can_spawn_here = allow_spawn && (collected_props.count(k) == 0) &&
+                (tile == 'b' || tile == 't' || tile == 'l' || tile == 'k' || tile == 'r' ||
+                 tile == 'c' || tile == 'C' || tile == 'K' || tile == 'q' || tile == 'S' ||
+                 tile == 'h' || tile == 'u');
+            if (!has_stored && !can_spawn_here) continue;
+
+            ItemCounts counts{};
+            if (has_stored) counts = sit->second;
+            if (can_spawn_here) {
+                const ItemCounts spawned = spawn_contextual_items(tile, surf, seed, p, floor);
+                for (int i = 0; i < item_types; ++i) counts[i] += spawned[i];
+            }
+            for (int i = 0; i < item_types; ++i) {
+                if (counts[i] > 0) {
+                    out[p] = String(cat[i].tile);
+                    break;
+                }
+            }
+        }
+    }
+    return out;
 }
 
 Array CanglingWorld::inventory() const {

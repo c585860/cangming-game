@@ -12,7 +12,7 @@ const char *fixture(char tile) {
         case 'C': return "樟木货箱"; case 'k': return "长案柜台"; case 'u': return "青花水盆";
         case 'q': return "坐凳圈椅"; case 'r': return "中式书架"; case 'l': return "雕花书案";
         case 'h': return "青砖土灶"; case 'a': return "大陶缸"; case 'f': return "木篱";
-        case 'g': return "花木"; case 'w': case 'O': return "雕花木窗";
+        case 'g': return "花木"; case 'w': case 'O': return "雕花木窗"; case '%': return "残破木窗";
         case 'K': return "百子展柜"; case 'S': return "红木春凳"; case 'P': return "青花盆景";
         case 'F': return "顶箱衣柜"; case 'Y': return "行道树"; case 'L': return "宫灯柱";
         default: return nullptr;
@@ -60,7 +60,18 @@ Dictionary CanglingWorld::actions_at(Vector2i p) {
 
     if (tile == 'w' || tile == 'O') {
         out["window"] = text(tile == 'O' ? "关窗 (c)" : "开窗 (o)");
-        if (tile == 'O' && p != pos) out["walk"] = text("翻越窗户");
+    }
+    if (is_climbable_tile(tile) && p != pos) {
+        out["climb"] = text("翻越 (e)");
+    }
+    if (is_smashable_tile(tile) && p != pos) {
+        out["smash"] = text("砸碎 (s)");
+    }
+    if (tile == 'h') {
+        out["warm_hearth"] = text("在灶台烤火取暖");
+    }
+    if (tile == 'u') {
+        out["wash"] = text("洗漱净面解乏");
     }
     if (is_openable_container(tile)) {
         out["container"] = text(is_container_open(p) ? "查看柜内物品 (e)" : "打开并查看 (o/e)");
@@ -108,6 +119,22 @@ String CanglingWorld::interact(Vector2i p, const String &action) {
     }
     if (action == "window") {
         return tile == 'O' ? close_at(p) : open_at(p);
+    }
+    if (action == "smash") {
+        return smash_at(p);
+    }
+    if (action == "climb") {
+        return climb_at(p);
+    }
+    if (action == "warm_hearth") {
+        rest_minutes(10, false);
+        return text("你在青砖土灶旁烤火暖手，寒意与倦乏顿时消散不少。");
+    }
+    if (action == "wash") {
+        char_state.fatigue = std::max(0.0, char_state.fatigue - 6.0);
+        char_state.morale = std::min(50, char_state.morale + 3);
+        advance_time(3);
+        return text("你掬起青花盆里的凉水洗漱净面，顿时神清气爽。");
     }
     if (action == "close_container") {
         return close_at(p);

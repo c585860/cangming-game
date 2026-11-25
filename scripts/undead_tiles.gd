@@ -15,8 +15,30 @@ static var _sheets: Array[Dictionary] = []
 static var _sprites: Dictionary = {}
 static var _decoded: Dictionary = {}
 static var _page_stamps: Dictionary = {}
+static var _pinned_pages: Dictionary = {}
 static var _frame_id := 0
 static var _attempted := false
+static var _prewarmed := false
+
+const GAME_TILE_IDS := [
+	# Ground & terrain
+	"t_grass", "t_grass_long", "t_stone_road", "t_dirt", "t_sand", "t_floor", "t_carpet_red",
+	"t_rock_floor", "t_stone_masonry_floor", "t_dock", "t_water_moving_dp", "t_water_moving_sh", "t_pillar",
+	# Trees, shrubs & water flora
+	"t_tree_willow", "t_tree_maple", "t_tree_pine", "t_shrub", "t_shrub_lilac", "t_shrub_blackberry",
+	"f_cattails", "f_lilypad", "f_lotus",
+	# Characters & worn overlays
+	"player_male", "overlay_worn_straw_hat", "overlay_worn_bandana", "overlay_worn_tunic",
+	"overlay_worn_pants", "overlay_worn_robe", "overlay_worn_cloak", "overlay_worn_coat_winter",
+	"overlay_worn_boots", "overlay_worn_bastsandals", "overlay_worn_backpack", "overlay_worn_mbag",
+	# All 50 SUS items
+	"sheet_cotton", "pillow", "blanket", "quilt", "straw_hat", "bandana", "tunic", "longshirt",
+	"pants", "robe", "cloak", "coat_winter", "boots", "bastsandals", "backpack", "mbag",
+	"flatbread", "bread", "deluxe_rice", "jerky", "apple", "pear", "cake2", "tea", "water_clean",
+	"brew_fruit_wine", "tea_raw", "mayapple", "bottle_glass", "book_archery", "paper", "rope_6",
+	"knife_butcher", "chopsticks", "bowl_clay", "pot", "teapot", "salt", "noodles_fast", "hatchet",
+	"crowbar", "oil_lamp", "lighter", "2x4", "rag", "ceramic_shard", "bandages", "candle", "towel", "soap",
+]
 
 
 static func _load_catalog() -> void:
@@ -108,13 +130,55 @@ static func finish_frame() -> void:
 	_frame_id += 1
 
 
-static func trim_unused_pages(max_age_frames := 480) -> int:
+static func _collect_layer_indices(value: Variant, out: Array[int]) -> void:
+	if value is int:
+		if value >= 0:
+			out.append(value)
+	elif value is Array:
+		for item in value:
+			if item is Dictionary and item.has("sprite"):
+				_collect_layer_indices(item["sprite"], out)
+			else:
+				_collect_layer_indices(item, out)
+
+
+static func prewarm_game_sprites() -> void:
+	if _prewarmed:
+		return
+	_prewarmed = true
+	if not _attempted:
+		_load_catalog()
+	var indices: Array[int] = []
+	const SEASONS := ["", "spring", "summer", "autumn", "winter"]
+	for base_id: String in GAME_TILE_IDS:
+		for s: String in SEASONS:
+			var resolved := base_id if s.is_empty() else (base_id + "_season_" + s)
+			if not _tiles.has(resolved):
+				continue
+			var tile: Dictionary = _tiles[resolved]
+			_collect_layer_indices(tile["bg"], indices)
+			_collect_layer_indices(tile["fg"], indices)
+			if tile.has("joins"):
+				for sub: Dictionary in tile["joins"].values():
+					_collect_layer_indices(sub["bg"], indices)
+					_collect_layer_indices(sub["fg"], indices)
+	for idx in indices:
+		_sprite(idx)
+	# Pin all prewarmed pages so trim_unused_pages never evicts them and never re-decodes 4MB PNGs mid-walk!
+	for key in _page_stamps:
+		_pinned_pages[key] = true
+	_decoded.clear()
+
+
+static func trim_unused_pages(max_age_frames := 1800) -> int:
 	var freed := 0
 	for s_idx in range(_sheets.size()):
 		var pages: Dictionary = _sheets[s_idx]["pages"]
 		var stale: Array[int] = []
 		for page_num: int in pages:
 			var stamp_key := (s_idx << 16) | (page_num & 0xffff)
+			if _pinned_pages.has(stamp_key):
+				continue
 			var last_used: int = int(_page_stamps.get(stamp_key, 0))
 			if _frame_id - last_used >= max_age_frames:
 				stale.append(page_num)

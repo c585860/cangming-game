@@ -10,18 +10,15 @@ const CARDINAL := [Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.DOWN]
 
 
 static func _natural_light(sky: Dictionary) -> float:
+	# Broad, continuous astronomical twilight curve (no abrupt dawn/dusk cliff):
+	# -18°..-6° nautical twilight (3.7 -> 13), -6°..+5° civil/golden hour (13 -> 48), +5°..+45° full day (48 -> 122).
 	var angle := rad_to_deg(float(sky.sun_altitude))
-	var solar := 0.0
-	if angle > -1.0:
-		solar = minf(125.0, 60.0 + (angle + 1.0) * 65.0 / 61.0)
-	elif angle > -6.0:
-		solar = 5.0 + 55.0 * (pow(2.0, (angle + 6.0) / 5.0) - 1.0)
-	elif angle > -12.0:
-		solar = 3.7 + 1.3 * (pow(2.0, (angle + 12.0) / 6.0) - 1.0)
-	elif angle > -18.0:
-		solar = 3.7 * (pow(2.0, (angle + 18.0) / 6.0) - 1.0)
-	var moon := 7.0 * float(sky.moon_illumination) * float(sky.moon_above_horizon)
-	return maxf(AMBIENT_MINIMAL, solar + moon)
+	var nautical := smoothstep(-18.0, -5.0, angle)
+	var civil := smoothstep(-7.5, 6.0, angle)
+	var daytime := smoothstep(2.0, 42.0, angle)
+	var solar := 9.5 * nautical + 36.0 * civil + 74.0 * daytime
+	var moon := 7.5 * float(sky.moon_illumination) * float(sky.moon_above_horizon) * (1.0 - civil * 0.75)
+	return maxf(AMBIENT_MINIMAL, AMBIENT_LOW + solar + moon)
 
 
 static func enclosed(cell: Array) -> bool:
@@ -90,7 +87,8 @@ static func _ray_transmission(cells: Dictionary, start: Vector2i, end: Vector2i)
 
 static func calculate_ambient(cells: Dictionary, region: Rect2i, sky: Dictionary, z: int) -> Dictionary:
 	var outdoor := _natural_light(sky)
-	var inside := AMBIENT_DIM * 0.8 if z >= 0 and outdoor > AMBIENT_LIT else AMBIENT_LOW
+	var inside_blend := smoothstep(4.5, 26.0, outdoor)
+	var inside := lerpf(AMBIENT_LOW, AMBIENT_DIM * 0.8, inside_blend) if z >= 0 else AMBIENT_LOW
 	var daylight_tint := Color.WHITE.lerp(Color(1.0, 0.78, 0.57), float(sky.sun_warmth) * 0.75)
 	var tints := {}
 	for y in range(region.position.y, region.end.y):

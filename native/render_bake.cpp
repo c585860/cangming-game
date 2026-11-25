@@ -60,12 +60,13 @@ inline float tile_height(char t) {
 }
 
 inline bool is_wall_tile(char t) {
-    return t == '#' || t == 'D' || t == 'o' || t == 'w' || t == 'O';
+    return t == '#' || t == 'D' || t == 'o' || t == 'w' || t == 'O' || t == '%';
 }
 
 inline float portal_weight(char t) {
     if (t == 'w') return 0.48f;
     if (t == 'O') return 0.61f;
+    if (t == '%') return 0.68f;
     if (t == 'o') return 0.73f;
     return 0.0f;
 }
@@ -348,9 +349,9 @@ godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<
                     if (t == '#' || t == 'D') {
                         height = (layer == 0 && surf == 'G') ? 0.95f : 2.5f;
                         kind = 1;
-                    } else if ((t == 'w' || t == 'O' || t == 'o') && !(layer == 0 && surf == 'G')) {
+                    } else if ((t == 'w' || t == 'O' || t == '%' || t == 'o') && !(layer == 0 && surf == 'G')) {
                         height = 2.5f;
-                        kind = (t == 'w') ? 2 : (t == 'O' ? 3 : 4);
+                        kind = (t == 'w') ? 2 : ((t == 'O' || t == '%') ? 3 : 4);
                         axis = static_cast<float>(aperture_normal_xy(x, y, layer).x);
                     } else if (height > 0.0f) {
                         if (t == 'L') kind = 8;
@@ -380,7 +381,7 @@ godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<
                     mat_ptr[m_off + 2] = 0;
                 } else {
                     RGB col = kWood;
-                    if (t0 == '#' || t0 == 'D' || t0 == 'w' || t0 == 'O') {
+                    if (t0 == '#' || t0 == 'D' || t0 == 'w' || t0 == 'O' || t0 == '%') {
                         col = (surf == 'B') ? kStone : (surf == 'N' ? kWood : kPlaster);
                     } else if (t0 == 'W' || t0 == '~') {
                         col = (t0 == '~') ? RGB{0.22f, 0.72f, 0.78f} : RGB{0.18f, 0.56f, 0.72f};
@@ -685,8 +686,8 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
     const SectorGridSnapshot snap = city.snapshot_sectors(area);
     constexpr float kAmbientLow = 3.5f;
     constexpr float kAmbientDim = 5.0f;
-    constexpr float kAmbientLit = 10.0f;
-    const float inside = (z >= 0 && outdoor_light > kAmbientLit) ? (kAmbientDim * 0.8f) : kAmbientLow;
+    const float inside_blend = smoothstep_f(4.5f, 26.0f, outdoor_light);
+    const float inside = (z >= 0) ? (kAmbientLow + (kAmbientDim * 0.8f - kAmbientLow) * inside_blend) : kAmbientLow;
     const float warm = sun_warmth * 0.75f;
     const RGB day_tint{
         1.0f + (1.0f - 1.0f) * warm,
@@ -721,7 +722,7 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
                         const bool ext_enc = (ext_flags & 1u) != 0u;
                         const bool ext_sky = (ext_flags & 0xAAu) == 0u;
                         if (ext_sky && !ext_enc && !is_wall_tile(ext_tile)) {
-                            const float fill = (tile == 'w' || tile == 'O') ? 0.30f : 0.64f;
+                            const float fill = (tile == 'w' || tile == 'O' || tile == '%') ? 0.30f : 0.64f;
                             natural = inside + (outdoor_light - inside) * fill;
                         }
                     }

@@ -28,6 +28,12 @@ var bounce_source_view: SubViewport
 var bounce_source_rect: ColorRect
 var mask_view: SubViewport
 var surface_mask: SurfaceMask
+var mask_back_view: SubViewport
+var surface_mask_back: SurfaceMask
+var _mask_preloading := false
+var _mask_cursor_y := 0
+var _mask_end_y := 0
+var _mask_first := true
 var bounce := ShaderMaterial.new()
 var bounce_source := ShaderMaterial.new()
 var solar := ShaderMaterial.new()
@@ -43,6 +49,26 @@ var _sunlight_enabled := false
 var _moon_active := false
 var _near_origin := Vector2.ZERO
 var _near_wind_accum := 0.0
+
+# Smoothly interpolated 60 FPS lighting targets so dawn/dusk/wait transitions glide seamlessly
+var _smooth_init := false
+var _cur_sun_energy := 0.0
+var _tgt_sun_energy := 0.0
+var _cur_sky_energy := 0.0
+var _tgt_sky_energy := 0.0
+var _cur_indoor_day := 0.0
+var _tgt_indoor_day := 0.0
+var _cur_lamp_power := 0.0
+var _tgt_lamp_power := 0.0
+var _cur_moon_energy := 0.0
+var _tgt_moon_energy := 0.0
+var _cur_sun_color := Vector3(1.0, 0.94, 0.83)
+var _tgt_sun_color := Vector3(1.0, 0.94, 0.83)
+var _cur_sky_color := Vector3(0.80, 0.90, 1.0)
+var _tgt_sky_color := Vector3(0.80, 0.90, 1.0)
+var _cur_out_amb := Vector3(0.45, 0.50, 0.54)
+var _tgt_out_amb := Vector3(0.45, 0.50, 0.54)
+var _tgt_roof_light := Color(0.85, 0.88, 0.90)
 
 # Reusable GPU textures to avoid allocation spikes on region rebuilds.
 var _tex_geometry: ImageTexture
@@ -120,6 +146,14 @@ func build(board: Control) -> void:
 	surface_mask = SurfaceMask.new()
 	mask_view.add_child(surface_mask)
 
+	mask_back_view = SubViewport.new()
+	mask_back_view.disable_3d = true
+	mask_back_view.transparent_bg = true
+	mask_back_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	board.add_child(mask_back_view)
+	surface_mask_back = SurfaceMask.new()
+	mask_back_view.add_child(surface_mask_back)
+
 	# No BackBufferCopy needed: atmosphere.gdshader samples world_cache.view directly on the GPU!
 	air.shader = AirShader
 	air.set_shader_parameter("solar_map", solar_view.get_texture())
@@ -195,10 +229,14 @@ func set_geometry(cells: Dictionary, area: Rect2i, layers: int, z: int, seed: in
 
 func update_surfaces_cached(cells: Dictionary, cache_rect: Rect2i, props: Rect2i,
 		cell: int, seed: int, season: String = "spring", characters: Array = []) -> void:
+	_mask_preloading = false
 	var resolution := (cache_rect.size * cell).max(Vector2i(2, 2))
 	if mask_view.size != resolution:
 		mask_view.size = resolution
 		surface_mask.size = Vector2(resolution)
+	if mask_back_view != null and mask_back_view.size != resolution:
+		mask_back_view.size = resolution
+		surface_mask_back.size = Vector2(resolution)
 	surface_mask.view_origin = cache_rect.position
 	surface_mask.cam_px_offset = Vector2.ZERO
 	surface_mask.cell = cell
@@ -207,8 +245,60 @@ func update_surfaces_cached(cells: Dictionary, cache_rect: Rect2i, props: Rect2i
 	surface_mask.seed = seed
 	surface_mask.season = season
 	surface_mask.characters = characters
+	surface_mask.slice_y0 = 0
+	surface_mask.slice_y1 = 0
+	surface_mask.draw_chars = true
+	mask_view.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE
 	surface_mask.queue_redraw()
 	mask_view.render_target_update_mode = SubViewport.UPDATE_ONCE
+
+
+func begin_surface_preload(cells: Dictionary, cache_rect: Rect2i, props: Rect2i,
+		cell: int, seed: int, season: String = "spring", characters: Array = []) -> void:
+	var resolution := (cache_rect.size * cell).max(Vector2i(2, 2))
+	if mask_back_view.size != resolution:
+		mask_back_view.size = resolution
+		surface_mask_back.size = Vector2(resolution)
+	surface_mask_back.view_origin = cache_rect.position
+	surface_mask_back.cam_px_offset = Vector2.ZERO
+	surface_mask_back.cell = cell
+	surface_mask_back.cells = cells
+	surface_mask_back.props = props
+	surface_mask_back.seed = seed
+	surface_mask_back.season = season
+	surface_mask_back.characters = characters
+	_mask_cursor_y = props.position.y
+	_mask_end_y = props.end.y
+	_mask_first = true
+	_mask_preloading = true
+
+
+func step_surface_preload_slice(slice_rows := 18) -> bool:
+	if not _mask_preloading:
+		return true
+	var y1 := mini(_mask_cursor_y + slice_rows, _mask_end_y)
+	surface_mask_back.slice_y0 = _mask_cursor_y
+	surface_mask_back.slice_y1 = y1
+	surface_mask_back.draw_chars = (y1 >= _mask_end_y)
+	mask_back_view.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE if _mask_first else SubViewport.CLEAR_MODE_NEVER
+	surface_mask_back.queue_redraw()
+	mask_back_view.render_target_update_mode = SubViewport.UPDATE_ONCE
+	_mask_first = false
+	_mask_cursor_y = y1
+	if _mask_cursor_y >= _mask_end_y:
+		_mask_preloading = false
+		return true
+	return false
+
+
+func commit_surface_preload() -> void:
+	var tmp_vp := mask_view
+	mask_view = mask_back_view
+	mask_back_view = tmp_vp
+	var tmp_sm := surface_mask
+	surface_mask = surface_mask_back
+	surface_mask_back = tmp_sm
+	air.set_shader_parameter("surface_mask", mask_view.get_texture())
 
 
 func update_emitters_baked(baked: Dictionary, area: Rect2i) -> void:
@@ -256,11 +346,12 @@ func tick_near_cascade(area: Rect2i, player_visual: Vector2, wind_time: float, d
 
 
 func update_light_baked(ambient_bytes: PackedByteArray, area: Rect2i, visible: Rect2i, sky: Dictionary,
-		z: int, weather: RefCounted = null, player_visual := Vector2.ZERO, wind_time := 0.0) -> void:
+		z: int, weather: RefCounted = null, player_visual := Vector2.ZERO, wind_time := 0.0,
+		refresh_rays := true) -> void:
 	var img := Image.create_from_data(area.size.x, area.size.y, false, Image.FORMAT_RGBA8, ambient_bytes)
 	_tex_ambient = _upload_tex(_tex_ambient, img)
 	air.set_shader_parameter("ambient_map", _tex_ambient)
-	_update_light_common(area, visible, sky, z, weather, player_visual, wind_time)
+	_update_light_common(area, visible, sky, z, weather, player_visual, wind_time, refresh_rays)
 
 
 func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Dictionary, z: int, weather: RefCounted = null,
@@ -272,11 +363,11 @@ func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Diction
 		image.set_pixelv(local, tints[p])
 	_tex_ambient = _upload_tex(_tex_ambient, image)
 	air.set_shader_parameter("ambient_map", _tex_ambient)
-	_update_light_common(area, visible, sky, z, weather, player_visual, wind_time)
+	_update_light_common(area, visible, sky, z, weather, player_visual, wind_time, true)
 
 
 func _update_light_common(area: Rect2i, visible: Rect2i, sky: Dictionary, z: int, weather: RefCounted,
-		player_visual: Vector2, wind_time: float) -> void:
+		player_visual: Vector2, wind_time: float, refresh_rays := true) -> void:
 	var rain_level := float(weather.rain) if weather != null else 0.0
 	var snow_level := float(weather.snow) if weather != null else 0.0
 	var cloud_cover := float(weather.cloud) if weather != null else 0.0
@@ -288,13 +379,14 @@ func _update_light_common(area: Rect2i, visible: Rect2i, sky: Dictionary, z: int
 	var direction: Vector2 = sky.sun_direction
 	if direction.length_squared() < 0.01:
 		direction = Vector2.DOWN
-	var strength := smoothstep(0.0, deg_to_rad(6.0), altitude) * (0.40 + 0.26 * sin(maxf(altitude, 0.0)))
+	var strength := smoothstep(deg_to_rad(-1.5), deg_to_rad(13.0), altitude) * (0.38 + 0.28 * sin(maxf(altitude, 0.0)))
 	strength *= 1.0 - cloud_cover * 0.78
 	if z < 0:
 		strength = 0.0
 	_sunlight_enabled = strength > 0.0001
 	var rise := maxf(0.016, tan(clampf(altitude, 0.0, deg_to_rad(89.0))))
-	var sun_color := Vector3(1.0, 0.94, 0.83).lerp(Vector3(1.0, 0.56, 0.26), 1.0 - smoothstep(0.0, deg_to_rad(30.0), altitude))
+	var horizon_t := 1.0 - smoothstep(deg_to_rad(-2.0), deg_to_rad(28.0), altitude)
+	var sun_color := Vector3(1.0, 0.94, 0.83).lerp(Vector3(1.0, 0.52, 0.22), horizon_t)
 	var hours: float = sky.hour
 	var sunrise: float = sky.sunrise
 	var sunset: float = sky.sunset
@@ -351,40 +443,48 @@ func _update_light_common(area: Rect2i, visible: Rect2i, sky: Dictionary, z: int
 	volume.set_shader_parameter("toward_sun", direction)
 	volume.set_shader_parameter("rise", rise)
 	volume.set_shader_parameter("sunlight_enabled", _sunlight_enabled)
-	var daylight_update := SubViewport.UPDATE_ONCE if _sunlight_enabled else SubViewport.UPDATE_DISABLED
+	var daylight_update := SubViewport.UPDATE_ONCE if (_sunlight_enabled and refresh_rays) else SubViewport.UPDATE_DISABLED
 	volume_view.render_target_update_mode = daylight_update
-	solar_view.render_target_update_mode = SubViewport.UPDATE_ONCE
+	solar_view.render_target_update_mode = SubViewport.UPDATE_ONCE if refresh_rays else SubViewport.UPDATE_DISABLED
 	bounce_source_view.render_target_update_mode = daylight_update
 	bounce_view.render_target_update_mode = daylight_update
-	air.set_shader_parameter("far_offset", offset)
-	air.set_shader_parameter("light_span", Vector2(span))
-	air.set_shader_parameter("light_margin", float(LIGHT_MARGIN))
+	if refresh_rays:
+		air.set_shader_parameter("far_offset", offset)
+		air.set_shader_parameter("light_span", Vector2(span))
+		air.set_shader_parameter("light_margin", float(LIGHT_MARGIN))
 	var sky_level := Lighting._natural_light(sky)
-	var sky_strength := smoothstep(4.3, 85.0, sky_level) * (0.86 - 0.16 * cloud_cover) if z >= 0 else 0.0
+	var sky_norm := smoothstep(3.8, 96.0, sky_level)
+	var sky_strength := pow(sky_norm, 0.84) * (0.86 - 0.16 * cloud_cover) if z >= 0 else 0.0
 	current_daylight = clampf(sky_strength * 1.35, 0.0, 1.0)
-	air.set_shader_parameter("sky_energy", sky_strength)
-	air.set_shader_parameter("indoor_daylight", sky_strength * smoothstep(deg_to_rad(-6.0), deg_to_rad(2.0), altitude))
-	var base_sky := Vector3(0.80, 0.90, 1.0).lerp(Vector3(1.0, 0.78, 0.57), float(sky.sun_warmth) * 0.40 * (1.0 - cloud_cover * 0.7))
+	var indoor_day := sky_strength * smoothstep(deg_to_rad(-12.0), deg_to_rad(8.0), altitude)
+	var base_sky := Vector3(0.80, 0.90, 1.0).lerp(Vector3(1.0, 0.74, 0.50), float(sky.sun_warmth) * 0.48 * (1.0 - cloud_cover * 0.7))
 	base_sky = base_sky.lerp(Vector3(0.74, 0.83, 0.88), rain_level * 0.55)
 	base_sky = base_sky.lerp(Vector3(0.86, 0.92, 0.98), snow_level * 0.50)
-	air.set_shader_parameter("sky_color", base_sky)
 	var out_level := maxf(sky_level - Lighting.AMBIENT_LOW, 0.0)
-	var out_day := 1.0 - exp(-out_level / 56.0)
-	var out_twilight := 1.0 - exp(-out_level / 9.0)
-	var daylight_tint := Color.WHITE.lerp(Color(1.0, 0.78, 0.57), float(sky.sun_warmth) * 0.75 * (1.0 - cloud_cover * 0.7))
-	var out_hue := Color(0.74, 0.81, 1.0).lerp(daylight_tint, out_twilight)
-	var out_bright := (0.23 + out_twilight * 0.17 + out_day * 0.42) * (1.0 - cloud_cover * 0.14)
+	var out_day := 1.0 - exp(-out_level / 48.0)
+	var out_twilight := 1.0 - exp(-out_level / 11.0)
+	var daylight_tint := Color.WHITE.lerp(Color(1.0, 0.74, 0.50), float(sky.sun_warmth) * 0.78 * (1.0 - cloud_cover * 0.7))
+	var out_hue := Color(0.72, 0.80, 1.0).lerp(daylight_tint, out_twilight)
+	var out_bright := (0.22 + out_twilight * 0.18 + out_day * 0.42) * (1.0 - cloud_cover * 0.14)
 	var out_amb := Vector3(out_hue.r * out_bright, out_hue.g * out_bright, out_hue.b * out_bright)
-	air.set_shader_parameter("outdoor_ambient", out_amb)
 	var roof_exp := out_amb + sun_color * strength * 0.78 + Vector3(0.55, 0.70, 0.92) * (moon_energy if _moon_active else 0.0) * 0.50
-	current_roof_light = Color(minf(roof_exp.x, 1.05), minf(roof_exp.y, 1.05), minf(roof_exp.z, 1.05), 1.0)
-	current_lamp_power = 1.0 if z < 0 else clampf((1.0 - smoothstep(5.0, 18.0 + cloud_cover * 18.0, sky_level)) + rain_level * 0.18, 0.0, 1.0)
-	air.set_shader_parameter("lamp_power", current_lamp_power)
+	var lamp_tgt := 1.0 if z < 0 else clampf((1.0 - smoothstep(5.5, 40.0 + cloud_cover * 16.0, sky_level)) + rain_level * 0.18, 0.0, 1.0)
+
+	_tgt_sun_energy = strength
+	_tgt_sky_energy = sky_strength
+	_tgt_indoor_day = indoor_day
+	_tgt_lamp_power = lamp_tgt
+	_tgt_moon_energy = moon_energy if _moon_active else 0.0
+	_tgt_sun_color = sun_color
+	_tgt_sky_color = base_sky
+	_tgt_out_amb = out_amb
+	_tgt_roof_light = Color(minf(roof_exp.x, 1.05), minf(roof_exp.y, 1.05), minf(roof_exp.z, 1.05), 1.0)
+	if not _smooth_init:
+		snap_smooth_light()
+	else:
+		_push_smooth_light()
 	air.set_shader_parameter("sun_ray", sun_ray)
-	air.set_shader_parameter("sun_color", sun_color)
-	air.set_shader_parameter("sun_energy", strength)
 	air.set_shader_parameter("moon_ray", Vector3(moon_direction.x, moon_direction.y, moon_rise).normalized())
-	air.set_shader_parameter("moon_energy", moon_energy if _moon_active else 0.0)
 	var season_mist := 1.15 if sky.season == "春" else 0.82 if sky.season == "夏" else 1.05 if sky.season == "秋" else 0.92
 	var season_tint := Vector3(0.98, 1.02, 0.99) if sky.season == "春" else Vector3(1.01, 1.01, 0.97) if sky.season == "夏" else Vector3(1.05, 0.98, 0.90) if sky.season == "秋" else Vector3(0.92, 0.97, 1.05)
 	season_tint = season_tint.lerp(Vector3(0.91, 0.96, 1.02), rain_level * 0.45)
@@ -396,7 +496,59 @@ func _update_light_common(area: Rect2i, visible: Rect2i, sky: Dictionary, z: int
 	air.set_shader_parameter("snow_cover", snow_cover)
 	air.set_shader_parameter("cloud_cover", cloud_cover)
 	air.set_shader_parameter("puddle_phase", puddle_phase)
-	tick_near_cascade(area, player_visual, wind_time, 0.0, true)
+	if refresh_rays:
+		tick_near_cascade(area, player_visual, wind_time, 0.0, true)
+
+
+func snap_smooth_light() -> void:
+	_smooth_init = true
+	_cur_sun_energy = _tgt_sun_energy
+	_cur_sky_energy = _tgt_sky_energy
+	_cur_indoor_day = _tgt_indoor_day
+	_cur_lamp_power = _tgt_lamp_power
+	_cur_moon_energy = _tgt_moon_energy
+	_cur_sun_color = _tgt_sun_color
+	_cur_sky_color = _tgt_sky_color
+	_cur_out_amb = _tgt_out_amb
+	current_roof_light = _tgt_roof_light
+	current_lamp_power = _cur_lamp_power
+	_push_smooth_light()
+
+
+func tick_smooth_light(delta: float) -> bool:
+	if not _smooth_init:
+		return false
+	var diff := absf(_cur_sun_energy - _tgt_sun_energy) + absf(_cur_sky_energy - _tgt_sky_energy) \
+		+ absf(_cur_lamp_power - _tgt_lamp_power) + absf(_cur_moon_energy - _tgt_moon_energy) \
+		+ _cur_sun_color.distance_to(_tgt_sun_color) + _cur_sky_color.distance_to(_tgt_sky_color)
+	if diff < 0.0008:
+		if diff > 0.0:
+			snap_smooth_light()
+		return false
+	var t := 1.0 - exp(-5.0 * delta)
+	_cur_sun_energy = lerpf(_cur_sun_energy, _tgt_sun_energy, t)
+	_cur_sky_energy = lerpf(_cur_sky_energy, _tgt_sky_energy, t)
+	_cur_indoor_day = lerpf(_cur_indoor_day, _tgt_indoor_day, t)
+	_cur_lamp_power = lerpf(_cur_lamp_power, _tgt_lamp_power, t)
+	_cur_moon_energy = lerpf(_cur_moon_energy, _tgt_moon_energy, t)
+	_cur_sun_color = _cur_sun_color.lerp(_tgt_sun_color, t)
+	_cur_sky_color = _cur_sky_color.lerp(_tgt_sky_color, t)
+	_cur_out_amb = _cur_out_amb.lerp(_tgt_out_amb, t)
+	current_roof_light = current_roof_light.lerp(_tgt_roof_light, t)
+	current_lamp_power = _cur_lamp_power
+	_push_smooth_light()
+	return true
+
+
+func _push_smooth_light() -> void:
+	air.set_shader_parameter("sun_energy", _cur_sun_energy)
+	air.set_shader_parameter("sky_energy", _cur_sky_energy)
+	air.set_shader_parameter("indoor_daylight", _cur_indoor_day)
+	air.set_shader_parameter("lamp_power", _cur_lamp_power)
+	air.set_shader_parameter("moon_energy", _cur_moon_energy)
+	air.set_shader_parameter("sun_color", _cur_sun_color)
+	air.set_shader_parameter("sky_color", _cur_sky_color)
+	air.set_shader_parameter("outdoor_ambient", _cur_out_amb)
 
 
 func set_view(area: Rect2i, view_world_exact: Vector2, screen: Vector2, cell: int, player_visual: Vector2) -> void:
@@ -405,3 +557,31 @@ func set_view(area: Rect2i, view_world_exact: Vector2, screen: Vector2, cell: in
 	air.set_shader_parameter("map_offset", view_world_exact - Vector2(area.position))
 	air.set_shader_parameter("view_span", screen / float(cell))
 	air.set_shader_parameter("player_feet", player_visual + Vector2(0.5, 0.84))
+
+
+func set_player_light(area: Rect2i, player_visual: Vector2, light_source: int, facing_x := 1) -> void:
+	# Physically-modeled moving firelight profiles:
+	# 1 = 火折子 (tinderbox: intimate warm ember-orange, lively flicker, 4.8-tile radius)
+	# 2 = 红油蜡烛 (candle: warm amber-gold, gentle flame sway, 6.4-tile radius)
+	# 3 = 桐油手灯 (oil lantern: bright golden glow, steady sheltered flame, 8.6-tile radius)
+	if light_source <= 0 or not area.has_area():
+		air.set_shader_parameter("player_light_energy", 0.0)
+		return
+	var hand_off := Vector2(0.5 + (0.18 if facing_x >= 0 else -0.18), 0.56)
+	air.set_shader_parameter("player_light_pos", player_visual + hand_off - Vector2(area.position))
+	match light_source:
+		1:
+			air.set_shader_parameter("player_light_energy", 13.5)
+			air.set_shader_parameter("player_light_radius", 5.0)
+			air.set_shader_parameter("player_light_color", Vector3(1.0, 0.49, 0.17))
+			air.set_shader_parameter("player_light_flicker", 0.95)
+		2:
+			air.set_shader_parameter("player_light_energy", 18.5)
+			air.set_shader_parameter("player_light_radius", 6.5)
+			air.set_shader_parameter("player_light_color", Vector3(1.0, 0.65, 0.27))
+			air.set_shader_parameter("player_light_flicker", 0.65)
+		_:
+			air.set_shader_parameter("player_light_energy", 26.0)
+			air.set_shader_parameter("player_light_radius", 8.6)
+			air.set_shader_parameter("player_light_color", Vector3(1.0, 0.77, 0.42))
+			air.set_shader_parameter("player_light_flicker", 0.28)

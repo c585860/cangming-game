@@ -121,29 +121,38 @@ void build_specialty_plot(Block &block, Vector2i origin, const char *kind, std::
     switch (design) {
         case Design::market:
             for (int y = 4; y < rear-1; ++y) for (int x : {2,4,width-5,width-3}) put(0,x,y,'K',finish);
-            for (int x = 2; x < mid-2; ++x) put(0,x,2,'k',finish);
+            for (int x = 2; x < mid-1; ++x) put(0,x,2,'k',finish);
+            put(0,2,3,'q',finish); put(0,width-2,2,'r',finish); put(0,width-2,3,'P',finish);
             for (int x = 1; x < width-1; ++x) put(0,x,rear,x == mid ? 'D' : '#',x == mid ? finish : facade);
             for (int x = 2; x < width-2; x += 2) if (x != mid) put(0,x,depth-2,'C',finish);
+            put(0,1,depth-2,'c',finish); put(0,width-2,depth-2,'l',finish);
             break;
         case Design::cargo:
             for (int y = 3; y < depth-2; ++y) for (int x : {2,3,width-4,width-3}) {
                 if ((y+variant)%4 != 0) put(0,x,y,name == "工坊" ? 'k' : 'C',finish);
             }
-            if (name == "工坊") { put(0,1,depth-2,'h',finish); put(0,width-2,depth-2,'a',finish); }
+            for (int x = 2; x < width-2; x += 3) put(0,x,2,'r',finish);
+            put(0,1,depth-2,'h',finish); put(0,width-2,depth-2,'a',finish);
+            put(0,2,depth-2,'c',finish); put(0,width-3,depth-2,'q',finish);
             break;
         case Design::school:
             for (int y = 2; y < depth-2; ++y) { put(0,1,y,'r',finish); put(0,width-2,y,'r',finish); }
-            for (int y = 4; y < rear+1; y += 3) for (int x : {3,mid-2,mid+2,width-4}) {
+            for (int y = 3; y < rear+1; y += 3) for (int x : {3,mid-2,mid+2,width-4}) {
                 put(0,x,y,'l',finish); put(0,x,y+1,'q',finish);
             }
             for (int y = 1; y < depth-1; ++y) put(0,mid,y,'i','R');
+            put(0,2,depth-2,'K',finish); put(0,width-3,depth-2,'P',finish);
             break;
         case Design::inn:
-            for (int y = 3; y < rear; y += 3) for (int x : {3,mid-2,mid+3}) {
+            for (int y = 2; y < rear; y += 3) for (int x : {2,mid-2,mid+2,width-3}) {
                 put(0,x,y,'t',finish); put(0,x,y+1,'q',finish);
+                if (x + 1 < width - 2 && x != mid - 2) put(0,x+1,y,'q',finish);
             }
+            for (int x = 1; x < mid-1; ++x) put(0,x,depth-2,'S',finish);
             for (int x = mid+2; x < width-1; ++x) put(0,x,depth-2,'k','J');
             put(0,width-2,depth-3,'h','J'); put(0,width-2,depth-4,'u','J');
+            put(0,width-3,depth-3,'a','J'); put(0,width-3,depth-4,'c','J');
+            put(0,1,1,'P',finish); put(0,width-2,1,'K',finish);
             break;
         case Design::civic:
             for (int x = 2; x < width-2; ++x) if (x != mid) put(0,x,4,'k',finish);
@@ -151,7 +160,8 @@ void build_specialty_plot(Block &block, Vector2i origin, const char *kind, std::
                 put(0,mid-2,y,y == rear ? 'D' : '#',facade);
                 put(0,mid+2,y,y == rear ? 'D' : '#',facade);
             }
-            put(0,2,depth-2,'l',finish); put(0,width-3,depth-2,'C',finish);
+            put(0,2,depth-2,'l',finish); put(0,3,depth-2,'q',finish);
+            put(0,width-3,depth-2,'C',finish); put(0,1,2,'r',finish); put(0,width-2,2,'r',finish);
             break;
         default: break;
     }
@@ -161,12 +171,16 @@ void build_specialty_plot(Block &block, Vector2i origin, const char *kind, std::
             for (int x = 1; x < width-1; ++x) if (x != mid) put(1,x,y,'#',facade);
         } else if (design == Design::inn) {
             for (int x : {mid-1,mid+1}) put(1,x,y,y % 5 == 2 ? 'D' : '#',facade);
-            // Place authentic 2-tile beds in inn guest rooms (y%5 == 1 and y%5 == 2).
             if (y%5 == 1 || y%5 == 2) for (int x : {2,width-3}) put(1,x,y,'b','i');
+            if (y%5 == 1) for (int x : {3,width-4}) put(1,x,y,'t','i');
+            if (y%5 == 3) for (int x : {2,width-3}) put(1,x,y,'l','i');
+            if (y%5 == 3) for (int x : {3,width-4}) put(1,x,y,'q','i');
             if (y%5 == 4) for (int x : {2,width-3}) put(1,x,y,'F','i');
+            if (y%5 == 4) for (int x : {3,width-4}) put(1,x,y,'c','i');
         } else if (y%3 == 1) {
             const char fixture = design == Design::school ? 'r' : design == Design::cargo ? 'C' : 'l';
             put(1,2,y,fixture,'i'); put(1,width-3,y,fixture,'i');
+            if (design != Design::cargo) { put(1,3,y,'q','i'); put(1,width-4,y,'c','i'); }
         }
     }
     put(0,mid,stair,'^',finish);

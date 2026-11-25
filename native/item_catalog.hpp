@@ -6,7 +6,7 @@
 
 namespace cangling {
 
-inline constexpr int kItemCount = 32;
+inline constexpr int kItemCount = 50;
 using ItemCounts = std::array<int, kItemCount>;
 
 enum class ItemCategory : std::uint8_t {
@@ -14,7 +14,10 @@ enum class ItemCategory : std::uint8_t {
     Clothing = 1,
     Food = 2,
     Drink = 3,
-    Misc = 4,
+    Tool = 4,
+    Book = 5,
+    Medical = 6,
+    Misc = 7,
 };
 
 enum class WearSlot : std::uint8_t {
@@ -37,11 +40,12 @@ struct ItemDef {
     int kcal;
     int quench;
     int joy;
+    int bash_dmg;
     WearSlot slot;
     int warmth;
     int encumbrance;
     int storage_ml;
-    const char *overlay; // paper-doll overlay ID when worn (empty if none)
+    const char *overlay;
     const char *desc;
 };
 
@@ -50,8 +54,7 @@ int find_item_by_key(const char *key);
 const char *category_label(ItemCategory cat);
 const char *wear_slot_label(WearSlot slot);
 
-// CCB-style contextual loot group generator (beds -> pillow/quilt/sheet, wardrobes -> clothing,
-// kitchens -> food/tea/water, desks/shelves -> scrolls/ink, apothecary -> herbs/medicine, crates -> supplies).
+// CCB SUS-style dense multi-item contextual loot group generator.
 ItemCounts spawn_contextual_items(char tile, char surface, std::uint32_t seed, godot::Vector2i p, int floor);
 
 } // namespace cangling

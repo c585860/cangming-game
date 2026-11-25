@@ -22,10 +22,10 @@ static func at_minute(total_minutes: int) -> Dictionary:
 	var hour := minute_of_day / 60.0
 	var solar_hour_angle := (hour - 12.0) * PI / 12.0
 	var altitude := asin(clampf(sin(LATITUDE) * sin(declination) + cos(LATITUDE) * cos(declination) * cos(solar_hour_angle), -1.0, 1.0))
-	var daylight := smoothstep(deg_to_rad(-7.0), deg_to_rad(8.0), altitude)
+	var daylight := smoothstep(deg_to_rad(-12.0), deg_to_rad(14.0), altitude)
 	var sun_direction := Vector2(-sin(solar_hour_angle), cos(solar_hour_angle) * sin(LATITUDE) - sin(declination) * cos(LATITUDE)).normalized()
-	var dawn_warmth := smoothstep(sunrise - 1.0, sunrise, hour) * (1.0 - smoothstep(sunrise, sunrise + 1.5, hour))
-	var dusk_warmth := smoothstep(sunset - 1.5, sunset, hour) * (1.0 - smoothstep(sunset, sunset + 0.8, hour))
+	var dawn_warmth := smoothstep(sunrise - 1.5, sunrise - 0.1, hour) * (1.0 - smoothstep(sunrise + 0.1, sunrise + 2.0, hour))
+	var dusk_warmth := smoothstep(sunset - 2.0, sunset - 0.15, hour) * (1.0 - smoothstep(sunset + 0.1, sunset + 1.4, hour))
 	var twilight := maxf(dawn_warmth, dusk_warmth)
 	var phase := fposmod(day_index / LUNAR_MONTH, 1.0) * TAU
 	var moon_illumination := (1.0 - cos(phase)) * 0.5

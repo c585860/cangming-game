@@ -127,6 +127,7 @@ bool CanglingWorld::load_game(const String &path) {
     doors = std::move(next_doors);
     tile_overrides = std::move(next_overrides);
     open_containers = std::move(next_containers);
+    bash_damage.clear();
     grab_offset = {0, 0};
     quest = data["quest"];
     minutes = data["minutes"];

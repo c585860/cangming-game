@@ -28,6 +28,7 @@ class CanglingWorld : public godot::RefCounted {
     std::unordered_set<int64_t> doors;
     std::unordered_map<int64_t, char> tile_overrides;
     std::unordered_set<int64_t> open_containers;
+    std::unordered_map<int64_t, int> bash_damage;
     Vector2i grab_offset{0, 0};
 
     static constexpr int item_types = kItemCount;
@@ -43,11 +44,14 @@ class CanglingWorld : public godot::RefCounted {
     static String item_name(int item);
     static bool is_movable_furniture(char tile);
     static bool is_openable_container(char tile);
+    static bool is_climbable_tile(char tile);
+    static bool is_smashable_tile(char tile);
     char effective_tile(Vector2i p, int z);
     ItemCounts items_on(Vector2i p);
     void materialize_tile_items(Vector2i p);
     String take_item(Vector2i p, int item);
     bool move_grabbed_furniture(Vector2i next_player_pos);
+    void haul_items_from(Vector2i from, Vector2i to);
     Dictionary item_state() const;
     bool restore_item_state(const Dictionary &state, City &loaded);
     void clear_items();
@@ -88,6 +92,9 @@ public:
     String surface_at(Vector2i p);
     String surface_at_level(Vector2i p, int z);
     String prop_at(Vector2i p);
+    Dictionary props_in_rect(Rect2i area);
+    Dictionary active_sites_in_rect(Rect2i area) const;
+    void prewarm_area(Rect2i area);
 
     // CCB Item, Food/Drink, Wear & Container APIs
     godot::Array inventory() const;
@@ -104,14 +111,27 @@ public:
     Dictionary character_status() const;
     godot::PackedStringArray worn_overlays() const;
 
-    // CCB Open/Close & Furniture Drag APIs
+    // CCB Open/Close, Smash, Climb, Haul, Wield, Apply, Read & Surroundings APIs
     String open_at(Vector2i p);
     String close_at(Vector2i p);
+    String smash_at(Vector2i p);
+    String climb_at(Vector2i p);
     bool is_container_open(Vector2i p) const;
     String grab_furniture(Vector2i target);
     String release_grab();
     Vector2i get_grab_offset() const { return grab_offset; }
     bool is_grabbing() const { return grab_offset != Vector2i(0, 0); }
+    String wield_item(int item);
+    String unwield();
+    String apply_item(int item);
+    String apply_wielded();
+    String read_book(int item);
+    String set_move_mode(int mode);
+    String cycle_move_mode();
+    String toggle_haul();
+    String toggle_safe_mode();
+    godot::Array list_nearby(int radius);
+    godot::Array compass_summary();
 
     int water_at(Vector2i p);
     int water_capacity_at(Vector2i p);
