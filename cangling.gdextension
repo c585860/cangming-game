@@ -1,0 +1,6 @@
+[configuration]
+entry_symbol = "cangling_init"
+compatibility_minimum = "4.5"
+
+[libraries]
+windows.x86_64 = "res://bin/cangling.dll"
