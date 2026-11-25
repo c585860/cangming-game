@@ -664,6 +664,16 @@ func _build_debug_menu(contents: VBoxContainer) -> void:
 		weather.label(),
 		"自动" if weather.override_kind < 0 else "锁定",
 		weather.wetness * 100.0, weather.snow_cover * 100.0], 13, SOFT)
+	var perf: Dictionary = world.perf_stats()
+	_label(scol, "性能：FPS %d · CPU %d 工作线程（%d 核） · 区块缓存 %d · 占用 %.0f KB · 自动释放 %d 次（%.0f KB） · 烘焙 %.1f ms" % [
+		Engine.get_frames_per_second(),
+		int(perf.get("cpu_threads", 1)),
+		int(perf.get("hardware_threads", 1)),
+		int(perf.get("cached_sectors", 0)),
+		float(perf.get("memory_kb", 0.0)),
+		int(perf.get("auto_trim_count", 0)),
+		float(perf.get("auto_freed_kb", 0.0)),
+		float(perf.get("last_bake_ms", 0.0))], 12, UI.JADE)
 
 	# Time of day presets
 	_label(body, "◈ 时间点跳转", 14, GOLD)
@@ -718,7 +728,12 @@ func _build_debug_menu(contents: VBoxContainer) -> void:
 	body.add_child(opt_row)
 	_button(opt_row, "室外自动覆瓦屋顶：%s" % ("开" if board.roofs_enabled else "关"),
 		func(): _debug_toggle_roofs(); _close_overlay(), board.roofs_enabled)
-	_button(opt_row, "清空脚印（雪/水）", func(): board.clear_footprints(); board.queue_redraw(); _close_overlay())
+	_button(opt_row, "清空脚印（雪/水）", func(): board.clear_footprints(); board.markers.queue_redraw(); _close_overlay())
+	_button(opt_row, "立即释放冷缓存", func():
+		var freed_kb := float(world.trim_memory(true)) / 1024.0
+		var freed_pages: int = board.Tiles.trim_unused_pages(0)
+		status_text.text = "内存管理：已释放 %.0f KB 区块缓存、%d 页图集。" % [freed_kb, freed_pages]
+		_close_overlay())
 
 
 func _stat_row(parent: Node, label_text: String, value_text: String, value_color: Color) -> void:
@@ -798,8 +813,11 @@ func _perform_action(position: Vector2i, action: String) -> void:
 			Items.water(self, position, action == "water_take")
 		_:
 			var result: String = world.interact(position, action)
-			if not result.is_empty() and action in ["door", "window"]:
-				board.invalidate_lightmap()
+			if not result.is_empty():
+				if action in ["door", "window"]:
+					board.invalidate_lightmap()
+				else:
+					board.invalidate_world_cache()
 			_note(result)
 
 
@@ -815,7 +833,7 @@ func _travel_from_overview(destination: Vector2i) -> void:
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and not event.pressed:
 		move_input.handle_key_release(event)
-		if period_timer != null and (event.keycode == KEY_PERIOD or (period_key != KEY_NONE and event.physical_keycode == period_key)):
+		if period_timer != null and (event.keycode == KEY_PERIOD or event.keycode == KEY_KP_5 or (period_key != KEY_NONE and event.physical_keycode == period_key)):
 			period_timer.stop()
 
 
@@ -864,7 +882,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		if atlas != null and atlas.keyboard(key):
 			get_viewport().set_input_as_handled()
 		return
-	if event.keycode == KEY_PERIOD and not (event.shift_pressed or event.ctrl_pressed or event.alt_pressed or event.meta_pressed):
+	if (event.keycode == KEY_PERIOD or event.keycode == KEY_KP_5 or event.physical_keycode == KEY_KP_5) and not (event.shift_pressed or event.ctrl_pressed or event.alt_pressed or event.meta_pressed):
 		if not event.echo:
 			_stop()
 			period_key = key

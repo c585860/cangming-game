@@ -43,7 +43,7 @@ float ground_hold_at(vec2 local, vec2 world) {
 	return total / max(weight, 0.001);
 }
 
-vec3 apply_rain_puddles(vec3 lit, vec3 base, vec2 world, vec2 screen_uv, float direct, vec3 lamp, float smooth_hold) {
+vec3 apply_rain_puddles(vec3 lit, vec3 base, vec2 world, vec2 cache_uv, float direct, vec3 lamp, float smooth_hold) {
 	if (wetness <= 0.01) {
 		return lit;
 	}
@@ -78,10 +78,10 @@ vec3 apply_rain_puddles(vec3 lit, vec3 base, vec2 world, vec2 screen_uv, float d
 	vec3 water_bed = wet_surface * mix(0.82, 0.62, depth);
 
 	float ripple = rain_level > 0.03 ? rain_ripples(world, TIME) * rain_level : 0.0;
-	float wave = sin(world.x * 8.5 + world.y * 6.0 - TIME * 2.2) * 0.0012;
-	vec2 refl_uv = clamp(screen_uv + vec2(wave + ripple * 0.0028, -0.022 - 0.010 * depth + ripple * 0.0028),
-		vec2(0.002), vec2(0.998));
-	vec3 ssr = texture(scene, refl_uv).rgb * (outdoor_ambient * 0.90 + lamp * 0.75 + vec3(0.03));
+	float wave = sin(world.x * 8.5 + world.y * 6.0 - TIME * 2.2) * 0.04;
+	vec2 tile_shift = vec2(wave + ripple * 0.09, -(0.62 + 0.28 * depth) + ripple * 0.09);
+	vec2 refl_uv = clamp(cache_uv + tile_shift / max(cache_world_span, vec2(1.0)), vec2(0.002), vec2(0.998));
+	vec3 ssr = texture(world_tex, refl_uv).rgb * (outdoor_ambient * 0.90 + lamp * 0.75 + vec3(0.03));
 
 	vec3 reflection = mix(sky_refl * 0.85, ssr, 0.48);
 	reflection += sun_color * direct * sun_energy * 0.22;

@@ -44,6 +44,22 @@ var _moon_active := false
 var _near_origin := Vector2.ZERO
 var _near_wind_accum := 0.0
 
+# Reusable GPU textures to avoid allocation spikes on region rebuilds.
+var _tex_geometry: ImageTexture
+var _tex_materials: ImageTexture
+var _tex_river: ImageTexture
+var _tex_sky: ImageTexture
+var _tex_ambient: ImageTexture
+var _tex_lamp_slots: ImageTexture
+var _tex_lamp_sources: ImageTexture
+
+
+static func _upload_tex(existing: ImageTexture, img: Image) -> ImageTexture:
+	if existing != null and existing.get_size() == Vector2(img.get_size()) and existing.get_format() == img.get_format():
+		existing.update(img)
+		return existing
+	return ImageTexture.create_from_image(img)
+
 
 func build(board: Control) -> void:
 	bounce_view = SubViewport.new()
@@ -103,9 +119,8 @@ func build(board: Control) -> void:
 	board.add_child(mask_view)
 	surface_mask = SurfaceMask.new()
 	mask_view.add_child(surface_mask)
-	var copy := BackBufferCopy.new()
-	copy.copy_mode = BackBufferCopy.COPY_MODE_VIEWPORT
-	board.add_child(copy)
+
+	# No BackBufferCopy needed: atmosphere.gdshader samples world_cache.view directly on the GPU!
 	air.shader = AirShader
 	air.set_shader_parameter("solar_map", solar_view.get_texture())
 	air.set_shader_parameter("solar_near_map", solar_near_view.get_texture())
@@ -120,41 +135,72 @@ func build(board: Control) -> void:
 	board.add_child(layer)
 
 
-func set_geometry(cells: Dictionary, area: Rect2i, layers: int, z: int, seed: int, season := "spring") -> void:
-	var geometry := Geometry.encode(cells, area, layers)
-	solar.set_shader_parameter("geometry", geometry)
+func set_world_texture(tex: Texture2D) -> void:
+	air.set_shader_parameter("world_tex", tex)
+
+
+func set_cache_window(area: Rect2i, cache_rect: Rect2i) -> void:
+	air.set_shader_parameter("cache_world_origin", Vector2(cache_rect.position))
+	air.set_shader_parameter("cache_world_span", Vector2(cache_rect.size).max(Vector2.ONE))
+	air.set_shader_parameter("cache_map_offset", cache_rect.position - area.position)
+
+
+func _bind_geometry_textures(geom_tex: ImageTexture, mat_tex: ImageTexture, sky_tex: ImageTexture,
+		river_tex: ImageTexture, area: Rect2i, layers: int, z: int, seed: int) -> void:
+	solar.set_shader_parameter("geometry", geom_tex)
 	solar.set_shader_parameter("map_size", area.size)
 	solar.set_shader_parameter("layer_count", layers)
-	solar_near.set_shader_parameter("geometry", geometry)
+	solar_near.set_shader_parameter("geometry", geom_tex)
 	solar_near.set_shader_parameter("map_size", area.size)
 	solar_near.set_shader_parameter("layer_count", layers)
-	volume.set_shader_parameter("geometry", geometry)
+	volume.set_shader_parameter("geometry", geom_tex)
 	volume.set_shader_parameter("map_size", area.size)
 	volume.set_shader_parameter("layer_count", layers)
-	bounce.set_shader_parameter("geometry", geometry)
+	bounce.set_shader_parameter("geometry", geom_tex)
 	bounce.set_shader_parameter("map_size", area.size)
-	bounce_source.set_shader_parameter("geometry", geometry)
+	bounce_source.set_shader_parameter("geometry", geom_tex)
 	bounce_source.set_shader_parameter("map_size", area.size)
-	bounce_source.set_shader_parameter("materials", Geometry.bounce_materials(cells, area, season))
-	air.set_shader_parameter("geometry", geometry)
-	air.set_shader_parameter("sky_transport", SkyTransport.bake(cells, area, z))
+	bounce_source.set_shader_parameter("materials", mat_tex)
+	air.set_shader_parameter("geometry", geom_tex)
+	air.set_shader_parameter("sky_transport", sky_tex)
 	air.set_shader_parameter("map_size", area.size)
-	var river := Geometry.river_field(cells, area, z)
-	air.set_shader_parameter("river_field", river)
-	solar.set_shader_parameter("river_field", river)
-	solar_near.set_shader_parameter("river_field", river)
+	air.set_shader_parameter("river_field", river_tex)
+	solar.set_shader_parameter("river_field", river_tex)
+	solar_near.set_shader_parameter("river_field", river_tex)
 	air.set_shader_parameter("below_ground", z < 0)
 	air.set_shader_parameter("noise_seed", float(seed % 193))
 
 
-func update_surfaces(cells: Dictionary, props: Rect2i, origin: Vector2i, cam_px_offset: Vector2, screen: Vector2,
+func set_geometry_baked(baked: Dictionary, area: Rect2i, layers: int, z: int, seed: int) -> void:
+	var w := area.size.x
+	var h := area.size.y
+	var geom_img := Image.create_from_data(w * layers, h, false, Image.FORMAT_RGBA8, baked["geometry"])
+	var mat_img := Image.create_from_data(w, h, false, Image.FORMAT_RGB8, baked["materials"])
+	var river_img := Image.create_from_data(w, h, false, Image.FORMAT_RGB8, baked["river_field"])
+	var sky_img := Image.create_from_data(w, h, false, Image.FORMAT_RG8, baked["sky_transport"])
+	_tex_geometry = _upload_tex(_tex_geometry, geom_img)
+	_tex_materials = _upload_tex(_tex_materials, mat_img)
+	_tex_river = _upload_tex(_tex_river, river_img)
+	_tex_sky = _upload_tex(_tex_sky, sky_img)
+	_bind_geometry_textures(_tex_geometry, _tex_materials, _tex_sky, _tex_river, area, layers, z, seed)
+
+
+func set_geometry(cells: Dictionary, area: Rect2i, layers: int, z: int, seed: int, season := "spring") -> void:
+	var geom_tex := Geometry.encode(cells, area, layers)
+	var mat_tex := Geometry.bounce_materials(cells, area, season)
+	var sky_tex := SkyTransport.bake(cells, area, z)
+	var river_tex := Geometry.river_field(cells, area, z)
+	_bind_geometry_textures(geom_tex, mat_tex, sky_tex, river_tex, area, layers, z, seed)
+
+
+func update_surfaces_cached(cells: Dictionary, cache_rect: Rect2i, props: Rect2i,
 		cell: int, seed: int, season: String = "spring", characters: Array = []) -> void:
-	var resolution := Vector2i(screen.ceil()).max(Vector2i(2, 2))
+	var resolution := (cache_rect.size * cell).max(Vector2i(2, 2))
 	if mask_view.size != resolution:
 		mask_view.size = resolution
-	air.set_shader_parameter("mask_sample_scale", screen / Vector2(resolution))
-	surface_mask.view_origin = origin
-	surface_mask.cam_px_offset = cam_px_offset
+		surface_mask.size = Vector2(resolution)
+	surface_mask.view_origin = cache_rect.position
+	surface_mask.cam_px_offset = Vector2.ZERO
 	surface_mask.cell = cell
 	surface_mask.cells = cells
 	surface_mask.props = props
@@ -163,6 +209,19 @@ func update_surfaces(cells: Dictionary, props: Rect2i, origin: Vector2i, cam_px_
 	surface_mask.characters = characters
 	surface_mask.queue_redraw()
 	mask_view.render_target_update_mode = SubViewport.UPDATE_ONCE
+
+
+func update_emitters_baked(baked: Dictionary, area: Rect2i) -> void:
+	var w := area.size.x
+	var h := area.size.y
+	var lamp_count: int = int(baked.get("lamp_count", 1))
+	var slots_img := Image.create_from_data(w * 2, h, false, Image.FORMAT_RGBAF, baked["slots"])
+	var lamps_img := Image.create_from_data(maxi(1, lamp_count), 2, false, Image.FORMAT_RGBAF, baked["lamps"])
+	_tex_lamp_slots = _upload_tex(_tex_lamp_slots, slots_img)
+	_tex_lamp_sources = _upload_tex(_tex_lamp_sources, lamps_img)
+	air.set_shader_parameter("lamp_slots", _tex_lamp_slots)
+	air.set_shader_parameter("lamp_sources", _tex_lamp_sources)
+	active_emitters = baked["emitters"]
 
 
 func update_emitters(cells: Dictionary, area: Rect2i, region: Rect2i, sites: Dictionary = {}, seed: int = 0) -> void:
@@ -196,8 +255,28 @@ func tick_near_cascade(area: Rect2i, player_visual: Vector2, wind_time: float, d
 		solar_near_view.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
+func update_light_baked(ambient_bytes: PackedByteArray, area: Rect2i, visible: Rect2i, sky: Dictionary,
+		z: int, weather: RefCounted = null, player_visual := Vector2.ZERO, wind_time := 0.0) -> void:
+	var img := Image.create_from_data(area.size.x, area.size.y, false, Image.FORMAT_RGBA8, ambient_bytes)
+	_tex_ambient = _upload_tex(_tex_ambient, img)
+	air.set_shader_parameter("ambient_map", _tex_ambient)
+	_update_light_common(area, visible, sky, z, weather, player_visual, wind_time)
+
+
 func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Dictionary, z: int, weather: RefCounted = null,
 		player_visual := Vector2.ZERO, wind_time := 0.0) -> void:
+	var image := Image.create_empty(area.size.x, area.size.y, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0.0, 0.0, 0.0, 0.0))
+	for p: Vector2i in tints:
+		var local := p - area.position
+		image.set_pixelv(local, tints[p])
+	_tex_ambient = _upload_tex(_tex_ambient, image)
+	air.set_shader_parameter("ambient_map", _tex_ambient)
+	_update_light_common(area, visible, sky, z, weather, player_visual, wind_time)
+
+
+func _update_light_common(area: Rect2i, visible: Rect2i, sky: Dictionary, z: int, weather: RefCounted,
+		player_visual: Vector2, wind_time: float) -> void:
 	var rain_level := float(weather.rain) if weather != null else 0.0
 	var snow_level := float(weather.snow) if weather != null else 0.0
 	var cloud_cover := float(weather.cloud) if weather != null else 0.0
@@ -205,12 +284,6 @@ func update_light(tints: Dictionary, area: Rect2i, visible: Rect2i, sky: Diction
 	var snow_cover := float(weather.snow_cover) if weather != null else 0.0
 	var puddle_phase := float(weather.puddle_phase) if weather != null else 0.0
 
-	var image := Image.create_empty(area.size.x, area.size.y, false, Image.FORMAT_RGBA8)
-	image.fill(Color(0.0, 0.0, 0.0, 0.0))
-	for p: Vector2i in tints:
-		var local := p - area.position
-		image.set_pixelv(local, tints[p])
-	air.set_shader_parameter("ambient_map", ImageTexture.create_from_image(image))
 	var altitude: float = sky.sun_altitude
 	var direction: Vector2 = sky.sun_direction
 	if direction.length_squared() < 0.01:

@@ -7,9 +7,12 @@
 #include <godot_cpp/variant/rect2i.hpp>
 #include <array>
 #include <bitset>
+#include <cstddef>
 #include <cstdint>
 #include <list>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <string_view>
 #include <unordered_map>
@@ -133,16 +136,39 @@ inline bool in_city(Vector2i p) { return p.x >= 0 && p.y >= 0 && p.x < city_size
 inline Vector2i sector_at(Vector2i p) { return {p.x / sector_size, p.y / sector_size}; }
 inline Vector2i hub(Vector2i sector) { return sector * sector_size + Vector2i(1, 1); }
 
+struct SectorGridSnapshot {
+    int min_sx = 0;
+    int min_sy = 0;
+    int cols = 0;
+    int rows = 0;
+    std::vector<std::shared_ptr<const Block>> blocks;
+
+    const Block *at(int sx, int sy) const {
+        const int lx = sx - min_sx;
+        const int ly = sy - min_sy;
+        if (lx < 0 || ly < 0 || lx >= cols || ly >= rows) return nullptr;
+        return blocks[static_cast<std::size_t>(ly * cols + lx)].get();
+    }
+};
+
 class City {
     std::uint32_t seed = 0;
+    mutable std::mutex cache_mutex;
     std::list<int> recent;
-    struct Cached { Block block; std::list<int>::iterator position; };
+    struct Cached { std::shared_ptr<const Block> block; std::list<int>::iterator position; };
     std::unordered_map<int, Cached> cache;
-    const Block &block_at(Vector2i sector);
+    std::shared_ptr<const Block> block_at(Vector2i sector);
+    std::shared_ptr<const Block> try_cached(Vector2i sector) const;
 public:
     CityPlan plan;
     int layout = generator_version;
     void reset(std::uint32_t new_seed, int version = generator_version);
+    std::shared_ptr<Block> generate_block(Vector2i sector) const;
+    void prewarm_sectors(Rect2i area);
+    SectorGridSnapshot snapshot_sectors(Rect2i area);
+    std::size_t cached_sector_count() const;
+    std::size_t memory_bytes() const;
+    std::size_t trim_cache(std::size_t keep_recent);
     char tile(Vector2i p, int floor);
     int lighting_column(Vector2i p, int floor, int layers);
     char surface(Vector2i p, int floor);

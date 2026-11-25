@@ -151,13 +151,17 @@ func draw_character(board: Control, dest: Control, role: StringName, at_world: V
 		dest.draw_circle(Vector2.ZERO, cell_f * 0.28, Color(0.03, 0.05, 0.06, 0.34))
 		dest.draw_set_transform(Vector2.ZERO)
 
-	if animated and absf(lean) > 0.002 and not masking:
+	if animated and (absf(lean) > 0.002 or flip) and not masking:
+		# Apply lean & horizontal flip in ONE transform and pass flip=false to Pack.draw_at;
+		# Pack._draw_layer resets draw_set_transform when flip=true, which previously overwrote
+		# our pivot and threw the sprite off-screen whenever walking left!
 		var pivot := draw_origin + Vector2(cell_f * 0.5, cell_f * 0.85)
-		dest.draw_set_transform(pivot, lean, Vector2.ONE)
+		var scale_vec := Vector2(-1.0 if flip else 1.0, 1.0)
+		dest.draw_set_transform(pivot, lean, scale_vec)
 		var local_origin := -Vector2(cell_f * 0.5, cell_f * 0.85)
 		for id: String in ["player_male", "overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
-			Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
-		Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, flip)
+			Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
+		Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, false)
 		dest.draw_set_transform(Vector2.ZERO)
 	else:
 		for id: String in ["player_male", "overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:

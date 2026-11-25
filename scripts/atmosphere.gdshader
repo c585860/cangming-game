@@ -3,7 +3,7 @@ render_mode unshaded, blend_disabled;
 
 #include "res://scripts/air_heights.gdshaderinc"
 
-uniform sampler2D scene : hint_screen_texture, filter_nearest;
+uniform sampler2D world_tex : filter_nearest, repeat_disable;
 uniform sampler2D solar_map : filter_linear, repeat_disable;
 uniform sampler2D solar_near_map : filter_linear, repeat_disable;
 uniform sampler2D volume_map : filter_linear, repeat_disable;
@@ -19,6 +19,9 @@ uniform ivec2 map_size;
 uniform vec2 view_world;
 uniform vec2 map_offset;
 uniform vec2 view_span;
+uniform vec2 cache_world_origin;
+uniform vec2 cache_world_span = vec2(32.0, 20.0);
+uniform ivec2 cache_map_offset;
 uniform vec2 far_offset;
 uniform vec2 light_span;
 uniform float light_margin;
@@ -26,7 +29,6 @@ uniform vec2 near_offset;
 uniform float near_span = 18.0;
 uniform float volume_sample_inset;
 uniform float bounce_sample_inset;
-uniform vec2 mask_sample_scale;
 uniform float lamp_power;
 uniform vec3 sun_ray;
 uniform vec3 sun_color;
@@ -338,7 +340,7 @@ vec3 roll_off_highlights(vec3 light) {
 ivec2 sprite_owner(vec4 mask) {
 	ivec3 packed_cell = ivec3(round(mask.rgb * 255.0));
 	ivec2 offset = packed_cell.xy + 256 * ivec2(packed_cell.z & 7, (packed_cell.z >> 4) & 7);
-	return ivec2(floor(map_offset)) + offset - ivec2(2);
+	return cache_map_offset + offset - ivec2(2);
 }
 
 bool is_character_mask(vec4 mask) {
@@ -372,7 +374,8 @@ void fragment() {
 	vec2 world = view_world + viewport_pos;
 	vec2 local = viewport_pos + map_offset;
 	ivec2 own = clamp(ivec2(floor(local)), ivec2(0), map_size - ivec2(1));
-	vec4 mask = texture(surface_mask, UV * mask_sample_scale);
+	vec2 cache_uv = clamp((world - cache_world_origin) / max(cache_world_span, vec2(1.0)), vec2(0.0), vec2(1.0));
+	vec4 mask = texture(surface_mask, cache_uv);
 	ivec2 owner = sprite_owner(mask);
 	bool sprite = mask.a > 0.5 && all(greaterThanEqual(owner, ivec2(0))) && all(lessThan(owner, map_size));
 	bool character = sprite && is_character_mask(mask);
@@ -380,7 +383,7 @@ void fragment() {
 		own = owner;
 	}
 	vec4 ambient = texelFetch(ambient_map, own, 0);
-	vec3 base = texture(scene, SCREEN_UV).rgb;
+	vec3 base = texture(world_tex, cache_uv).rgb;
 	if (ambient.a < 0.5) {
 		COLOR = vec4(base, 1.0);
 	} else {
@@ -459,7 +462,7 @@ void fragment() {
 				if (snow_cover > 0.01) {
 					lit = apply_snow_blanket(lit, base, exposure, world, snow_cover, smooth_hold);
 				} else if (wetness > 0.01) {
-					lit = apply_rain_puddles(lit, base, world, SCREEN_UV, direct, lamp, smooth_hold);
+					lit = apply_rain_puddles(lit, base, world, cache_uv, direct, lamp, smooth_hold);
 				}
 			}
 		} else if (sprite && !indoors && !character && snow_cover > 0.01) {

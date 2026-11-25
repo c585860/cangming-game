@@ -27,9 +27,9 @@ std::vector<Vector2i> CanglingWorld::local_path(Vector2i from, Vector2i to, Rect
     Ref<AStarGrid2D> grid;
     grid.instantiate();
     grid->set_region(region);
-    grid->set_diagonal_mode(AStarGrid2D::DIAGONAL_MODE_NEVER);
-    grid->set_default_estimate_heuristic(AStarGrid2D::HEURISTIC_MANHATTAN);
-    grid->set_default_compute_heuristic(AStarGrid2D::HEURISTIC_MANHATTAN);
+    grid->set_diagonal_mode(AStarGrid2D::DIAGONAL_MODE_AT_LEAST_ONE_WALKABLE);
+    grid->set_default_estimate_heuristic(AStarGrid2D::HEURISTIC_OCTILE);
+    grid->set_default_compute_heuristic(AStarGrid2D::HEURISTIC_OCTILE);
     grid->update();
     for (int y = region.position.y; y < region.get_end().y; ++y) {
         for (int x = region.position.x; x < region.get_end().x; ++x) {
@@ -127,8 +127,9 @@ Array CanglingWorld::route_to(Vector2i dest, bool interact_with_target) {
     if (interact_with_target) {
         if (near(dest)) result = {pos};
         else {
-            for (const auto step : steps) {
-                auto candidate = find_path(dest+step);
+            static const std::array<Vector2i, 8> adj{{{0,-1},{-1,0},{1,0},{0,1},{-1,-1},{1,-1},{-1,1},{1,1}}};
+            for (const auto step : adj) {
+                auto candidate = find_path(dest + step);
                 if (!candidate.empty() && (result.empty() || candidate.size() < result.size())) result.swap(candidate);
             }
             if (result.empty() && walkable(dest)) result = find_path(dest);

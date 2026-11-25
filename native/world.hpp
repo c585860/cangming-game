@@ -20,6 +20,7 @@ class CanglingWorld : public godot::RefCounted {
     int quest = 0;
     int herbs = 0;
     int coins = 0;
+    double last_bake_ms = 0.0;
     std::array<bool, 4> collected{};
     std::unordered_set<int64_t> doors;
     static constexpr int item_types = 10;
@@ -48,6 +49,8 @@ class CanglingWorld : public godot::RefCounted {
 protected:
     static void _bind_methods();
 public:
+    CanglingWorld();
+    ~CanglingWorld() override;
     void setup(int64_t new_seed);
     int64_t get_seed() const { return seed; }
     Vector2i get_pos() const { return pos; }
@@ -89,5 +92,13 @@ public:
     String change_floor(int direction);
     bool save_game(const String &path) const;
     bool load_game(const String &path);
+
+    // Multi-core CPU render baking & automatic memory management APIs
+    Dictionary bake_region_data(Rect2i area, int z, int layers, const String &season);
+    godot::PackedByteArray bake_ambient_data(Rect2i area, Rect2i region, int z, double outdoor_light, double sun_warmth);
+    Dictionary bake_point_lights_data(Rect2i area, Rect2i region, int z, const Dictionary &sites, int seed_val);
+    bool tick_memory(double delta_sec);
+    int64_t trim_memory(bool aggressive);
+    Dictionary perf_stats() const;
 };
 }
