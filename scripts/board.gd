@@ -4,12 +4,12 @@ signal cell_clicked(cell: Vector2i)
 signal context_requested(cell: Vector2i)
 
 const World = preload("res://scripts/world.gd")
-const Art = preload("res://scripts/street_art.gd")
 const CanglingCalendar = preload("res://scripts/cangling_calendar.gd")
 const Tiles = preload("res://scripts/undead_tiles.gd")
 const Lighting = preload("res://scripts/lighting.gd")
 const LightGeometry = preload("res://scripts/light_geometry.gd")
 const SceneLighting = preload("res://scripts/scene_lighting.gd")
+const WorldCache = preload("res://scripts/world_cache.gd")
 const Weather = preload("res://scripts/weather.gd")
 const WeatherFx = preload("res://scripts/weather_fx.gd")
 const FootprintTrail = preload("res://scripts/footprints.gd")
@@ -19,6 +19,9 @@ const ZOOMS := [20, 25, 32, 40, 48]
 const SITE_NAMES := {&"merchant": "药商沈青", &"ferryman": "渡夫", &"altar": "吐纳石台", &"herb": "清露草", &"door": "门"}
 const SEASON_KEYS := {"春": "spring", "夏": "summer", "秋": "autumn", "冬": "winter"}
 const NONE := Vector2i(-1, -1)
+
+static var _ascii_chars: PackedStringArray = PackedStringArray()
+static var _empty_upper := PackedStringArray()
 
 var world: World
 var weather: Weather
@@ -36,6 +39,7 @@ var view_size := Vector2i.ONE
 var zoom := 2
 var cell := 32
 
+var world_cache := WorldCache.new()
 var scene_lighting := SceneLighting.new()
 var roof_system := RoofSystem.new()
 var footprints := FootprintTrail.new()
@@ -67,7 +71,17 @@ var roofs_enabled: bool:
 	set(v): roof_system.enabled = v
 
 
+static func _ensure_ascii_table() -> void:
+	if not _ascii_chars.is_empty():
+		return
+	_ascii_chars.resize(128)
+	_ascii_chars[0] = ""
+	for i in range(1, 128):
+		_ascii_chars[i] = char(i)
+
+
 func build(model: World, weather_model: Weather = null) -> void:
+	_ensure_ascii_table()
 	world = model
 	weather = weather_model if weather_model != null else Weather.new()
 	can_read_upper_levels = world.has_method("terrain_at_level")
@@ -81,9 +95,12 @@ func build(model: World, weather_model: Weather = null) -> void:
 	motion.snap_to(world.pos)
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	clip_contents = true
-	scene_lighting.build(self)
 
-	# Layer order above lit scene: roofs -> animated player -> footprints/markers -> rain/snow
+	world_cache.build(self)
+	scene_lighting.build(self)
+	scene_lighting.set_world_texture(world_cache.get_texture())
+
+	# Layer order above GPU-lit scene: roofs -> animated player -> footprints/markers -> GPU rain/snow
 	roof_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	roof_layer.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	add_child(roof_layer)
@@ -113,6 +130,10 @@ func _process(delta: float) -> void:
 		return
 	visual_time += delta
 
+	# Automatic C++ memory management + cold sprite atlas page reclamation.
+	if world.tick_memory(delta):
+		Tiles.trim_unused_pages()
+
 	# 1. Decoupled FPS weather evolution (dynamic puddles & snow)
 	if weather != null:
 		weather.tick_visual(delta)
@@ -139,13 +160,21 @@ func _process(delta: float) -> void:
 	if geometry_area.has_area():
 		scene_lighting.tick_near_cascade(geometry_area, motion.visual_pos, visual_time, delta)
 
+	# 5. Pure GPU pan inside world_cache margin (0 CPU tile/mask redraws!)
 	if cam_moved:
 		_recompute_camera_window()
-		if geometry_area.has_area():
+		var visible := Rect2i(view_origin, view_size).intersection(bounds)
+		if not world_cache.cache_rect.encloses(visible) \
+				or not baked_light_area.encloses(visible) \
+				or not geometry_area.has_area():
+			_sync_render_state()
+		else:
 			scene_lighting.set_view(geometry_area, view_world_exact, size, cell, motion.visual_pos)
-		queue_redraw()
+			weather_fx.set_view(view_world_exact, size / float(cell), size)
+		roof_layer.queue_redraw()
+		player_layer.queue_redraw()
+		markers.queue_redraw()
 	else:
-		# Player walking without camera shift only needs cheap player_layer + view uniform update!
 		if player_moved:
 			if geometry_area.has_area():
 				scene_lighting.set_view(geometry_area, view_world_exact, size, cell, motion.visual_pos)
@@ -155,10 +184,14 @@ func _process(delta: float) -> void:
 			roof_layer.queue_redraw()
 		if marks_changed:
 			markers.queue_redraw()
+
 	if roofs_changed or cam_moved:
-		weather_fx.configure(weather.rain if world.floor == 0 else 0.0,
-			weather.snow if world.floor == 0 else 0.0,
-			scene_lighting.current_daylight, view_origin, cell, roof_system.revealed_interior)
+		var z: int = world.floor
+		weather_fx.configure(weather.rain if z == 0 else 0.0,
+			weather.snow if z == 0 else 0.0,
+			scene_lighting.current_daylight, view_world_exact, size / float(cell), size,
+			view_origin, view_size, roof_system.revealed_interior)
+	Tiles.finish_frame()
 
 
 func snap_visuals() -> void:
@@ -169,7 +202,10 @@ func snap_visuals() -> void:
 	_recompute_camera_window()
 	roof_system.update_targets(motion.visual_pos, world.floor, true)
 	roof_system.snap(world.floor)
-	queue_redraw()
+	_sync_render_state()
+	roof_layer.queue_redraw()
+	player_layer.queue_redraw()
+	markers.queue_redraw()
 
 
 func snap_roof_alphas() -> void:
@@ -214,8 +250,13 @@ func _recompute_camera_window() -> void:
 
 
 func _update_view() -> void:
+	if world == null or size.x < 2.0 or size.y < 2.0:
+		return
 	_recompute_camera_window()
-	queue_redraw()
+	_sync_render_state()
+	roof_layer.queue_redraw()
+	player_layer.queue_redraw()
+	markers.queue_redraw()
 
 
 func _clear_hover() -> void:
@@ -265,6 +306,14 @@ func invalidate_lightmap() -> void:
 	surface_key.clear()
 	emitter_area = Rect2i()
 	emitter_herbs = -1
+	world_cache.invalidate()
+
+
+func invalidate_world_cache() -> void:
+	world_cache.invalidate()
+	surface_key.clear()
+	if world != null and size.x >= 2.0 and size.y >= 2.0:
+		_sync_render_state()
 
 
 func invalidate_weather() -> void:
@@ -272,7 +321,8 @@ func invalidate_weather() -> void:
 	baked_light_area = Rect2i()
 	baked_light_minutes = -99999
 	surface_key.clear()
-	queue_redraw()
+	world_cache.invalidate()
+	_update_view()
 
 
 func _collect_sites(region: Rect2i) -> Dictionary:
@@ -288,11 +338,11 @@ func _collect_sites(region: Rect2i) -> Dictionary:
 	return sites
 
 
-func _collect_npc_characters(visible: Rect2i) -> Array:
+func _collect_npc_characters(region: Rect2i) -> Array:
 	var list: Array = []
 	if world.floor == 0:
-		for y in range(visible.position.y, visible.end.y):
-			for x in range(visible.position.x, visible.end.x):
+		for y in range(region.position.y, region.end.y):
+			for x in range(region.position.x, region.end.x):
 				var p := Vector2i(x, y)
 				var site: StringName = world.site_at(p)
 				if site == &"merchant" or site == &"ferryman":
@@ -300,7 +350,47 @@ func _collect_npc_characters(visible: Rect2i) -> Array:
 	return list
 
 
-func _update_lightmap(visible: Rect2i, props: Rect2i) -> void:
+func _populate_cells_from_baked(baked: Dictionary, area: Rect2i, z: int) -> void:
+	cells.clear()
+	below_cells.clear()
+	var tiles_buf: PackedByteArray = baked["tiles"]
+	var surf_buf: PackedByteArray = baked["surfaces"]
+	var flags_buf: PackedByteArray = baked["flags"]
+	var has_below := z > 0 and baked.has("below_tiles")
+	var bt_buf: PackedByteArray = baked["below_tiles"] if has_below else PackedByteArray()
+	var bs_buf: PackedByteArray = baked["below_surfaces"] if has_below else PackedByteArray()
+	var w := area.size.x
+	var h := area.size.y
+	var ox := area.position.x
+	var oy := area.position.y
+	var chars := _ascii_chars
+	var empty_up := _empty_upper
+	var idx := 0
+	for y in range(h):
+		var wy := oy + y
+		for x in range(w):
+			var p := Vector2i(ox + x, wy)
+			var tb := tiles_buf[idx]
+			var sb := surf_buf[idx]
+			var t_str := chars[tb] if tb < 128 else " "
+			var s_str := chars[sb] if sb < 128 else ""
+			cells[p] = [t_str, s_str, empty_up, flags_buf[idx]]
+			if has_below and tb == 32:
+				var btb := bt_buf[idx]
+				var bsb := bs_buf[idx]
+				below_cells[p] = [chars[btb] if btb < 128 else " ", chars[bsb] if bsb < 128 else ""]
+			idx += 1
+
+
+func _sync_render_state() -> void:
+	if world == null or size.x < 2.0 or size.y < 2.0:
+		return
+	var visible := Rect2i(view_origin, view_size).intersection(bounds)
+	if not visible.has_area():
+		return
+	var cached_needed := visible.grow(WorldCache.CACHE_MARGIN + 2).intersection(bounds)
+	var props := cached_needed.grow_individual(1, 0, 1, 2).intersection(bounds)
+
 	var sky := CanglingCalendar.at_minute(world.minutes)
 	current_season = SEASON_KEYS.get(sky.season, "spring")
 	weather.sync(sky, world.seed, false, world.minutes)
@@ -310,43 +400,27 @@ func _update_lightmap(visible: Rect2i, props: Rect2i) -> void:
 	var required := props.grow(reach).intersection(bounds)
 	var static_key: Array = [world.seed, z, current_season]
 	var rebuilt_geom := false
+
 	if static_key != geometry_key or not geometry_area.encloses(required):
 		geometry_area = props.grow(reach + 6).intersection(bounds)
-		cells.clear()
-		below_cells.clear()
-		for y in range(geometry_area.position.y, geometry_area.end.y):
-			for x in range(geometry_area.position.x, geometry_area.end.x):
-				var p := Vector2i(x, y)
-				var upper := PackedStringArray()
-				if can_read_upper_levels and z >= 0 and z < 2147483647:
-					for level in range(1, layers + 1):
-						upper.append(world.call("terrain_at_level", p, z + level))
-				var t: String = world.terrain_at(p)
-				cells[p] = [t, world.surface_at(p), upper, world.lighting_column(p, z, layers)]
-				if z > 0 and t == " " and can_read_upper_levels:
-					below_cells[p] = [world.call("terrain_at_level", p, 0), world.call("surface_at_level", p, 0)]
-		scene_lighting.set_geometry(cells, geometry_area, layers, z, world.seed, current_season)
+		var baked: Dictionary = world.bake_region_data(geometry_area, z, layers, current_season)
+		_populate_cells_from_baked(baked, geometry_area, z)
+		scene_lighting.set_geometry_baked(baked, geometry_area, layers, z, world.seed)
 		roof_system.index_buildings(cells, geometry_area)
 		geometry_key = static_key
 		lighting_key.clear()
 		baked_light_area = Rect2i()
 		surface_key.clear()
 		emitter_area = Rect2i()
+		world_cache.invalidate()
 		rebuilt_geom = true
 	roof_system.update_targets(motion.visual_pos, z, rebuilt_geom)
-
-	# Surface mask only tracks static world + NPCs (player is rendered on player_layer above atmosphere!)
-	var npcs := _collect_npc_characters(visible)
-	var mask_key: Array = [props, visible.position, cam_px_offset.snapped(Vector2(1.0, 1.0)), size, cell, current_season, npcs.size()]
-	if mask_key != surface_key:
-		scene_lighting.update_surfaces(cells, props, visible.position, cam_px_offset, size, cell,
-			world.seed ^ (z * 0x65bd4e97), current_season, npcs)
-		surface_key = mask_key
 
 	if not emitter_area.encloses(props) or emitter_herbs != world.herbs:
 		emitter_area = geometry_area.grow(-SceneLighting.PointLighting.REACH).merge(props).intersection(geometry_area)
 		var sites := _collect_sites(emitter_area.grow(SceneLighting.PointLighting.REACH).intersection(geometry_area))
-		scene_lighting.update_emitters(cells, geometry_area, emitter_area, sites, world.seed ^ (z * 0x65bd4e97))
+		var point_baked: Dictionary = world.bake_point_lights_data(geometry_area, emitter_area, z, sites, world.seed ^ (z * 0x65bd4e97))
+		scene_lighting.update_emitters_baked(point_baked, geometry_area)
 		emitter_herbs = world.herbs
 
 	# Cache far-field solar/bounce/volume/ambient across multiple walking steps inside LIGHT_MARGIN!
@@ -357,57 +431,37 @@ func _update_lightmap(visible: Rect2i, props: Rect2i) -> void:
 		or (absi(world.minutes - baked_light_minutes) >= 5)
 	if needs_light_bake:
 		var ambient_region := props.grow(SceneLighting.LIGHT_MARGIN).intersection(geometry_area)
-		var tints := Lighting.calculate_ambient(cells, ambient_region, sky, z)
-		scene_lighting.update_light(tints, geometry_area, visible, sky, z, weather, motion.visual_pos, visual_time)
+		var ambient_bytes: PackedByteArray = world.bake_ambient_data(geometry_area, ambient_region, z,
+			Lighting._natural_light(sky), float(sky.sun_warmth))
+		scene_lighting.update_light_baked(ambient_bytes, geometry_area, visible, sky, z, weather, motion.visual_pos, visual_time)
 		baked_light_area = visible.grow(maxi(1, SceneLighting.LIGHT_MARGIN - 2)).intersection(bounds)
 		baked_light_minutes = world.minutes
 		lighting_key = weather_key
 
+	# GPU-cached static world & surface mask (re-rendered ONLY when stepping outside 4-tile margin or changing state!)
+	var cache_rebuilt := world_cache.ensure_updated(world, cells, below_cells, visible, bounds, cell,
+		current_season, scene_lighting.active_emitters, scene_lighting.current_lamp_power)
+	var crect := world_cache.cache_rect
+	if crect.has_area():
+		scene_lighting.set_cache_window(geometry_area, crect)
+		var mask_props := crect.grow_individual(1, 0, 1, 2).intersection(bounds)
+		var npcs := _collect_npc_characters(crect)
+		var mask_key: Array = [crect, cell, current_season, z, npcs.size()]
+		if cache_rebuilt or mask_key != surface_key:
+			scene_lighting.update_surfaces_cached(cells, crect, mask_props, cell,
+				world.seed ^ (z * 0x65bd4e97), current_season, npcs)
+			surface_key = mask_key
+
 	weather_fx.configure(weather.rain if z == 0 else 0.0, weather.snow if z == 0 else 0.0,
-		scene_lighting.current_daylight, view_origin, cell, roof_system.revealed_interior)
+		scene_lighting.current_daylight, view_world_exact, size / float(cell), size,
+		view_origin, view_size, roof_system.revealed_interior)
 	scene_lighting.set_view(geometry_area, view_world_exact, size, cell, motion.visual_pos)
 
 
 func _draw() -> void:
 	if world == null:
 		return
-	var visible := Rect2i(view_origin, view_size).intersection(bounds)
-	var props := visible.grow_individual(1, 0, 1, 2).intersection(bounds)
-	_update_lightmap(visible, props)
-	var seed: int = world.seed ^ (world.floor * 0x65bd4e97)
-	var lit_strength: float = scene_lighting.current_lamp_power
-	var emitters: Dictionary = scene_lighting.active_emitters
-	if world.floor > 0 and not below_cells.is_empty():
-		var sky_factor := clampf(1.0 - lit_strength * 0.72, 0.22, 1.0)
-		var depth_tint := Color(0.35 * sky_factor, 0.42 * sky_factor, 0.48 * sky_factor, 1.0)
-		for y in range(visible.position.y, visible.end.y):
-			for x in range(visible.position.x, visible.end.x):
-				var p := Vector2i(x, y)
-				if below_cells.has(p):
-					Art.ground(self, below_cells, p, world.seed, current_season, depth_tint)
-					var north_solid: bool = cells.get(p + Vector2i.UP, [" "])[0] != " "
-					var west_solid: bool = cells.get(p + Vector2i.LEFT, [" "])[0] != " "
-					if north_solid or west_solid:
-						var o := Vector2((p - view_origin) * cell) + cam_px_offset
-						if north_solid:
-							draw_rect(Rect2(o, Vector2(cell, cell * 0.42)), Color(0.02, 0.04, 0.05, 0.42))
-						if west_solid:
-							draw_rect(Rect2(o, Vector2(cell * 0.35, cell)), Color(0.02, 0.04, 0.05, 0.32))
-	for y in range(visible.position.y, visible.end.y):
-		for x in range(visible.position.x, visible.end.x):
-			Art.ground(self, cells, Vector2i(x, y), seed, current_season)
-	for y in range(props.position.y, props.end.y):
-		for x in range(props.position.x, props.end.x):
-			var p := Vector2i(x, y)
-			Art.walls(self, cells, p, seed, current_season, lit_strength)
-			Art.detail(self, world, cells, p, seed, current_season, emitters, lit_strength)
-	if world.floor == 0:
-		for y in range(visible.position.y, visible.end.y):
-			for x in range(visible.position.x, visible.end.x):
-				var p := Vector2i(x, y)
-				var site: StringName = world.site_at(p)
-				if site in [&"merchant", &"ferryman", &"altar", &"herb"]:
-					Art.site_landmark(self, p, site, lit_strength)
+	_sync_render_state()
 	roof_layer.queue_redraw()
 	player_layer.queue_redraw()
 	markers.queue_redraw()

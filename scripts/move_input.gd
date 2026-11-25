@@ -1,7 +1,8 @@
 extends RefCounted
 
-# Dedicated rate-capped directional input controller (Arrows + WASD + Numpad).
-# Ignores OS key-repeat echo spam so holding a key moves at a steady cadence synced with walk animation.
+# Dedicated rate-capped 8-direction input controller (CCB Numpad 1-9 + Arrows + WASD).
+# Supports true diagonal movement via Numpad 1/3/7/9 as well as simultaneous WASD/Arrow chords,
+# while ignoring OS key-repeat echo spam so movement stays synced with smooth walking animation.
 
 const INITIAL_HOLD_DELAY := 0.165
 const REPEAT_STEP_INTERVAL := 0.135
@@ -27,7 +28,6 @@ const KEY_DIRS := {
 
 var _held_order: Array[int] = []
 var _cooldown := 0.0
-var _diag_toggle := false
 
 
 func reset() -> void:
@@ -74,7 +74,7 @@ func handle_key_press(event: InputEventKey) -> Vector2i:
 		# Respect step cap even on rapid key mashing
 		return Vector2i.ZERO
 	_cooldown = INITIAL_HOLD_DELAY
-	return _resolve_step(KEY_DIRS[k])
+	return _resolve_held_direction()
 
 
 func tick(delta: float) -> Vector2i:
@@ -88,13 +88,24 @@ func tick(delta: float) -> Vector2i:
 	if _held_order.is_empty() or _cooldown > 0.0:
 		return Vector2i.ZERO
 	_cooldown = REPEAT_STEP_INTERVAL
-	var active_key := _held_order[_held_order.size() - 1]
-	return _resolve_step(KEY_DIRS[active_key])
+	return _resolve_held_direction()
 
 
-func _resolve_step(raw: Vector2i) -> Vector2i:
-	# Grid movement is 4-way; numpad diagonals (1/3/7/9) smoothly alternate X/Y steps!
-	if raw.x != 0 and raw.y != 0:
-		_diag_toggle = not _diag_toggle
-		return Vector2i(raw.x, 0) if _diag_toggle else Vector2i(0, raw.y)
-	return raw
+func _resolve_held_direction() -> Vector2i:
+	if _held_order.is_empty():
+		return Vector2i.ZERO
+	var latest_dir: Vector2i = KEY_DIRS[_held_order[_held_order.size() - 1]]
+	# Direct numpad diagonal (1/3/7/9) takes immediate priority.
+	if latest_dir.x != 0 and latest_dir.y != 0:
+		return latest_dir
+	# Allow simultaneous perpendicular cardinal keys (e.g., W+D or Up+Left) to move diagonally!
+	var dx := 0
+	var dy := 0
+	for k in _held_order:
+		var d: Vector2i = KEY_DIRS[k]
+		if d.x != 0:
+			dx = d.x
+		if d.y != 0:
+			dy = d.y
+	var combined := Vector2i(dx, dy)
+	return combined if combined != Vector2i.ZERO else latest_dir

@@ -14,6 +14,8 @@ static var _tiles: Dictionary = {}
 static var _sheets: Array[Dictionary] = []
 static var _sprites: Dictionary = {}
 static var _decoded: Dictionary = {}
+static var _page_stamps: Dictionary = {}
+static var _frame_id := 0
 static var _attempted := false
 
 
@@ -74,8 +76,10 @@ static func _definition(entry: Dictionary, offset: Vector2i, scale: float, rotat
 		"scale": scale, "rotates": rotates}
 
 
-static func _page(sheet: Dictionary, page: int, rows_per_page: int) -> Texture2D:
+static func _page(sheet_idx: int, sheet: Dictionary, page: int, rows_per_page: int) -> Texture2D:
 	var pages: Dictionary = sheet["pages"]
+	var stamp_key := (sheet_idx << 16) | (page & 0xffff)
+	_page_stamps[stamp_key] = _frame_id
 	if pages.has(page):
 		return pages[page]
 	var file: String = sheet["file"]
@@ -101,6 +105,26 @@ static func _page(sheet: Dictionary, page: int, rows_per_page: int) -> Texture2D
 static func finish_frame() -> void:
 	# Hold decoded PNGs only during a draw, for sharing between newly requested pages.
 	_decoded.clear()
+	_frame_id += 1
+
+
+static func trim_unused_pages(max_age_frames := 480) -> int:
+	var freed := 0
+	for s_idx in range(_sheets.size()):
+		var pages: Dictionary = _sheets[s_idx]["pages"]
+		var stale: Array[int] = []
+		for page_num: int in pages:
+			var stamp_key := (s_idx << 16) | (page_num & 0xffff)
+			var last_used: int = int(_page_stamps.get(stamp_key, 0))
+			if _frame_id - last_used >= max_age_frames:
+				stale.append(page_num)
+		for page_num in stale:
+			pages.erase(page_num)
+			_page_stamps.erase((s_idx << 16) | (page_num & 0xffff))
+			freed += 1
+	if freed > 0:
+		_sprites.clear()
+	return freed
 
 
 static func has_tile(id: String) -> bool:
@@ -122,7 +146,8 @@ static func resolve_seasonal(id: String, season: String) -> String:
 static func _sprite(index: int) -> Array:
 	if _sprites.has(index):
 		return _sprites[index]
-	for sheet: Dictionary in _sheets:
+	for s_idx in range(_sheets.size()):
+		var sheet: Dictionary = _sheets[s_idx]
 		if index < int(sheet["first"]) or index >= int(sheet["end"]):
 			continue
 		var frame: Vector2i = sheet["frame"]
@@ -133,7 +158,7 @@ static func _sprite(index: int) -> Array:
 		@warning_ignore("integer_division")
 		var rows_per_page := maxi(1, PAGE_HEIGHT / frame.y)
 		@warning_ignore("integer_division")
-		var texture := _page(sheet, row / rows_per_page, rows_per_page)
+		var texture := _page(s_idx, sheet, row / rows_per_page, rows_per_page)
 		if texture == null:
 			break
 		var region := Rect2(Vector2((local % cols) * frame.x, (row % rows_per_page) * frame.y), Vector2(frame))

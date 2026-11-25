@@ -1,122 +1,84 @@
-extends Control
+extends ColorRect
 
-# Crisp pixel-art harmonized rain & snow precipitation layer,
-# automatically masked out over buildings whose roofs have faded open.
-var rain := 0.0
-var snow := 0.0
-var daylight := 1.0
-var elapsed := 0.0
-var view_origin := Vector2i.ZERO
-var cell := 32
-var revealed_interior: Dictionary = {}
+# GPU-accelerated rain & snow precipitation overlay.
+# Runs entirely in weather_fx.gdshader (0.0 ms CPU per frame), while syncing a tiny
+# R8 revealed-interior mask texture only when nearby roofs fade open/closed.
+
+const FxShader = preload("res://scripts/weather_fx.gdshader")
+
+var _mat := ShaderMaterial.new()
+var _mask_tex: ImageTexture
+var _last_interior_sig := -1
+var _last_origin := Vector2i(-99999, -99999)
+var _last_span := Vector2i.ZERO
 
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	color = Color.WHITE
+	_mat.shader = FxShader
+	material = _mat
+	visible = false
 
 
 func configure(rain_strength: float, snow_strength: float, day_level: float,
-		origin := Vector2i.ZERO, cell_size := 32, interior := {}) -> void:
+		view_world: Vector2, view_span: Vector2, screen_px: Vector2,
+		view_origin := Vector2i.ZERO, view_size := Vector2i.ONE, interior := {}) -> void:
 	var active := rain_strength > 0.01 or snow_strength > 0.01
-	rain = rain_strength
-	snow = snow_strength
-	daylight = day_level
-	view_origin = origin
-	cell = maxi(1, cell_size)
-	revealed_interior = interior
 	visible = active
-	set_process(active)
-	if active:
-		queue_redraw()
-
-
-func _process(delta: float) -> void:
-	elapsed += delta
-	queue_redraw()
-
-
-func _inside_revealed(pos: Vector2) -> bool:
-	if revealed_interior.is_empty():
-		return false
-	var tile := view_origin + Vector2i((pos / float(cell)).floor())
-	return revealed_interior.has(tile)
-
-
-static func _hash(i: int, salt: int) -> float:
-	var n := ((i * 0x9e3779b9) ^ (salt * 0x85ebca6b)) & 0xffffffff
-	n = ((n ^ (n >> 16)) * 0x7feb352d) & 0xffffffff
-	return float((n ^ (n >> 15)) & 0xffff) / 65535.0
-
-
-func _draw() -> void:
-	if size.x < 4.0 or size.y < 4.0:
+	if not active:
 		return
-	if rain > 0.01:
-		_draw_rain()
-	if snow > 0.01:
-		_draw_snow()
+	_mat.set_shader_parameter("rain", rain_strength)
+	_mat.set_shader_parameter("snow", snow_strength)
+	_mat.set_shader_parameter("daylight", day_level)
+	_mat.set_shader_parameter("view_world", view_world)
+	_mat.set_shader_parameter("view_span", view_span)
+	_mat.set_shader_parameter("viewport_px", screen_px.max(Vector2(2.0, 2.0)))
+	_sync_interior_mask(view_origin, view_size, interior)
 
 
-func _draw_rain() -> void:
-	# Razor-thin 1px tapered Jiangnan drizzle/rain streaks (no thick blurry bars).
-	var count := int(lerpf(90.0, 260.0, rain))
-	var bright := lerpf(0.58, 0.94, daylight)
-	var slant := Vector2(-4.0 - 3.0 * rain, 24.0 + 18.0 * rain)
-	var speed := 620.0 + 300.0 * rain
-	for i in range(count):
-		var rx := _hash(i, 17)
-		var ry := _hash(i, 53)
-		var depth := 0.55 + 0.65 * _hash(i, 91)
-		var y := fposmod(ry * size.y + elapsed * speed * depth, size.y + 48.0) - 24.0
-		var x := fposmod(rx * size.x - elapsed * speed * 0.17 * depth, size.x + 48.0) - 24.0
-		var p := Vector2(floorf(x), floorf(y))
-		var seg := slant * depth
-		if _inside_revealed(p + seg * 0.5):
-			continue
-		var a := (0.09 + 0.13 * rain) * (0.45 + 0.55 * depth)
-		var mid := p + seg * 0.55
-		# Faint tail -> crisp fine lead tip
-		draw_line(p, mid, Color(0.76 * bright, 0.85 * bright, 0.93 * bright, a * 0.45), 1.0, false)
-		draw_line(mid, p + seg, Color(0.86 * bright, 0.92 * bright, 0.98 * bright, a), 1.0, false)
-	# Tiny pixel-scale ground impact splash ticks
-	var splashes := int(lerpf(18.0, 56.0, rain))
-	for i in range(splashes):
-		var phase := fposmod(elapsed * 3.4 + _hash(i, 211), 1.0)
-		var cycle := int(floor(elapsed * 3.4 + _hash(i, 211)))
-		var sx := floorf(_hash(i + cycle * 97, 307) * size.x)
-		var sy := floorf(_hash(i + cycle * 59, 419) * size.y)
-		if _inside_revealed(Vector2(sx, sy)):
-			continue
-		var a := (1.0 - phase) * (0.16 + 0.16 * rain)
-		var col := Color(0.86 * bright, 0.93 * bright, 0.99 * bright, a)
-		var spread := floorf(1.0 + phase * 2.6)
-		draw_rect(Rect2(sx - spread, sy, 1.0, 1.0), col)
-		draw_rect(Rect2(sx + spread, sy, 1.0, 1.0), col)
-		if phase < 0.45:
-			draw_rect(Rect2(sx, sy - 1.0, 1.0, 1.0), col)
+func set_view(view_world: Vector2, view_span: Vector2, screen_px: Vector2) -> void:
+	if not visible:
+		return
+	_mat.set_shader_parameter("view_world", view_world)
+	_mat.set_shader_parameter("view_span", view_span)
+	_mat.set_shader_parameter("viewport_px", screen_px.max(Vector2(2.0, 2.0)))
 
 
-func _draw_snow() -> void:
-	# Pixel-snapped 1x1 / 2x2 crisp drifting snow flecks harmonized with 32x32 tiles.
-	var count := int(lerpf(80.0, 230.0, snow))
-	var bright := lerpf(0.68, 1.0, daylight)
-	for i in range(count):
-		var rx := _hash(i, 701)
-		var ry := _hash(i, 811)
-		var depth := 0.40 + 0.80 * _hash(i, 919)
-		var fall := (34.0 + 32.0 * snow) * depth
-		var sway := sin(elapsed * (0.9 + depth * 0.8) + rx * TAU * 4.0) * (8.0 + 7.0 * depth)
-		var y := fposmod(ry * size.y + elapsed * fall, size.y + 20.0) - 10.0
-		var x := fposmod(rx * size.x - elapsed * (14.0 + 14.0 * snow) * depth + sway, size.x + 20.0) - 10.0
-		var px := floorf(x)
-		var py := floorf(y)
-		if _inside_revealed(Vector2(px, py)):
-			continue
-		var sz := 2.0 if depth > 0.90 else 1.0
-		var a := (0.28 + 0.46 * depth) * (0.62 + 0.38 * snow)
-		var col := Color(0.93 * bright, 0.96 * bright, 1.0 * bright, a)
-		draw_rect(Rect2(px, py, sz, sz), col)
-		if depth > 1.08:
-			draw_rect(Rect2(px - 1.0, py, 1.0, 1.0), Color(col.r, col.g, col.b, a * 0.35))
-			draw_rect(Rect2(px + sz, py, 1.0, 1.0), Color(col.r, col.g, col.b, a * 0.35))
+func _sync_interior_mask(view_origin: Vector2i, view_size: Vector2i, interior: Dictionary) -> void:
+	if interior.is_empty():
+		if _last_interior_sig != 0:
+			_last_interior_sig = 0
+			_mat.set_shader_parameter("has_interior_mask", false)
+		return
+	var sig := interior.size() * 73856093 ^ (view_origin.x * 19349663) ^ (view_origin.y * 83492791)
+	if sig == _last_interior_sig and view_origin == _last_origin and view_size == _last_span:
+		return
+	_last_interior_sig = sig
+	_last_origin = view_origin
+	_last_span = view_size
+	var w := maxi(1, view_size.x + 2)
+	var h := maxi(1, view_size.y + 2)
+	var mask_origin := view_origin - Vector2i.ONE
+	var buf := PackedByteArray()
+	buf.resize(w * h)
+	var any_set := false
+	for p: Vector2i in interior:
+		var lx := p.x - mask_origin.x
+		var ly := p.y - mask_origin.y
+		if lx >= 0 and ly >= 0 and lx < w and ly < h:
+			buf[ly * w + lx] = 255
+			any_set = true
+	if not any_set:
+		_mat.set_shader_parameter("has_interior_mask", false)
+		return
+	var img := Image.create_from_data(w, h, false, Image.FORMAT_R8, buf)
+	if _mask_tex == null or _mask_tex.get_size() != Vector2(w, h):
+		_mask_tex = ImageTexture.create_from_image(img)
+	else:
+		_mask_tex.update(img)
+	_mat.set_shader_parameter("interior_mask", _mask_tex)
+	_mat.set_shader_parameter("mask_origin", Vector2(mask_origin))
+	_mat.set_shader_parameter("mask_size", Vector2(w, h))
+	_mat.set_shader_parameter("has_interior_mask", true)

@@ -11,7 +11,8 @@ add_library(cangling SHARED
     native/register.cpp native/world.cpp native/city.cpp native/buildings.cpp
     native/plan.cpp native/terrain.cpp native/streets.cpp native/street_plots.cpp
     native/navigation.cpp native/interactions.cpp native/props.cpp native/save.cpp
-    native/city_survey.cpp native/building_types.cpp native/items.cpp)
+    native/city_survey.cpp native/building_types.cpp native/items.cpp
+    native/thread_pool.cpp native/memory_manager.cpp native/render_bake.cpp)
 file(WRITE "${CMAKE_BINARY_DIR}/.gdignore" "\n")
 target_compile_features(cangling PRIVATE cxx_std_17)
 target_link_libraries(cangling PRIVATE godot-cpp)
