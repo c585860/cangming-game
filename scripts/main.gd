@@ -5,6 +5,8 @@ const Board = preload("res://scripts/board.gd")
 const Survey = preload("res://scripts/survey.gd")
 const Atlas = preload("res://scripts/city_atlas.gd")
 const Items = preload("res://scripts/item_ui.gd")
+const ActionMenu = preload("res://scripts/ccb_action_menu.gd")
+const CCBUI = preload("res://scripts/ccb_ui.gd")
 const CanglingCalendar = preload("res://scripts/cangling_calendar.gd")
 const Weather = preload("res://scripts/weather.gd")
 const MoveInput = preload("res://scripts/move_input.gd")
@@ -31,7 +33,9 @@ var realm_badge: PanelContainer
 var realm_label: Label
 var stats_text: Label
 var resources_text: Label
+var needs_text: Label
 var status_text: Label
+var pending_dir_action := ""
 var journal: VBoxContainer
 var action_menu: PopupMenu
 var action_cell := NONE
@@ -176,6 +180,7 @@ func _build_ui() -> void:
 	stat_head.add_child(realm_badge)
 	stats_text = _label(status_col, "", 14, INK)
 	resources_text = _label(status_col, "", 13, SOFT)
+	needs_text = _label(status_col, "", 12, UI.JADE, true)
 
 	# Active Quest Card
 	var quest_card := PanelContainer.new()
@@ -205,7 +210,7 @@ func _build_ui() -> void:
 	footer.add_child(foot_row)
 	status_text = _label(foot_row, "", 13, GOLD)
 	status_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var hints := _label(foot_row, "左键寻路 · 右键交互 · 滚轮缩放 · . 候时 · L 环视 · M 舆图 · K 调试", 12, UI.INK_DIM)
+	var hints := _label(foot_row, "回车 动作菜单 · o开 c关 e查 g拾 G拖家具 · E吃 W穿 T脱 · i囊 @身 |候 · K调", 12, UI.INK_DIM)
 	hints.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 
 	action_menu = PopupMenu.new()
@@ -242,7 +247,17 @@ func _process(delta: float) -> void:
 
 func _apply_directional_step(direction: Vector2i) -> void:
 	_stop()
+	if not pending_dir_action.is_empty():
+		var target: Vector2i = world.pos + direction
+		var act := pending_dir_action
+		pending_dir_action = ""
+		_execute_directional_action(act, target)
+		_refresh()
+		return
 	if look_at == NONE:
+		if board.motion.is_resting():
+			board.exit_posture()
+			status_text.text = ""
 		_move_one(world.pos + direction)
 	else:
 		look_at = (look_at + direction).clamp(Vector2i.ZERO, world.city_size - Vector2i.ONE)
@@ -313,6 +328,10 @@ func _refresh() -> void:
 		UI.JADE if cultivated else UI.BORDER_JADE, 8, 1))
 	stats_text.text = "铜钱 %d 文   ·   清露草 %d 株" % [world.coins, world.herbs]
 	resources_text.text = "行囊水壶  %d / %d 毫升" % [world.bottle_water(), world.bottle_capacity()]
+	var st: Dictionary = world.character_status()
+	var grab_tag := "  ·  [拖拽家具中]" if world.is_grabbing() else ""
+	needs_text.text = "饱食:%s · 水分:%s · 精力:%s%s" % [
+		st.get("hunger_text", "正常"), st.get("thirst_text", "正常"), st.get("fatigue_text", "尚可"), grab_tag]
 	board.follow(world.pos if look_at == NONE else look_at)
 	minimap.queue_redraw()
 
@@ -345,8 +364,18 @@ func _stop() -> void:
 
 
 func _map_clicked(cell: Vector2i) -> void:
-	if opened.is_empty():
-		_begin_route(cell)
+	if not opened.is_empty():
+		return
+	if not pending_dir_action.is_empty():
+		if world.near(cell):
+			var act := pending_dir_action
+			pending_dir_action = ""
+			_execute_directional_action(act, cell)
+			_refresh()
+		else:
+			status_text.text = "请点击紧邻身旁的格子，或按 Esc 取消。"
+		return
+	_begin_route(cell)
 
 
 func _open_actions(cell: Vector2i) -> void:
@@ -375,6 +404,8 @@ func _choose_action(id: int) -> void:
 func _begin_route(cell: Vector2i, action := "") -> void:
 	look_at = NONE
 	_stop()
+	if action != "rest" and board.motion.is_resting():
+		board.exit_posture()
 	status_text.text = ""
 	if not action.is_empty() and world.near(cell):
 		_perform_action(cell, action)
@@ -392,11 +423,18 @@ func _begin_route(cell: Vector2i, action := "") -> void:
 
 
 func _move_one(next: Vector2i) -> bool:
-	var opens_door: bool = world.terrain_at(next) == "D"
+	var was_grabbing: bool = world.is_grabbing()
+	var next_tile: String = world.terrain_at(next)
+	var opens_door: bool = next_tile == "D"
+	var climbs_window: bool = next_tile == "O"
 	if not world.move_one(next):
+		if was_grabbing:
+			status_text.text = "家具前方受阻，无法拖动。"
 		return false
-	if opens_door:
+	if opens_door or was_grabbing:
 		board.invalidate_lightmap()
+	if climbs_window:
+		status_text.text = "你翻越了雕花木窗。"
 	return true
 
 
@@ -570,11 +608,11 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		overlay.offset_right = -14
 		overlay.offset_top = 14
 		overlay.offset_bottom = -14
-	elif kind == "debug":
-		overlay.anchor_left = 0.20
-		overlay.anchor_right = 0.80
-		overlay.anchor_top = 0.09
-		overlay.anchor_bottom = 0.91
+	elif kind in ["debug", "action_menu", "eat", "wear", "take_off", "pickup", "character", "inventory"]:
+		overlay.anchor_left = 0.18
+		overlay.anchor_right = 0.82
+		overlay.anchor_top = 0.08
+		overlay.anchor_bottom = 0.92
 		overlay.offset_left = 0
 		overlay.offset_right = 0
 		overlay.offset_top = 0
@@ -596,8 +634,11 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 	var heading := HBoxContainer.new()
 	heading.add_theme_constant_override("separation", 10)
 	contents.add_child(heading)
-	var glyphs := {"map": "图", "inventory": "囊", "character": "名", "pause": "卷", "wait": "时", "new": "始", "debug": "调"}
-	var titles := {"map": "沧菱城舆图", "inventory": "随身行囊", "character": "行旅名帖", "pause": "行旅名录", "wait": "静候天时", "new": "重开行旅", "debug": "调试菜单（K）"}
+	var glyphs := {"map": "图", "inventory": "囊", "character": "身", "pause": "卷", "wait": "时", "new": "始", "debug": "调",
+		"action_menu": "令", "eat": "膳", "wear": "衣", "take_off": "解", "pickup": "拾"}
+	var titles := {"map": "沧菱城舆图", "inventory": "随身行囊 (i)", "character": "人物与着装状态 (@)", "pause": "行旅名录",
+		"wait": "静候天时 (|)", "new": "重开行旅", "debug": "调试菜单 (K)",
+		"action_menu": "动作菜单 (Enter)", "eat": "进食与饮水 (E)", "wear": "穿戴衣物 (W)", "take_off": "脱下与整理着装 (T)", "pickup": "拾取与查看物品 (g / e)"}
 	UI.seal_stamp(heading, glyphs[kind])
 	var title := _label(heading, titles[kind], 21, GOLD)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -609,18 +650,20 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 	match kind:
 		"map":
 			_build_atlas(contents)
+		"action_menu":
+			ActionMenu.build_menu(self, contents)
+		"eat":
+			CCBUI.eat_menu(self, contents)
+		"wear":
+			CCBUI.wear_menu(self, contents)
+		"take_off":
+			CCBUI.take_off_menu(self, contents)
+		"pickup":
+			CCBUI.pickup_menu(self, contents, item_target)
 		"inventory":
 			Items.inventory(self, contents, item_target)
 		"character":
-			var card := PanelContainer.new()
-			card.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_CARD, UI.BORDER_JADE, 4, 14, 12, 1))
-			contents.add_child(card)
-			var info := _column(card, 8)
-			_stat_row(info, "身份", "凡俗旅人", INK)
-			_stat_row(info, "所在", "%s · %s" % [world.location(world.pos), _floor_name(world.floor)], INK)
-			_stat_row(info, "天时天气", "%s · %s" % [CanglingCalendar.time_label(world.minutes), weather.label()], GOLD)
-			_stat_row(info, "资财", "铜钱 %d 文 · 清露草 %d 株" % [world.coins, world.herbs], GOLD)
-			_stat_row(info, "行囊水壶", "%d / %d 毫升" % [world.bottle_water(), world.bottle_capacity()], SOFT)
+			CCBUI.character_sheet(self, contents)
 		"pause":
 			_button(contents, "继续行旅", _close_overlay, true)
 			_button(contents, "静候天时…", _show_overlay.bind("wait"))
@@ -809,16 +852,182 @@ func _perform_action(position: Vector2i, action: String) -> void:
 		"store":
 			if world.actions_at(position).has(action):
 				_show_overlay("inventory", position)
+		"container":
+			var open_msg: String = world.open_at(position)
+			if not open_msg.is_empty():
+				_note(open_msg)
+				board.invalidate_world_cache()
+			_show_overlay("pickup", position)
+		"loot":
+			_show_overlay("pickup", position)
 		"water_take", "water_pour":
 			Items.water(self, position, action == "water_take")
 		_:
 			var result: String = world.interact(position, action)
 			if not result.is_empty():
-				if action in ["door", "window"]:
+				if action == "rest":
+					var tile: String = world.terrain_at(position)
+					if tile == "b":
+						board.enter_posture(&"lying", position)
+						status_text.text = "你正躺在床榻上歇息（按方向键即可起身）。"
+					elif tile == "q" or tile == "S":
+						board.enter_posture(&"sitting", position)
+						status_text.text = "你正坐在椅凳上小憩（按方向键即可起身）。"
+				elif action in ["door", "window", "stairs_up", "stairs_down"]:
 					board.invalidate_lightmap()
+				elif action in ["grab", "release_grab"]:
+					status_text.text = result
+					board.markers.queue_redraw()
 				else:
 					board.invalidate_world_cache()
 			_note(result)
+
+
+func _candidates_for_dir_action(act: String) -> Array[Vector2i]:
+	var found: Array[Vector2i] = []
+	var pos: Vector2i = world.pos
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			if dx == 0 and dy == 0 and act != "examine":
+				continue
+			var p := pos + Vector2i(dx, dy)
+			var t: String = world.terrain_at(p)
+			match act:
+				"open":
+					if t in ["D", "w"] or (t in ["c", "C", "F", "K", "r"] and not world.is_container_open(p)):
+						found.append(p)
+				"close":
+					if t in ["o", "O"] or (t in ["c", "C", "F", "K", "r"] and world.is_container_open(p)):
+						found.append(p)
+				"grab":
+					if t in ["q", "S", "t", "l", "C", "c", "a", "u", "b", "k", "K", "r", "P"]:
+						found.append(p)
+				"examine":
+					if t in ["c", "C", "F", "K", "r", "b", "q", "S", "t", "l", "k", "h", "u", "a", "D", "o", "w", "O"] or not world.items_at(p).is_empty():
+						found.append(p)
+	return found
+
+
+func _start_directional_action(act: String) -> void:
+	if act == "grab" and world.is_grabbing():
+		var msg: String = world.release_grab()
+		status_text.text = msg
+		_note(msg)
+		board.markers.queue_redraw()
+		_refresh()
+		return
+	var cands := _candidates_for_dir_action(act)
+	if cands.is_empty():
+		var labels := {"open": "打开的门、窗或柜子", "close": "关闭的门、窗或柜子", "grab": "抓取拖拽的家具", "examine": "检查或互动的对象"}
+		status_text.text = "身旁没有可%s。" % labels.get(act, "操作的目标")
+		return
+	if cands.size() == 1:
+		_execute_directional_action(act, cands[0])
+		_refresh()
+		return
+	pending_dir_action = act
+	var prompts := {"open": "向哪个方向开门/窗/柜？", "close": "向哪个方向关门/窗/柜？", "grab": "抓取哪个方向的家具？", "examine": "检查哪个方向？"}
+	status_text.text = "%s（按方向键/小键盘或点击邻格，Esc 取消）" % prompts.get(act, "请选择方向")
+
+
+func _execute_directional_action(act: String, target: Vector2i) -> void:
+	match act:
+		"open":
+			var msg: String = world.open_at(target)
+			if msg.is_empty():
+				status_text.text = "那个方向没有可打开的门、窗或柜子。"
+			else:
+				status_text.text = msg
+				_note(msg)
+				board.invalidate_lightmap()
+				if world.is_container_open(target) and not world.items_at(target).is_empty():
+					_show_overlay("pickup", target)
+		"close":
+			var msg: String = world.close_at(target)
+			if msg.is_empty():
+				status_text.text = "那个方向没有可关闭的门、窗或柜子。"
+			else:
+				status_text.text = msg
+				_note(msg)
+				board.invalidate_lightmap()
+		"grab":
+			var msg: String = world.grab_furniture(target)
+			status_text.text = msg
+			_note(msg)
+			board.markers.queue_redraw()
+		"examine":
+			var t: String = world.terrain_at(target)
+			if t in ["c", "C", "F", "K", "r"]:
+				_perform_action(target, "container")
+			elif not world.items_at(target).is_empty():
+				_show_overlay("pickup", target)
+			else:
+				var msg: String = world.interact(target, "inspect")
+				if msg.is_empty():
+					msg = "这里似乎没有什么特别的东西。"
+				status_text.text = msg
+				_note(msg)
+
+
+func _run_ccb_action(act_id: String) -> void:
+	match act_id:
+		"sky":
+			var msg := CCBUI.observe_sky_message(self)
+			status_text.text = msg
+			_note(msg)
+		"look":
+			_stop()
+			look_at = world.pos if look_at == NONE else NONE
+			status_text.text = "环视：%s" % world.location(look_at) if look_at != NONE else ""
+			_refresh()
+		"map", "inventory", "eat", "wear", "take_off", "pickup", "character", "wait", "debug":
+			_show_overlay(act_id)
+		"drop":
+			_show_overlay("inventory")
+		"open", "close", "examine", "grab":
+			_start_directional_action(act_id)
+		"stairs_up":
+			var msg: String = world.change_floor(1)
+			status_text.text = msg
+			_note(msg)
+			board.invalidate_lightmap()
+			_refresh()
+		"stairs_down":
+			var msg: String = world.change_floor(-1)
+			status_text.text = msg
+			_note(msg)
+			board.invalidate_lightmap()
+			_refresh()
+		"stand":
+			board.exit_posture()
+			status_text.text = "你起身整了整衣衫。"
+			_refresh()
+		"sleep", "rest_nearby":
+			var pos: Vector2i = world.pos
+			var bed := NONE
+			var seat := NONE
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					var p := pos + Vector2i(dx, dy)
+					var t: String = world.terrain_at(p)
+					if t == "b" and bed == NONE:
+						bed = p
+					elif (t == "q" or t == "S") and seat == NONE:
+						seat = p
+			if bed != NONE:
+				_perform_action(bed, "rest")
+			elif seat != NONE:
+				_perform_action(seat, "rest")
+			else:
+				world.rest_minutes(30, false)
+				var msg := "你寻了处角落小憩半个时辰。"
+				status_text.text = msg
+				_note(msg)
+			_refresh()
+		"save":
+			_save()
+		"load":
+			_load()
 
 
 func _travel_from_overview(destination: Vector2i) -> void:
@@ -857,12 +1066,16 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if not event is InputEventKey or not event.pressed:
 		return
 	var key: Key = event.physical_keycode
-	var views := {KEY_M: "map", KEY_I: "inventory", KEY_C: "character", KEY_K: "debug"}
-	if not event.echo and views.has(key):
-		_show_overlay(views[key])
-		get_viewport().set_input_as_handled()
-		return
+	var kc: Key = event.keycode
+	var shift: bool = event.shift_pressed
+	var ctrl_or_alt: bool = event.ctrl_pressed or event.alt_pressed or event.meta_pressed
+
 	if key == KEY_ESCAPE and not event.echo:
+		if not pending_dir_action.is_empty():
+			pending_dir_action = ""
+			status_text.text = "已取消操作。"
+			get_viewport().set_input_as_handled()
+			return
 		if wait_timer.time_left > 0.0:
 			_stop()
 			_refresh()
@@ -878,11 +1091,100 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			_show_overlay("pause")
 		get_viewport().set_input_as_handled()
 		return
+
 	if not opened.is_empty():
 		if atlas != null and atlas.keyboard(key):
 			get_viewport().set_input_as_handled()
 		return
-	if (event.keycode == KEY_PERIOD or event.keycode == KEY_KP_5 or event.physical_keycode == KEY_KP_5) and not (event.shift_pressed or event.ctrl_pressed or event.alt_pressed or event.meta_pressed):
+
+	if not event.echo and not ctrl_or_alt:
+		# Enter -> CCB Action Menu
+		if kc == KEY_ENTER or kc == KEY_KP_ENTER or key == KEY_ENTER or key == KEY_KP_ENTER:
+			_show_overlay("action_menu")
+			get_viewport().set_input_as_handled()
+			return
+		# CCB Shift+Key bindings (uppercase letters & symbols — zero conflict with lowercase WASD!)
+		if shift:
+			if key == KEY_E:
+				_show_overlay("eat")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_W:
+				_show_overlay("wear")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_T or key == KEY_EQUAL:
+				_show_overlay("take_off")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_G:
+				_start_directional_action("grab")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_D:
+				_show_overlay("inventory")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_2 or kc == KEY_AT:
+				_show_overlay("character")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_BACKSLASH or kc == KEY_BAR:
+				_show_overlay("wait")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_4 or kc == KEY_DOLLAR:
+				_run_ccb_action("sleep")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_COMMA or kc == KEY_LESS:
+				_run_ccb_action("stairs_up")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_PERIOD or kc == KEY_GREATER:
+				_run_ccb_action("stairs_down")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_K:
+				_show_overlay("debug")
+				get_viewport().set_input_as_handled()
+				return
+		else:
+			# CCB lowercase single-key bindings (o open, c close, e examine, g/, pickup, i inv, m map, x/L look, k debug)
+			if key == KEY_O:
+				_start_directional_action("open")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_C:
+				_start_directional_action("close")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_E:
+				_start_directional_action("examine")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_G or key == KEY_COMMA:
+				_show_overlay("pickup")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_I:
+				_show_overlay("inventory")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_M:
+				_show_overlay("map")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_K:
+				_show_overlay("debug")
+				get_viewport().set_input_as_handled()
+				return
+			if key == KEY_X or key == KEY_L:
+				_run_ccb_action("look")
+				get_viewport().set_input_as_handled()
+				return
+
+	if (kc == KEY_PERIOD or kc == KEY_KP_5 or key == KEY_KP_5) and not (shift or ctrl_or_alt):
 		if not event.echo:
 			_stop()
 			period_key = key
@@ -890,14 +1192,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			period_timer.start(0.27)
 		get_viewport().set_input_as_handled()
 		return
-	if key == KEY_L and not event.echo:
-		_stop()
-		look_at = world.pos if look_at == NONE else NONE
-		status_text.text = "环视：%s" % world.location(look_at) if look_at != NONE else ""
-		_refresh()
-		get_viewport().set_input_as_handled()
-		return
-	if move_input.is_movement_key(event):
+	if move_input.is_movement_key(event) and not shift:
 		var direction := move_input.handle_key_press(event)
 		if direction != Vector2i.ZERO:
 			_apply_directional_step(direction)

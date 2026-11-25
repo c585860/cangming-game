@@ -3,19 +3,10 @@
 namespace cangling {
 String CanglingWorld::generated_prop(Vector2i p) {
     if (city.layout < 2 || !in_city(p)) return {};
-    const char tile = city.tile(p,floor);
-    const auto roll = sector_seed(seed ^ (floor ? 0xb6a31423u : 0x3280ea56u),p);
-    if (tile == 'b' && roll % 3 != 0) return "sheet";
-    if (tile == 'k' && city.surface(p,floor) == 'J' && roll % 3 != 0) {
-        constexpr std::array food{"apple", "flatbread", "pear"};
-        return food[roll/3 % food.size()];
-    }
-    if (tile == 'K' && roll % 4 != 0) return roll % 3 == 0 ? "herb_bundle" : "clay_bottle";
-    if (tile == 't' && roll % 5 == 0) return "pear";
-    if (tile == 'F') {
-        constexpr std::array clothes{"tunic", "pants", "robe", "boots"};
-        const auto cloth = sector_seed(seed ^ (floor ? 0x75cc9414u : 0xdaaf6712u),p);
-        if (cloth % 5 != 0) return clothes[cloth/5 % clothes.size()];
+    const ItemCounts spawned = spawn_contextual_items(effective_tile(p, floor), city.surface(p, floor), seed, p, floor);
+    const auto &cat = item_catalog();
+    for (int i = 0; i < item_types; ++i) {
+        if (spawned[i] > 0) return String(cat[i].key);
     }
     return {};
 }

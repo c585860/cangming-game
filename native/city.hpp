@@ -129,7 +129,8 @@ void build_street_plot(Block &block, Vector2i origin, const char *kind, std::mt1
 void build_specialty_plot(Block &block, Vector2i origin, const char *kind, std::mt19937 &rng, bool keep_footprint);
 void repair_windows(Block &block);
 inline bool passable_tile(char tile) {
-    return std::string_view("Diov^Xs:.+=").find(tile) != std::string_view::npos;
+    // CCB passable rules: floors, stairs, doors, open windows (climbable), beds, chairs & benches (steppable).
+    return std::string_view("Diov^Xs:.+=ObqS").find(tile) != std::string_view::npos;
 }
 inline char &tile_ref(Tiles &tiles, int x, int y) { return tiles[y * sector_size + x]; }
 inline bool in_city(Vector2i p) { return p.x >= 0 && p.y >= 0 && p.x < city_size && p.y < city_size; }

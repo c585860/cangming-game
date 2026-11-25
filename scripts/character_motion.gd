@@ -6,6 +6,7 @@ extends RefCounted
 
 const Pack = preload("res://scripts/undead_tiles.gd")
 const Lighting = preload("res://scripts/lighting.gd")
+const Posture = preload("res://scripts/character_posture.gd")
 
 var visual_pos := Vector2.ZERO
 var target_pos := Vector2.ZERO
@@ -14,15 +15,38 @@ var facing_dir := Vector2.DOWN
 var walk_cycle := 0.0
 var walk_blend := 0.0
 var move_speed := 7.6 # tiles/sec, matched smoothly to MoveInput.REPEAT_STEP_INTERVAL (0.135s -> 7.4/s)
+var posture := Posture.new()
 
 
 func snap_to(grid_pos: Vector2i) -> void:
 	visual_pos = Vector2(grid_pos)
 	target_pos = Vector2(grid_pos)
 	walk_blend = 0.0
+	posture.reset()
+
+
+func enter_posture(kind: StringName, furniture_tile: Vector2i, cells: Dictionary, seed: int) -> void:
+	var dest := posture.enter(kind, furniture_tile, cells, seed)
+	var delta := dest - visual_pos
+	if absf(delta.x) > 0.05:
+		facing_x = -1 if delta.x < 0.0 else 1
+	target_pos = dest
+
+
+func exit_posture(stand_pos: Vector2i) -> void:
+	if not posture.is_active():
+		return
+	posture.exit()
+	target_pos = Vector2(stand_pos)
+
+
+func is_resting() -> bool:
+	return posture.is_active()
 
 
 func set_target(grid_pos: Vector2i) -> void:
+	if posture.is_active():
+		posture.exit()
 	var next := Vector2(grid_pos)
 	var delta := next - target_pos
 	if delta.length_squared() > 16.0:
@@ -40,12 +64,14 @@ func tick(delta: float) -> bool:
 	var dist := diff.length()
 	var moved := false
 	if dist > 0.002:
-		# Smooth responsive stride without sudden snapping
 		var speed := maxf(move_speed, dist * 6.8)
 		var step := minf(dist, speed * delta)
 		visual_pos += diff * (step / dist)
-		walk_cycle = fposmod(walk_cycle + step * 1.10, 2.0)
-		walk_blend = move_toward(walk_blend, 1.0, delta * 14.0)
+		if not posture.is_active():
+			walk_cycle = fposmod(walk_cycle + step * 1.10, 2.0)
+			walk_blend = move_toward(walk_blend, 1.0, delta * 14.0)
+		else:
+			walk_blend = move_toward(walk_blend, 0.0, delta * 14.0)
 		moved = true
 	else:
 		visual_pos = target_pos
@@ -54,6 +80,8 @@ func tick(delta: float) -> bool:
 			moved = true
 		else:
 			walk_blend = 0.0
+	if posture.tick(delta):
+		moved = true
 	return moved
 
 
@@ -121,7 +149,8 @@ func compute_player_tint(cells: Dictionary, scene_lighting: RefCounted, weather:
 
 
 func draw_character(board: Control, dest: Control, role: StringName, at_world: Vector2,
-		animated := false, tile_cell := Vector2i.ZERO, lit_tint := Color.WHITE) -> void:
+		animated := false, tile_cell := Vector2i.ZERO, lit_tint := Color.WHITE,
+		worn_overlays := PackedStringArray()) -> void:
 	var masking := dest.has_method("surface_id")
 	var cell_f := float(board.cell)
 	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
@@ -138,32 +167,45 @@ func draw_character(board: Control, dest: Control, role: StringName, at_world: V
 			outfit_tint = tint if masking else (Color("e4d4b2") * lit_tint)
 
 	var flip := animated and facing_x < 0
+	if animated and not masking and posture.is_active():
+		posture.draw_posture(dest, origin, cell_f, flip, lit_tint, outfit, outfit_tint, worn_overlays)
+		return
+
 	var bob := bob_px(cell_f) if animated else 0.0
 	var sway := stride_offset_x(cell_f) if animated else 0.0
 	var lean := lean_rad() if animated else 0.0
 	var draw_origin := origin + Vector2(sway, bob)
 
 	if animated and not masking:
-		# Subtle soft contact grounding oval right beneath the animated feet
 		var foot := origin + Vector2(cell_f * 0.5, cell_f * 0.87)
 		var shadow_scale := 1.0 - absf(bob) / maxf(1.0, cell_f * 0.35)
 		dest.draw_set_transform(foot, 0.0, Vector2(shadow_scale, 0.36 * shadow_scale))
 		dest.draw_circle(Vector2.ZERO, cell_f * 0.28, Color(0.03, 0.05, 0.06, 0.34))
 		dest.draw_set_transform(Vector2.ZERO)
 
+	var use_custom := role == &"player" and (not worn_overlays.is_empty() or animated)
 	if animated and (absf(lean) > 0.002 or flip) and not masking:
-		# Apply lean & horizontal flip in ONE transform and pass flip=false to Pack.draw_at;
-		# Pack._draw_layer resets draw_set_transform when flip=true, which previously overwrote
-		# our pivot and threw the sprite off-screen whenever walking left!
 		var pivot := draw_origin + Vector2(cell_f * 0.5, cell_f * 0.85)
 		var scale_vec := Vector2(-1.0 if flip else 1.0, 1.0)
 		dest.draw_set_transform(pivot, lean, scale_vec)
 		var local_origin := -Vector2(cell_f * 0.5, cell_f * 0.85)
-		for id: String in ["player_male", "overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
-			Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
-		Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, false)
+		Pack.draw_at(dest, "player_male", local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
+		if use_custom:
+			for oid: String in worn_overlays:
+				var ot := outfit_tint if oid in ["overlay_worn_cloak", "overlay_worn_robe"] else tint
+				Pack.draw_at(dest, oid, local_origin, cell_f, 0, -1, 0, ot, Vector2.ZERO, false)
+		else:
+			for id: String in ["overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
+				Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
+			Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, false)
 		dest.draw_set_transform(Vector2.ZERO)
 	else:
-		for id: String in ["player_male", "overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
-			Pack.draw_at(dest, id, draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
-		Pack.draw_at(dest, outfit, draw_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, flip)
+		Pack.draw_at(dest, "player_male", draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
+		if use_custom:
+			for oid: String in worn_overlays:
+				var ot := outfit_tint if oid in ["overlay_worn_cloak", "overlay_worn_robe"] else tint
+				Pack.draw_at(dest, oid, draw_origin, cell_f, 0, -1, 0, ot, Vector2.ZERO, flip)
+		else:
+			for id: String in ["overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
+				Pack.draw_at(dest, id, draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
+			Pack.draw_at(dest, outfit, draw_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, flip)

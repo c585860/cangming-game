@@ -3,6 +3,7 @@
 #include "render_bake.hpp"
 #include "thread_pool.hpp"
 #include <godot_cpp/core/class_db.hpp>
+#include <algorithm>
 #include <string_view>
 
 namespace cangling {
@@ -10,6 +11,7 @@ using namespace godot;
 
 CanglingWorld::CanglingWorld() {
     ThreadPool::instance().ensure_started();
+    char_state.reset_defaults();
     MemoryManager::instance().register_hook(
         this,
         "city_sector_cache",
@@ -25,19 +27,26 @@ CanglingWorld::~CanglingWorld() {
 
 void CanglingWorld::_bind_methods() {
 #define BIND(name, ...) ClassDB::bind_method(D_METHOD(#name, ##__VA_ARGS__), &CanglingWorld::name)
-    BIND(setup, "seed"); BIND(get_seed); BIND(get_pos); BIND(get_floor); BIND(get_minutes); BIND(advance_time, "amount"); BIND(get_quest);
-    BIND(get_herbs); BIND(get_coins); BIND(get_city_size); BIND(get_sector_size); BIND(get_quest_text);
+    BIND(setup, "seed"); BIND(get_seed); BIND(get_pos); BIND(get_floor); BIND(get_minutes);
+    BIND(advance_time, "amount"); BIND(rest_minutes, "amount", "sleeping");
+    BIND(get_quest); BIND(get_herbs); BIND(get_coins); BIND(get_city_size); BIND(get_sector_size); BIND(get_quest_text);
     BIND(get_landmarks); BIND(location, "position"); BIND(overview, "sector"); BIND(road_mask, "sector");
     BIND(city_survey);
     BIND(lighting_column, "position", "z", "layers");
     BIND(terrain_at, "position"); BIND(terrain_at_level, "position", "z"); BIND(surface_at, "position"); BIND(surface_at_level, "position", "z"); BIND(prop_at, "position");
-    BIND(inventory); BIND(place_item,"position","item"); BIND(water_at,"position");
-    BIND(water_capacity_at,"position"); BIND(bottle_water); BIND(bottle_capacity);
-    BIND(transfer_water,"position","amount_ml","fill_bottle");
+    BIND(inventory); BIND(items_at, "position"); BIND(take_item_at, "position", "item"); BIND(take_all_at, "position");
+    BIND(place_item, "position", "item"); BIND(drop_item, "item");
+    BIND(eat_item, "item"); BIND(eat_item_at, "position", "item"); BIND(drink_bottle, "ml");
+    BIND(wear_item, "item"); BIND(take_off_item, "worn_index");
+    BIND(character_status); BIND(worn_overlays);
+    BIND(open_at, "position"); BIND(close_at, "position"); BIND(is_container_open, "position");
+    BIND(grab_furniture, "target"); BIND(release_grab); BIND(get_grab_offset); BIND(is_grabbing);
+    BIND(water_at, "position"); BIND(water_capacity_at, "position"); BIND(bottle_water); BIND(bottle_capacity);
+    BIND(transfer_water, "position", "amount_ml", "fill_bottle");
     BIND(street_curve, "sector", "direction"); BIND(walkable, "position"); BIND(near, "position"); BIND(site_at, "position");
-    BIND(move_one, "next"); BIND(route_to,"destination","interact_with_target");
-    BIND(actions_at,"position"); BIND(interact,"position","action"); BIND(change_floor,"direction");
-    BIND(save_game,"path"); BIND(load_game,"path");
+    BIND(move_one, "next"); BIND(route_to, "destination", "interact_with_target");
+    BIND(actions_at, "position"); BIND(interact, "position", "action"); BIND(change_floor, "direction");
+    BIND(save_game, "path"); BIND(load_game, "path");
     BIND(bake_region_data, "area", "z", "layers", "season");
     BIND(bake_ambient_data, "area", "region", "z", "outdoor_light", "sun_warmth");
     BIND(bake_point_lights_data, "area", "region", "z", "sites", "seed");
@@ -53,7 +62,17 @@ void CanglingWorld::_bind_methods() {
 }
 
 void CanglingWorld::advance_time(int amount) {
-    if (amount > 0) minutes += amount;
+    if (amount > 0) {
+        minutes += amount;
+        char_state.advance_minutes(amount, false, false);
+    }
+}
+
+void CanglingWorld::rest_minutes(int amount, bool sleeping) {
+    if (amount > 0) {
+        minutes += amount;
+        char_state.advance_minutes(amount, !sleeping, sleeping);
+    }
 }
 
 void CanglingWorld::setup(int64_t new_seed) {
@@ -64,45 +83,48 @@ void CanglingWorld::setup(int64_t new_seed) {
     minutes = 440;
     collected.fill(false);
     doors.clear();
+    tile_overrides.clear();
+    open_containers.clear();
+    grab_offset = {0, 0};
     clear_items();
+    char_state.reset_defaults();
+    // Starting traveler provisions: 2 flatbreads, 1 tea cup, 500 ml clean water in bottle
+    carried[16] = 2; // 芝麻炊饼
+    carried[23] = 1; // 江南清茶
+    carried_water = 500;
 }
 
 String CanglingWorld::overview(Vector2i s) const { return String::chr(city.plan.overview(s)); }
 
 String CanglingWorld::surface_at(Vector2i p) {
-    return surface_at_level(p,floor);
+    return surface_at_level(p, floor);
 }
 
 String CanglingWorld::surface_at_level(Vector2i p, int z) {
-    const char value = city.surface(p,z);
+    const char value = city.surface(p, z);
     return value ? String::chr(value) : String();
 }
 
 String CanglingWorld::terrain_at_level(Vector2i p, int z) {
-    char tile = city.tile(p,z);
-    if ((tile == 'D' || tile == 'w') && doors.count(key(p,z))) tile = tile == 'D' ? 'o' : 'O';
-    return String::chr(tile);
+    return String::chr(effective_tile(p, z));
 }
 
 Array CanglingWorld::street_curve(Vector2i s, int direction) const {
     Array points;
-    if (direction < 0 || direction >= 4 || !city.plan.connected(s,direction)) return points;
-    if (city.layout == 1) return Array::make(hub(s),hub(s+steps[direction]));
-    for (const auto p : city.plan.road_path(s,direction)) points.append(p);
+    if (direction < 0 || direction >= 4 || !city.plan.connected(s, direction)) return points;
+    if (city.layout == 1) return Array::make(hub(s), hub(s + steps[direction]));
+    for (const auto p : city.plan.road_path(s, direction)) points.append(p);
     return points;
 }
 
 String CanglingWorld::terrain_at(Vector2i p) {
-    char tile = city.tile(p, floor);
-    if (tile == 'D' && doors.count(key(p,floor))) tile = 'o';
-    if (tile == 'w' && doors.count(key(p,floor))) tile = 'O';
-    return String::chr(tile);
+    return String::chr(effective_tile(p, floor));
 }
 
 bool CanglingWorld::walkable_on(Vector2i p, int z) {
     if (!in_city(p)) return false;
     if (z == 0 && (p == market_tile || p == altar_tile || p == dock_tile)) return false;
-    return passable_tile(city.tile(p,z));
+    return passable_tile(effective_tile(p, z));
 }
 
 bool CanglingWorld::near(Vector2i p) const {
@@ -111,34 +133,102 @@ bool CanglingWorld::near(Vector2i p) const {
 }
 
 bool CanglingWorld::move_one(Vector2i next) {
-    if (pos == next || !near(next) || !walkable(next)) return false;
+    if (pos == next || !near(next)) return false;
     const Vector2i delta = next - pos;
     if (delta.x != 0 && delta.y != 0) {
-        // Match CCB diagonal movement: prevent squeezing between two diagonal solid corners.
         if (!walkable(pos + Vector2i(delta.x, 0)) && !walkable(pos + Vector2i(0, delta.y))) {
             return false;
         }
     }
-    if (city.tile(next, floor) == 'D' && !doors.count(key(next, floor))) {
-        doors.insert(key(next, floor));
-    } else {
-        pos = next;
+    if (grab_offset != Vector2i(0, 0)) {
+        return move_grabbed_furniture(next);
     }
-    ++minutes;
+    if (!walkable(next)) return false;
+    const char tile = effective_tile(next, floor);
+    if (tile == 'D') {
+        doors.insert(key(next, floor));
+        advance_time(1);
+        return true;
+    }
+    pos = next;
+    // CCB move cost: climbing open window (O) or stepping over bed/chair/bench takes 2 min
+    const int step_cost = (tile == 'O' || tile == 'b' || tile == 'q' || tile == 'S') ? 2 : 1;
+    advance_time(step_cost);
     return true;
 }
 
+String CanglingWorld::eat_item(int item) {
+    int mins = 0;
+    const String msg = char_state.consume_item(item, carried, mins);
+    minutes += mins;
+    return msg;
+}
+
+String CanglingWorld::eat_item_at(Vector2i p, int item) {
+    if (!in_city(p) || !near(p) || item < 0 || item >= item_types) return {};
+    if (items_on(p)[item] <= 0) return {};
+    const auto &def = item_catalog()[item];
+    if (def.category != ItemCategory::Food && def.category != ItemCategory::Drink) {
+        return String::utf8("这件物品无法食用或饮用。");
+    }
+    materialize_tile_items(p);
+    const int64_t k = key(p, floor);
+    auto it = stored_items.find(k);
+    if (it == stored_items.end() || it->second[item] <= 0) return {};
+    ItemCounts temp{};
+    temp[item] = 1;
+    int mins = 0;
+    const String msg = char_state.consume_item(item, temp, mins);
+    if (temp[item] == 0) {
+        if (--it->second[item] == 0 && std::none_of(it->second.begin(), it->second.end(), [](int n) { return n != 0; })) {
+            stored_items.erase(it);
+        }
+        minutes += mins;
+    }
+    return msg;
+}
+
+String CanglingWorld::drink_bottle(int ml) {
+    if (carried_water <= 0) return String::utf8("行囊水壶已空，可去水缸、水盆或河边取水。");
+    const int take = std::min(std::max(ml, 1), carried_water);
+    carried_water -= take;
+    int mins = 0;
+    const String msg = char_state.drink_water(take, mins);
+    minutes += mins;
+    return msg;
+}
+
+String CanglingWorld::wear_item(int item) {
+    const String msg = char_state.wear_from_bag(item, carried);
+    if (msg.begins_with(String::utf8("你穿上了"))) advance_time(1);
+    return msg;
+}
+
+String CanglingWorld::take_off_item(int worn_index) {
+    const String msg = char_state.take_off_to_bag(worn_index, carried);
+    if (msg.begins_with(String::utf8("你脱下了"))) advance_time(1);
+    return msg;
+}
+
+Dictionary CanglingWorld::character_status() const {
+    return char_state.to_dict(carried, carried_water);
+}
+
+PackedStringArray CanglingWorld::worn_overlays() const {
+    return char_state.worn_overlays();
+}
+
 Dictionary CanglingWorld::bake_region_data(Rect2i area, int z, int layers, const String &season) {
-    return RenderBaker::bake_region(city, doors, area, z, layers, season, last_bake_ms);
+    return RenderBaker::bake_region(city, doors, tile_overrides, area, z, layers, season, last_bake_ms);
 }
 
 PackedByteArray CanglingWorld::bake_ambient_data(Rect2i area, Rect2i region, int z, double outdoor_light, double sun_warmth) {
-    return RenderBaker::bake_ambient(city, doors, area, region, z,
+    return RenderBaker::bake_ambient(city, doors, tile_overrides, area, region, z,
         static_cast<float>(outdoor_light), static_cast<float>(sun_warmth));
 }
 
 Dictionary CanglingWorld::bake_point_lights_data(Rect2i area, Rect2i region, int z, const Dictionary &sites, int seed_val) {
-    return RenderBaker::bake_point_lights(city, doors, area, region, z, sites, seed_val);
+    return RenderBaker::bake_point_lights(city, doors, tile_overrides, area, region, z, sites, seed_val);
 }
 
 bool CanglingWorld::tick_memory(double delta_sec) {

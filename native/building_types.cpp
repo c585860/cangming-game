@@ -161,8 +161,9 @@ void build_specialty_plot(Block &block, Vector2i origin, const char *kind, std::
             for (int x = 1; x < width-1; ++x) if (x != mid) put(1,x,y,'#',facade);
         } else if (design == Design::inn) {
             for (int x : {mid-1,mid+1}) put(1,x,y,y % 5 == 2 ? 'D' : '#',facade);
-            if (y%5 == 1) for (int x : {2,width-3}) put(1,x,y,'b','i');
-            if (y%5 == 3) for (int x : {2,width-3}) put(1,x,y,'F','i');
+            // Place authentic 2-tile beds in inn guest rooms (y%5 == 1 and y%5 == 2).
+            if (y%5 == 1 || y%5 == 2) for (int x : {2,width-3}) put(1,x,y,'b','i');
+            if (y%5 == 4) for (int x : {2,width-3}) put(1,x,y,'F','i');
         } else if (y%3 == 1) {
             const char fixture = design == Design::school ? 'r' : design == Design::cargo ? 'C' : 'l';
             put(1,2,y,fixture,'i'); put(1,width-3,y,fixture,'i');
