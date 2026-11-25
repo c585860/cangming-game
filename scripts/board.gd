@@ -503,7 +503,7 @@ func _draw_player() -> void:
 	if not visible.grow(1).has_point(pcell):
 		return
 	var tint := motion.compute_player_tint(cells, scene_lighting, weather)
-	motion.draw_character(self, player_layer, &"player", motion.visual_pos, true, world.pos, tint)
+	motion.draw_character(self, player_layer, &"player", motion.visual_pos, true, world.pos, tint, world.worn_overlays())
 
 
 func _draw_markers() -> void:
@@ -524,6 +524,14 @@ func _draw_markers() -> void:
 		markers.draw_line(rect.position, rect.position + Vector2(0, c), accent, 1.5)
 		markers.draw_line(rect.end, rect.end - Vector2(c, 0), accent, 1.5)
 		markers.draw_line(rect.end, rect.end - Vector2(0, c), accent, 1.5)
+	if world != null and world.is_grabbing():
+		var gp: Vector2i = world.pos + world.get_grab_offset()
+		if visible.grow(1).has_point(gp):
+			var grect := Rect2(Vector2((gp - view_origin) * cell) + cam_px_offset, Vector2.ONE * cell)
+			markers.draw_rect(grect.grow(-1.0), Color(0.95, 0.78, 0.36, 0.85), false, 2.0)
+			var p_mid := (motion.visual_pos - Vector2(view_origin)) * float(cell) + cam_px_offset + Vector2.ONE * (cell * 0.5)
+			var g_mid := grect.position + grect.size * 0.5
+			markers.draw_line(p_mid, g_mid, Color(0.95, 0.78, 0.36, 0.65), 1.6, true)
 	var pcell := Vector2i(roundi(motion.visual_pos.x), roundi(motion.visual_pos.y))
 	if visible.grow(1).has_point(pcell) and not motion.is_resting():
 		var center := (motion.visual_pos - Vector2(view_origin)) * float(cell) + cam_px_offset + Vector2(cell * 0.5, cell * 0.86)

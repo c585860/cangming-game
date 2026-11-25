@@ -149,7 +149,8 @@ func compute_player_tint(cells: Dictionary, scene_lighting: RefCounted, weather:
 
 
 func draw_character(board: Control, dest: Control, role: StringName, at_world: Vector2,
-		animated := false, tile_cell := Vector2i.ZERO, lit_tint := Color.WHITE) -> void:
+		animated := false, tile_cell := Vector2i.ZERO, lit_tint := Color.WHITE,
+		worn_overlays := PackedStringArray()) -> void:
 	var masking := dest.has_method("surface_id")
 	var cell_f := float(board.cell)
 	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
@@ -167,7 +168,7 @@ func draw_character(board: Control, dest: Control, role: StringName, at_world: V
 
 	var flip := animated and facing_x < 0
 	if animated and not masking and posture.is_active():
-		posture.draw_posture(dest, origin, cell_f, flip, lit_tint, outfit, outfit_tint)
+		posture.draw_posture(dest, origin, cell_f, flip, lit_tint, outfit, outfit_tint, worn_overlays)
 		return
 
 	var bob := bob_px(cell_f) if animated else 0.0
@@ -176,26 +177,35 @@ func draw_character(board: Control, dest: Control, role: StringName, at_world: V
 	var draw_origin := origin + Vector2(sway, bob)
 
 	if animated and not masking:
-		# Subtle soft contact grounding oval right beneath the animated feet
 		var foot := origin + Vector2(cell_f * 0.5, cell_f * 0.87)
 		var shadow_scale := 1.0 - absf(bob) / maxf(1.0, cell_f * 0.35)
 		dest.draw_set_transform(foot, 0.0, Vector2(shadow_scale, 0.36 * shadow_scale))
 		dest.draw_circle(Vector2.ZERO, cell_f * 0.28, Color(0.03, 0.05, 0.06, 0.34))
 		dest.draw_set_transform(Vector2.ZERO)
 
+	var use_custom := role == &"player" and (not worn_overlays.is_empty() or animated)
 	if animated and (absf(lean) > 0.002 or flip) and not masking:
-		# Apply lean & horizontal flip in ONE transform and pass flip=false to Pack.draw_at;
-		# Pack._draw_layer resets draw_set_transform when flip=true, which previously overwrote
-		# our pivot and threw the sprite off-screen whenever walking left!
 		var pivot := draw_origin + Vector2(cell_f * 0.5, cell_f * 0.85)
 		var scale_vec := Vector2(-1.0 if flip else 1.0, 1.0)
 		dest.draw_set_transform(pivot, lean, scale_vec)
 		var local_origin := -Vector2(cell_f * 0.5, cell_f * 0.85)
-		for id: String in ["player_male", "overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
-			Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
-		Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, false)
+		Pack.draw_at(dest, "player_male", local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
+		if use_custom:
+			for oid: String in worn_overlays:
+				var ot := outfit_tint if oid in ["overlay_worn_cloak", "overlay_worn_robe"] else tint
+				Pack.draw_at(dest, oid, local_origin, cell_f, 0, -1, 0, ot, Vector2.ZERO, false)
+		else:
+			for id: String in ["overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
+				Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
+			Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, false)
 		dest.draw_set_transform(Vector2.ZERO)
 	else:
-		for id: String in ["player_male", "overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
-			Pack.draw_at(dest, id, draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
-		Pack.draw_at(dest, outfit, draw_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, flip)
+		Pack.draw_at(dest, "player_male", draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
+		if use_custom:
+			for oid: String in worn_overlays:
+				var ot := outfit_tint if oid in ["overlay_worn_cloak", "overlay_worn_robe"] else tint
+				Pack.draw_at(dest, oid, draw_origin, cell_f, 0, -1, 0, ot, Vector2.ZERO, flip)
+		else:
+			for id: String in ["overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
+				Pack.draw_at(dest, id, draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
+			Pack.draw_at(dest, outfit, draw_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, flip)

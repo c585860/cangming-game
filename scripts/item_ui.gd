@@ -8,6 +8,7 @@ const SOFT := UI.INK_SOFT
 
 static func inventory(game: Control, contents: VBoxContainer, target: Vector2i) -> void:
 	var bag: Array = game.world.inventory()
+	var st: Dictionary = game.world.character_status()
 	var destination: Vector2i = game.world.pos if target == NONE else target
 	var summary := PanelContainer.new()
 	summary.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_CARD, UI.BORDER_JADE, 4, 10, 7, 1))
@@ -15,27 +16,78 @@ static func inventory(game: Control, contents: VBoxContainer, target: Vector2i) 
 	var scol := VBoxContainer.new()
 	scol.add_theme_constant_override("separation", 3)
 	summary.add_child(scol)
-	game._label(scol, "铜钱  %d 文      清露草  %d 株" % [game.world.coins, game.world.herbs], 15, UI.GOLD)
-	game._label(scol, "行囊水壶  %d / %d 毫升" % [game.world.bottle_water(), game.world.bottle_capacity()], 14, SOFT)
+	game._label(scol, "铜钱  %d 文      清露草  %d 株      水壶  %d / %d ml" % [
+		game.world.coins, game.world.herbs, game.world.bottle_water(), game.world.bottle_capacity()], 14, UI.GOLD)
+	game._label(scol, "携带容积  %d / %d ml      总负重  %.2f kg      饱食：%s · 水分：%s" % [
+		int(st.get("carry_volume_ml", 0)), int(st.get("max_carry_volume_ml", 2500)),
+		float(st.get("carry_weight_g", 0)) / 1000.0,
+		st.get("hunger_text", "正常"), st.get("thirst_text", "正常")], 12, SOFT)
+
 	var list := ItemList.new()
-	list.custom_minimum_size.y = 96
+	list.custom_minimum_size.y = 140
 	list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	UI.style_item_list(list)
 	contents.add_child(list)
 	for row: Dictionary in bag:
-		list.add_item("  %s  × %d" % [row["name"], row["count"]])
+		var extra := ""
+		if bool(row.get("is_food", false)) or bool(row.get("is_drink", false)):
+			extra = " · 热量%+d / 解渴%+d" % [int(row["kcal"]), int(row["quench"])]
+		elif bool(row.get("is_clothing", false)):
+			extra = " · %s · 保暖+%d · 容积+%d ml" % [row["slot"], int(row["warmth"]), int(row["storage_ml"])]
+		list.add_item("  [%s] %s × %d  (%d ml · %d g%s)" % [
+			row["category"], row["name"], int(row["count"]), int(row["volume_ml"]), int(row["weight_g"]), extra])
 	if bag.is_empty():
 		list.add_item("  行囊中暂无散装物品")
 		list.set_item_disabled(0, true)
-	var transfer: Button = game._button(contents, "放下选中物品" if target == NONE else "放入选中物品", func():
+
+	var desc_lbl: Label = game._label(contents, "选择物品查看详情，可直接使用、穿戴或丢弃。", 12, UI.INK_DIM, true)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 8)
+	contents.add_child(btn_row)
+
+	var use_btn: Button = game._button(btn_row, "食用 / 穿戴", func():
+		var selected := list.get_selected_items()
+		if selected.is_empty():
+			return
+		var row: Dictionary = bag[selected[0]]
+		var id: int = int(row["id"])
+		if bool(row.get("is_food", false)) or bool(row.get("is_drink", false)):
+			game._note(game.world.eat_item(id))
+		elif bool(row.get("is_clothing", false)):
+			game._note(game.world.wear_item(id))
+			game.board.player_layer.queue_redraw()
+		game._refresh()
+		game._close_overlay()
+		game._show_overlay("inventory", target), true)
+	use_btn.disabled = true
+
+	var transfer: Button = game._button(btn_row, "丢弃到脚下 (D)" if target == NONE else "放入选中容器", func():
 		var selected := list.get_selected_items()
 		if not selected.is_empty():
-			var item: int = bag[selected[0]]["id"]
+			var item: int = int(bag[selected[0]]["id"])
 			game._note(game.world.place_item(destination, item))
+			game.board.invalidate_world_cache()
+			game._refresh()
 			game._close_overlay()
-			game._show_overlay("inventory", target), true)
+			game._show_overlay("inventory", target))
 	transfer.disabled = true
-	list.item_selected.connect(func(_i: int): transfer.disabled = false)
+
+	list.item_selected.connect(func(i: int):
+		if i < 0 or i >= bag.size():
+			return
+		var row: Dictionary = bag[i]
+		desc_lbl.text = "%s：%s" % [row["name"], row.get("desc", "")]
+		transfer.disabled = false
+		var can_eat := bool(row.get("is_food", false)) or bool(row.get("is_drink", false))
+		var can_wear := bool(row.get("is_clothing", false))
+		use_btn.disabled = not (can_eat or can_wear)
+		if can_eat:
+			use_btn.text = "饮用 (E)" if bool(row["is_drink"]) else "食用 (E)"
+		elif can_wear:
+			use_btn.text = "穿戴 (W)"
+		else:
+			use_btn.text = "不可直接使用")
 
 
 static func water(game: Control, p: Vector2i, fill: bool) -> void:
@@ -66,6 +118,7 @@ static func water(game: Control, p: Vector2i, fill: bool) -> void:
 	dialog.confirmed.connect(func():
 		amount.apply()
 		game._note(game.world.transfer_water(p, int(amount.value), fill))
+		game.board.invalidate_world_cache()
 		game._refresh()
 		dialog.queue_free())
 	dialog.canceled.connect(dialog.queue_free)

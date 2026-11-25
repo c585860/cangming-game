@@ -69,18 +69,63 @@ static func _shadow(board: Control, r: Rect2, masking: bool) -> void:
 		board.draw_rect(Rect2(r.position + Vector2(1.5, 2.0), r.size), Color(0.03, 0.02, 0.02, 0.34))
 
 
+static func bed_layout(cells: Dictionary, p: Vector2i, seed: int) -> Dictionary:
+	# Determines exact 2-tile bed orientation (head -> foot) and unified anchor color so
+	# both tiles of a bed share one frame, one quilt color, and exact lying alignment.
+	var other := p
+	for step: Vector2i in [Vector2i.RIGHT, Vector2i.LEFT, Vector2i.DOWN, Vector2i.UP]:
+		if _has_tile(cells, p + step, "b"):
+			other = p + step
+			break
+	var head := p
+	var foot := other
+	if other != p:
+		var wall_tiles := ["#", "w", "O"]
+		var dir_p_to_o := other - p
+		var p_wall_back: bool = cells.get(p - dir_p_to_o, [" "])[0] in wall_tiles
+		var o_wall_back: bool = cells.get(other + dir_p_to_o, [" "])[0] in wall_tiles
+		if o_wall_back and not p_wall_back:
+			head = other
+			foot = p
+		elif p_wall_back and not o_wall_back:
+			head = p
+			foot = other
+		else:
+			# Default: North for vertical beds, West for horizontal beds
+			if other.y < p.y or (other.y == p.y and other.x < p.x):
+				head = other
+				foot = p
+	var anchor := Vector2i(mini(head.x, foot.x), mini(head.y, foot.y))
+	var a_roll := ((anchor.x * 0x9e3779b9) ^ (anchor.y * 0x85ebca6b) ^ seed) & 0xffffffff
+	var quilt_col := Color("8f342d") if (a_roll % 2 == 0) else Color("34665c")
+	var dir := foot - head if foot != head else Vector2i.DOWN
+	return {
+		"head": head,
+		"foot": foot,
+		"dir": dir,
+		"is_head": p == head,
+		"is_two_tile": head != foot,
+		"quilt_color": quilt_col,
+	}
+
+
 static func _draw_canopy_bed(board: Control, cells: Dictionary, p: Vector2i, o: Vector2, s: float,
-		masking: bool, mcol: Color, roll: int) -> void:
-	# Ming/Qing rosewood four-poster bed (架子床) with brocade quilt & embroidered pillow!
+		masking: bool, mcol: Color, _roll: int) -> void:
+	# Unified 2-tile Ming/Qing rosewood four-poster bed (架子床) oriented cleanly along head -> foot!
+	var b_seed: int = board.seed if "seed" in board else 0
+	var info := bed_layout(cells, p, b_seed)
+	var dir: Vector2i = info["dir"]
+	var is_head: bool = bool(info["is_head"])
+	var two_tile: bool = bool(info["is_two_tile"])
 	var conn_n := _has_tile(cells, p + Vector2i.UP, "b")
 	var conn_s := _has_tile(cells, p + Vector2i.DOWN, "b")
 	var conn_w := _has_tile(cells, p + Vector2i.LEFT, "b")
 	var conn_e := _has_tile(cells, p + Vector2i.RIGHT, "b")
-	var pad_x := 0.0 if conn_w else s * 0.07
+	var pad_l := 0.0 if conn_w else s * 0.07
 	var pad_r := 0.0 if conn_e else s * 0.07
-	var pad_t := 0.0 if conn_n else s * 0.06
-	var pad_b := 0.0 if conn_s else s * 0.08
-	var r := Rect2(o.x + pad_x, o.y + pad_t, s - pad_x - pad_r, s - pad_t - pad_b)
+	var pad_t := 0.0 if conn_n else s * 0.07
+	var pad_b := 0.0 if conn_s else s * 0.07
+	var r := Rect2(o.x + pad_l, o.y + pad_t, s - pad_l - pad_r, s - pad_t - pad_b)
 	if masking:
 		board.draw_rect(r, mcol)
 		return
@@ -90,54 +135,108 @@ static func _draw_canopy_bed(board: Control, cells: Dictionary, p: Vector2i, o: 
 	var wood_mid := Color("693725")
 	var wood_hi := Color("884c35")
 	var sheet := Color("e6decb")
-	var quilt_main := Color("8f342d") if (roll % 2 == 0) else Color("34665c")
+	var quilt_main: Color = info["quilt_color"]
 	var quilt_trim := Color("d6b262")
 	var quilt_hi := quilt_main.lightened(0.16)
 
-	# Rosewood outer frame
+	# Continuous rosewood bed frame (no seam on connected edge!)
 	board.draw_rect(r, wood_mid)
-	board.draw_rect(r, wood_dark, false, maxf(1.5, s * 0.06))
-	var mat := Rect2(r.position + Vector2(s * 0.08 if not conn_w else 0.0, s * 0.09 if not conn_n else 0.0),
-		r.size - Vector2((s * 0.08 if not conn_w else 0.0) + (s * 0.08 if not conn_e else 0.0),
-			(s * 0.09 if not conn_n else 0.0) + (s * 0.09 if not conn_s else 0.0)))
+	var border := maxf(2.0, s * 0.085)
+	if not conn_n:
+		board.draw_rect(Rect2(r.position.x, r.position.y, r.size.x, border), wood_dark)
+	if not conn_s:
+		board.draw_rect(Rect2(r.position.x, r.end.y - border, r.size.x, border), wood_dark)
+	if not conn_w:
+		board.draw_rect(Rect2(r.position.x, r.position.y, border, r.size.y), wood_dark)
+	if not conn_e:
+		board.draw_rect(Rect2(r.end.x - border, r.position.y, border, r.size.y), wood_dark)
+
+	var mat := Rect2(
+		r.position.x + (0.0 if conn_w else border),
+		r.position.y + (0.0 if conn_n else border),
+		r.size.x - (0.0 if conn_w else border) - (0.0 if conn_e else border),
+		r.size.y - (0.0 if conn_n else border) - (0.0 if conn_s else border)
+	)
 	board.draw_rect(mat, sheet)
 
-	# Headboard & embroidered pillow on the head tile (top/west end)
-	var is_head := (not conn_n and conn_s) or (not conn_w and conn_e) or (not conn_n and not conn_s and not conn_w and not conn_e)
+	var horiz := dir.x != 0
+	var hb := maxf(3.0, s * 0.13)
 	if is_head:
-		if not conn_n:
-			# Carved headboard rail
-			board.draw_rect(Rect2(r.position.x, r.position.y, r.size.x, maxf(3.0, s * 0.14)), wood_dark)
-			board.draw_rect(Rect2(r.position.x + s * 0.12, r.position.y + 1.0, r.size.x - s * 0.24, maxf(1.5, s * 0.05)), wood_hi)
-		# Embroidered silk pillow (刺绣方枕)
-		var pw := mat.size.x * 0.68
-		var ph := maxf(4.0, s * 0.24)
-		var px := mat.position.x + (mat.size.x - pw) * 0.5
-		var py := mat.position.y + s * 0.06
-		board.draw_rect(Rect2(px, py, pw, ph), Color("f2ead8"))
-		board.draw_rect(Rect2(px, py, pw, ph), quilt_trim, false, 1.0)
-		board.draw_rect(Rect2(px + pw * 0.28, py + ph * 0.28, pw * 0.44, ph * 0.44), quilt_main)
-		# Folded silk quilt starting below pillow
-		var qy := py + ph + s * 0.06
-		if qy < mat.end.y - 2.0:
-			var qh := mat.end.y - qy
-			board.draw_rect(Rect2(mat.position.x, qy, mat.size.x, qh), quilt_main)
-			board.draw_rect(Rect2(mat.position.x, qy, mat.size.x, maxf(2.0, s * 0.08)), quilt_hi)
-			board.draw_line(Vector2(mat.position.x, qy + maxf(2.0, s * 0.08)), Vector2(mat.end.x, qy + maxf(2.0, s * 0.08)), quilt_trim, 1.0)
+		# Draw headboard, embroidered bolster pillow, and folded quilt lapel oriented along `dir`!
+		if horiz:
+			if dir.x > 0:
+				# Head on West, Foot on East
+				board.draw_rect(Rect2(r.position.x, r.position.y, hb, r.size.y), wood_dark)
+				board.draw_rect(Rect2(r.position.x + 1.0, r.position.y + s * 0.12, maxf(1.5, hb * 0.38), r.size.y - s * 0.24), wood_hi)
+				var pw := maxf(5.0, mat.size.x * 0.34)
+				var ph := mat.size.y * 0.72
+				var pr := Rect2(mat.position.x + s * 0.07, mat.position.y + (mat.size.y - ph) * 0.5, pw, ph)
+				board.draw_rect(pr, Color("f3ebda"))
+				board.draw_rect(pr, quilt_trim, false, 1.0)
+				board.draw_rect(pr.grow(-maxf(2.0, pw * 0.24)), quilt_main)
+				var qx := pr.end.x + s * 0.06
+				if qx < mat.end.x - 1.0:
+					board.draw_rect(Rect2(qx, mat.position.y, mat.end.x - qx, mat.size.y), quilt_main)
+					board.draw_rect(Rect2(qx, mat.position.y, maxf(2.5, s * 0.09), mat.size.y), quilt_hi)
+					board.draw_line(Vector2(qx + maxf(2.5, s * 0.09), mat.position.y), Vector2(qx + maxf(2.5, s * 0.09), mat.end.y), quilt_trim, 1.0)
+			else:
+				# Head on East, Foot on West
+				board.draw_rect(Rect2(r.end.x - hb, r.position.y, hb, r.size.y), wood_dark)
+				board.draw_rect(Rect2(r.end.x - hb + 1.0, r.position.y + s * 0.12, maxf(1.5, hb * 0.38), r.size.y - s * 0.24), wood_hi)
+				var pw := maxf(5.0, mat.size.x * 0.34)
+				var ph := mat.size.y * 0.72
+				var pr := Rect2(mat.end.x - s * 0.07 - pw, mat.position.y + (mat.size.y - ph) * 0.5, pw, ph)
+				board.draw_rect(pr, Color("f3ebda"))
+				board.draw_rect(pr, quilt_trim, false, 1.0)
+				board.draw_rect(pr.grow(-maxf(2.0, pw * 0.24)), quilt_main)
+				var q_end := pr.position.x - s * 0.06
+				if q_end > mat.position.x + 1.0:
+					board.draw_rect(Rect2(mat.position.x, mat.position.y, q_end - mat.position.x, mat.size.y), quilt_main)
+					board.draw_rect(Rect2(q_end - maxf(2.5, s * 0.09), mat.position.y, maxf(2.5, s * 0.09), mat.size.y), quilt_hi)
+					board.draw_line(Vector2(q_end - maxf(2.5, s * 0.09), mat.position.y), Vector2(q_end - maxf(2.5, s * 0.09), mat.end.y), quilt_trim, 1.0)
+		else:
+			if dir.y > 0:
+				# Head on North, Foot on South
+				board.draw_rect(Rect2(r.position.x, r.position.y, r.size.x, hb), wood_dark)
+				board.draw_rect(Rect2(r.position.x + s * 0.12, r.position.y + 1.0, r.size.x - s * 0.24, maxf(1.5, hb * 0.38)), wood_hi)
+				var pw := mat.size.x * 0.72
+				var ph := maxf(5.0, mat.size.y * 0.34)
+				var pr := Rect2(mat.position.x + (mat.size.x - pw) * 0.5, mat.position.y + s * 0.07, pw, ph)
+				board.draw_rect(pr, Color("f3ebda"))
+				board.draw_rect(pr, quilt_trim, false, 1.0)
+				board.draw_rect(pr.grow(-maxf(2.0, ph * 0.24)), quilt_main)
+				var qy := pr.end.y + s * 0.06
+				if qy < mat.end.y - 1.0:
+					board.draw_rect(Rect2(mat.position.x, qy, mat.size.x, mat.end.y - qy), quilt_main)
+					board.draw_rect(Rect2(mat.position.x, qy, mat.size.x, maxf(2.5, s * 0.09)), quilt_hi)
+					board.draw_line(Vector2(mat.position.x, qy + maxf(2.5, s * 0.09)), Vector2(mat.end.x, qy + maxf(2.5, s * 0.09)), quilt_trim, 1.0)
+			else:
+				# Head on South, Foot on North
+				board.draw_rect(Rect2(r.position.x, r.end.y - hb, r.size.x, hb), wood_dark)
+				board.draw_rect(Rect2(r.position.x + s * 0.12, r.end.y - hb + 1.0, r.size.x - s * 0.24, maxf(1.5, hb * 0.38)), wood_hi)
+				var pw := mat.size.x * 0.72
+				var ph := maxf(5.0, mat.size.y * 0.34)
+				var pr := Rect2(mat.position.x + (mat.size.x - pw) * 0.5, mat.end.y - s * 0.07 - ph, pw, ph)
+				board.draw_rect(pr, Color("f3ebda"))
+				board.draw_rect(pr, quilt_trim, false, 1.0)
+				board.draw_rect(pr.grow(-maxf(2.0, ph * 0.24)), quilt_main)
+				var q_end := pr.position.y - s * 0.06
+				if q_end > mat.position.y + 1.0:
+					board.draw_rect(Rect2(mat.position.x, mat.position.y, mat.size.x, q_end - mat.position.y), quilt_main)
+					board.draw_rect(Rect2(mat.position.x, q_end - maxf(2.5, s * 0.09), mat.size.x, maxf(2.5, s * 0.09)), quilt_hi)
+					board.draw_line(Vector2(mat.position.x, q_end - maxf(2.5, s * 0.09)), Vector2(mat.end.x, q_end - maxf(2.5, s * 0.09)), quilt_trim, 1.0)
 	else:
-		# Foot section: brocade quilt with diamond silk stitching & footboard rail
+		# Foot tile of the 2-tile bed: seamless matching brocade quilt + gold diamond embroidery + footboard rail
 		board.draw_rect(mat, quilt_main)
 		var cx := mat.position.x + mat.size.x * 0.5
-		var cy := mat.position.y + mat.size.y * 0.46
+		var cy := mat.position.y + mat.size.y * 0.5
 		var dr := minf(mat.size.x, mat.size.y) * 0.28
 		board.draw_polyline(PackedVector2Array([
 			Vector2(cx, cy - dr), Vector2(cx + dr, cy), Vector2(cx, cy + dr), Vector2(cx - dr, cy), Vector2(cx, cy - dr)
 		]), Color(quilt_trim.r, quilt_trim.g, quilt_trim.b, 0.55), 1.0)
-		if not conn_s:
-			board.draw_rect(Rect2(r.position.x, r.end.y - maxf(3.0, s * 0.12), r.size.x, maxf(3.0, s * 0.12)), wood_dark)
 
-	# Four carved canopy corner posts (雕花床柱)
-	var post_r := maxf(2.0, s * 0.085)
+	# Four carved canopy corner posts (only at outer corners of the 2-tile bed!)
+	var post_r := maxf(2.2, s * 0.095)
 	if not conn_n and not conn_w:
 		board.draw_rect(Rect2(r.position, Vector2(post_r, post_r)), wood_dark)
 		board.draw_rect(Rect2(r.position + Vector2(0.8, 0.8), Vector2(post_r * 0.5, post_r * 0.5)), quilt_trim)
@@ -146,8 +245,12 @@ static func _draw_canopy_bed(board: Control, cells: Dictionary, p: Vector2i, o: 
 		board.draw_rect(Rect2(Vector2(r.end.x - post_r + 0.8, r.position.y + 0.8), Vector2(post_r * 0.5, post_r * 0.5)), quilt_trim)
 	if not conn_s and not conn_w:
 		board.draw_rect(Rect2(Vector2(r.position.x, r.end.y - post_r), Vector2(post_r, post_r)), wood_dark)
+		if not two_tile or is_head:
+			board.draw_rect(Rect2(Vector2(r.position.x + 0.8, r.end.y - post_r + 0.8), Vector2(post_r * 0.5, post_r * 0.5)), quilt_trim)
 	if not conn_s and not conn_e:
 		board.draw_rect(Rect2(Vector2(r.end.x - post_r, r.end.y - post_r), Vector2(post_r, post_r)), wood_dark)
+		if not two_tile or is_head:
+			board.draw_rect(Rect2(Vector2(r.end.x - post_r + 0.8, r.end.y - post_r + 0.8), Vector2(post_r * 0.5, post_r * 0.5)), quilt_trim)
 
 
 static func _draw_eight_immortals_table(board: Control, cells: Dictionary, p: Vector2i, o: Vector2, s: float,

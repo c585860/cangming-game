@@ -226,7 +226,9 @@ static func detail(board: Control, world: RefCounted, cells: Dictionary, p: Vect
 	if world != null and tile not in [" ", "F"]:
 		var item: String = world.prop_at(p)
 		if not item.is_empty():
-			Pack.draw(board, item, p, roll, -1, 0, Color.WHITE, Vector2(0, -3))
+			# Beds already render integrated Chinese pillows & brocade quilts; keep bedding lootable without smearing flat western sprites over the bed.
+			if not (tile == "b" and item in ["pillow", "blanket", "sheet_cotton", "quilt"]):
+				Pack.draw(board, item, p, roll, -1, 0, Color.WHITE, Vector2(0, -3))
 
 
 static func site_landmark(board: Control, p: Vector2i, site: StringName, lit_strength := 0.0) -> void:

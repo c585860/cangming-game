@@ -115,16 +115,28 @@ inline RGB furniture_reflectance(char t) {
 }
 
 inline char sample_tile(const SectorGridSnapshot &snap, const std::unordered_set<int64_t> &doors,
+        const std::unordered_map<int64_t, char> &overrides,
         int wx, int wy, int level) {
     if (wx < 0 || wy < 0 || wx >= city_size || wy >= city_size) return ' ';
+    const int64_t dk = door_key(wx, wy, level);
+    char t = ' ';
+    if (!overrides.empty()) {
+        if (const auto it = overrides.find(dk); it != overrides.end()) {
+            t = it->second;
+            if ((t == 'D' || t == 'w') && !doors.empty() && doors.count(dk)) {
+                t = (t == 'D') ? 'o' : 'O';
+            }
+            return t;
+        }
+    }
     const int sx = wx / sector_size;
     const int sy = wy / sector_size;
     const Block *blk = snap.at(sx, sy);
     if (!blk) return ' ';
     const int lx = wx - sx * sector_size;
     const int ly = wy - sy * sector_size;
-    char t = level_tiles(*blk, level)[ly * sector_size + lx];
-    if ((t == 'D' || t == 'w') && !doors.empty() && doors.count(door_key(wx, wy, level))) {
+    t = level_tiles(*blk, level)[ly * sector_size + lx];
+    if ((t == 'D' || t == 'w') && !doors.empty() && doors.count(dk)) {
         t = (t == 'D') ? 'o' : 'O';
     }
     return t;
@@ -196,6 +208,7 @@ constexpr LampSpec kLampHerb{0.35f, 6.0f, 0.45f, 0.94f, 0.74f, 2.0f, 0.28f};
 } // namespace
 
 godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<int64_t> &doors,
+        const std::unordered_map<int64_t, char> &overrides,
         Rect2i area, int z, int layers, const String &season, double &out_bake_ms) {
     const auto t0 = std::chrono::steady_clock::now();
     godot::Dictionary result;
@@ -240,7 +253,7 @@ godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<
             for (int x = 0; x < w; ++x) {
                 const int wx = area.position.x + x;
                 const int idx = y * w + x;
-                const char t = sample_tile(snap, doors, wx, wy, z);
+                const char t = sample_tile(snap, doors, overrides, wx, wy, z);
                 const char s = sample_surface(snap, wx, wy, z);
                 const std::uint8_t f = sample_column_flags(snap, wx, wy, z, clamped_layers);
                 tiles_ptr[idx] = static_cast<std::uint8_t>(t);
@@ -249,11 +262,11 @@ godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<
                 layer_tiles_all[static_cast<std::size_t>(idx)] = t;
                 for (int layer = 1; layer < clamped_layers; ++layer) {
                     layer_tiles_all[static_cast<std::size_t>(layer * total + idx)] =
-                        sample_tile(snap, doors, wx, wy, z + layer);
+                        sample_tile(snap, doors, overrides, wx, wy, z + layer);
                 }
                 if (need_below) {
                     if (t == ' ') {
-                        below_t_ptr[idx] = static_cast<std::uint8_t>(sample_tile(snap, doors, wx, wy, 0));
+                        below_t_ptr[idx] = static_cast<std::uint8_t>(sample_tile(snap, doors, overrides, wx, wy, 0));
                         below_s_ptr[idx] = static_cast<std::uint8_t>(sample_surface(snap, wx, wy, 0));
                     } else {
                         below_t_ptr[idx] = static_cast<std::uint8_t>(' ');
@@ -656,6 +669,7 @@ godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<
 }
 
 godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordered_set<int64_t> &doors,
+        const std::unordered_map<int64_t, char> &overrides,
         Rect2i area, Rect2i region, int z, float outdoor_light, float sun_warmth) {
     godot::PackedByteArray out;
     const int w = area.size.x;
@@ -690,7 +704,7 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
             const int wy = area.position.y + y;
             for (int x = rx0; x < rx1; ++x) {
                 const int wx = area.position.x + x;
-                const char tile = sample_tile(snap, doors, wx, wy, z);
+                const char tile = sample_tile(snap, doors, overrides, wx, wy, z);
                 if (tile == ' ') continue;
                 const std::uint8_t flags = sample_column_flags(snap, wx, wy, z, 3);
                 const bool enclosed = (flags & 1u) != 0u;
@@ -702,7 +716,7 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
                 } else if (z >= 0 && is_wall_tile(tile)) {
                     const int ey = wy + 1;
                     if (ey < area.position.y + h) {
-                        const char ext_tile = sample_tile(snap, doors, wx, ey, z);
+                        const char ext_tile = sample_tile(snap, doors, overrides, wx, ey, z);
                         const std::uint8_t ext_flags = sample_column_flags(snap, wx, ey, z, 3);
                         const bool ext_enc = (ext_flags & 1u) != 0u;
                         const bool ext_sky = (ext_flags & 0xAAu) == 0u;
@@ -732,6 +746,7 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
 }
 
 godot::Dictionary RenderBaker::bake_point_lights(City &city, const std::unordered_set<int64_t> &doors,
+        const std::unordered_map<int64_t, char> &overrides,
         Rect2i area, Rect2i region, int z, const godot::Dictionary &sites, int seed) {
     godot::Dictionary result;
     const int w = area.size.x;
@@ -750,7 +765,7 @@ godot::Dictionary RenderBaker::bake_point_lights(City &city, const std::unordere
             for (int x = 0; x < w; ++x) {
                 const int wx = area.position.x + x;
                 const int idx = y * w + x;
-                tiles[idx] = sample_tile(snap, doors, wx, wy, z);
+                tiles[idx] = sample_tile(snap, doors, overrides, wx, wy, z);
                 enclosed[idx] = sample_column_flags(snap, wx, wy, z, 1) & 1u;
             }
         }
