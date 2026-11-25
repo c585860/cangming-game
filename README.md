@@ -1,7 +1,7 @@
 # 沧溟修真界
 
-独立的修真题材回合制城市探索游戏，使用 Godot 4.5 与 C++ GDExtension 开发。
-基于
+独立的修真题材回游戏，使用 Godot 4.5 与 C++ GDExtension 开发。
+
 
 **项目作者／来源：c585860**  
 **交流 QQ 群：1001568760**  
@@ -42,5 +42,5 @@ $env:GODOT_EXE = "C:\Tools\Godot\Godot_v4.5.1-stable_win64.exe"
 
 ## 署名与许可
 
-沧菱城项目作者／来源为 **c585860**，QQ 群 **1001568760**。第三方署名与许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+项目作者／来源为 **c585860**，QQ 群 **1001568760**。第三方署名与许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
 未经允许禁止转载。
