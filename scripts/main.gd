@@ -7,6 +7,7 @@ const Atlas = preload("res://scripts/city_atlas.gd")
 const Items = preload("res://scripts/item_ui.gd")
 const CanglingCalendar = preload("res://scripts/cangling_calendar.gd")
 const Weather = preload("res://scripts/weather.gd")
+const MoveInput = preload("res://scripts/move_input.gd")
 const UI = preload("res://scripts/ui_theme.gd")
 const INK := UI.INK_IVORY
 const SOFT := UI.INK_SOFT
@@ -16,6 +17,7 @@ const NONE := Vector2i(-1, -1)
 
 var world := World.new()
 var weather := Weather.new()
+var move_input := MoveInput.new()
 var board: Board
 var time_text: Label
 var phase_pill: PanelContainer
@@ -213,7 +215,7 @@ func _build_ui() -> void:
 	action_menu.id_pressed.connect(_choose_action)
 
 	walker = Timer.new()
-	walker.wait_time = 0.04
+	walker.wait_time = 0.125
 	add_child(walker)
 	walker.timeout.connect(_walk)
 	wait_timer = Timer.new()
@@ -224,7 +226,28 @@ func _build_ui() -> void:
 	period_timer.one_shot = true
 	add_child(period_timer)
 	period_timer.timeout.connect(_repeat_period)
-	get_window().focus_exited.connect(period_timer.stop)
+	get_window().focus_exited.connect(func():
+		period_timer.stop()
+		move_input.reset())
+	set_process(true)
+
+
+func _process(delta: float) -> void:
+	if not opened.is_empty() or (action_menu != null and action_menu.visible):
+		return
+	var step := move_input.tick(delta)
+	if step != Vector2i.ZERO:
+		_apply_directional_step(step)
+
+
+func _apply_directional_step(direction: Vector2i) -> void:
+	_stop()
+	if look_at == NONE:
+		_move_one(world.pos + direction)
+	else:
+		look_at = (look_at + direction).clamp(Vector2i.ZERO, world.city_size - Vector2i.ONE)
+		status_text.text = "环视：%s" % world.location(look_at)
+	_refresh()
 
 
 func _column(parent: Node, gap: int) -> VBoxContainer:
@@ -526,6 +549,7 @@ func _close_overlay() -> void:
 
 
 func _show_overlay(kind: String, item_target := NONE) -> void:
+	move_input.reset()
 	if opened == kind:
 		_close_overlay()
 		return
@@ -694,7 +718,7 @@ func _build_debug_menu(contents: VBoxContainer) -> void:
 	body.add_child(opt_row)
 	_button(opt_row, "室外自动覆瓦屋顶：%s" % ("开" if board.roofs_enabled else "关"),
 		func(): _debug_toggle_roofs(); _close_overlay(), board.roofs_enabled)
-	_button(opt_row, "清空雪地脚印", func(): board.clear_footprints(); board.queue_redraw(); _close_overlay())
+	_button(opt_row, "清空脚印（雪/水）", func(): board.clear_footprints(); board.queue_redraw(); _close_overlay())
 
 
 func _stat_row(parent: Node, label_text: String, value_text: String, value_color: Color) -> void:
@@ -789,8 +813,9 @@ func _travel_from_overview(destination: Vector2i) -> void:
 
 
 func _input(event: InputEvent) -> void:
-	if event is InputEventKey and not event.pressed and period_timer != null:
-		if event.keycode == KEY_PERIOD or (period_key != KEY_NONE and event.physical_keycode == period_key):
+	if event is InputEventKey and not event.pressed:
+		move_input.handle_key_release(event)
+		if period_timer != null and (event.keycode == KEY_PERIOD or (period_key != KEY_NONE and event.physical_keycode == period_key)):
 			period_timer.stop()
 
 
@@ -854,18 +879,8 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_refresh()
 		get_viewport().set_input_as_handled()
 		return
-	var direction := Vector2i.ZERO
-	match key:
-		KEY_UP, KEY_W: direction = Vector2i.UP
-		KEY_DOWN, KEY_S: direction = Vector2i.DOWN
-		KEY_LEFT, KEY_A: direction = Vector2i.LEFT
-		KEY_RIGHT, KEY_D: direction = Vector2i.RIGHT
-	if direction != Vector2i.ZERO:
-		_stop()
-		if look_at == NONE:
-			_move_one(world.pos + direction)
-		else:
-			look_at = (look_at + direction).clamp(Vector2i.ZERO, world.city_size - Vector2i.ONE)
-			status_text.text = "环视：%s" % world.location(look_at)
-		_refresh()
+	if move_input.is_movement_key(event):
+		var direction := move_input.handle_key_press(event)
+		if direction != Vector2i.ZERO:
+			_apply_directional_step(direction)
 		get_viewport().set_input_as_handled()

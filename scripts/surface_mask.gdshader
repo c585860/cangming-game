@@ -8,7 +8,7 @@ void vertex() {
 }
 
 void fragment() {
-	if (texture(TEXTURE, UV).a < 0.45) {
+	if (texture(TEXTURE, UV).a < 0.14) {
 		discard;
 	}
 	COLOR = vec4(owner, 1.0);

@@ -18,22 +18,35 @@ void fragment() {
 	if (sunlight_enabled && in_light_map(own)) {
 		vec4 data = texelFetch(geometry, own, 0);
 		int kind = light_kind(data);
-		ivec2 face = own + ivec2(0, 1);
-		bool wall = kind == 1 && room_surface(face) && opening_faces(face, ivec2(0, -1));
-		if (enclosed_light_cell(data) && (wall || kind == 0 || kind == 4 || kind >= 5)) {
-			vec2 uv = (vec2(own) + vec2(0.5) - view_offset) / light_size;
-			vec2 d = vec2(0.25) / light_size;
-			vec3 incident = (texture(solar_map, uv + d).rgb + texture(solar_map, uv - d).rgb
-				+ texture(solar_map, uv + vec2(d.x, -d.y)).rgb + texture(solar_map, uv + vec2(-d.x, d.y)).rgb) * 0.25;
-			float horizontal = mix(0.55, 1.0, smoothstep(0.04, 0.72, sun_ray.z));
-			float energy = incident.r * horizontal;
+		bool indoors = enclosed_light_cell(data);
+		vec2 uv = (vec2(own) + vec2(0.5) - view_offset) / light_size;
+		vec2 d = vec2(0.25) / light_size;
+		vec3 incident = (texture(solar_map, uv + d).rgb + texture(solar_map, uv - d).rgb
+			+ texture(solar_map, uv + vec2(d.x, -d.y)).rgb + texture(solar_map, uv + vec2(-d.x, d.y)).rgb) * 0.25;
+		float horizontal = mix(0.55, 1.0, smoothstep(0.04, 0.72, sun_ray.z));
+		float energy = 0.0;
+		if (indoors) {
+			ivec2 face = own + ivec2(0, 1);
+			bool wall = kind == 1 && room_surface(face) && opening_faces(face, ivec2(0, -1));
 			if (wall) {
-				energy = incident.g * max(0.0, sun_ray.y) * 0.82;
-			} else if (kind == 7) {
-				energy = max(energy * 0.72, max(incident.b * horizontal * 0.91, incident.g * 0.32));
+				energy = incident.g * max(0.0, sun_ray.y) * 0.85;
+			} else if (kind == 0 || kind == 4 || kind >= 5) {
+				energy = incident.r * horizontal;
+				if (kind == 7) {
+					energy = max(energy * 0.72, max(incident.b * horizontal * 0.91, incident.g * 0.32));
+				}
 			}
-			outgoing = texelFetch(materials, own, 0).rgb * energy;
+		} else {
+			// Outdoor sunlit ground, foliage, river water, and exterior walls also emit rich colored GI bounce!
+			if (kind == 1) {
+				energy = incident.g * max(0.15, sun_ray.y) * 0.72;
+			} else if (kind == 5 || kind == 6) {
+				energy = max(incident.r, incident.b * 0.85) * horizontal * 0.78;
+			} else {
+				energy = incident.r * horizontal * 0.82;
+			}
 		}
+		outgoing = texelFetch(materials, own, 0).rgb * energy;
 	}
 	COLOR = vec4(outgoing, 1.0);
 }
