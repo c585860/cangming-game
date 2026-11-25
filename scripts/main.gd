@@ -243,6 +243,9 @@ func _process(delta: float) -> void:
 func _apply_directional_step(direction: Vector2i) -> void:
 	_stop()
 	if look_at == NONE:
+		if board.motion.is_resting():
+			board.exit_posture()
+			status_text.text = ""
 		_move_one(world.pos + direction)
 	else:
 		look_at = (look_at + direction).clamp(Vector2i.ZERO, world.city_size - Vector2i.ONE)
@@ -375,6 +378,8 @@ func _choose_action(id: int) -> void:
 func _begin_route(cell: Vector2i, action := "") -> void:
 	look_at = NONE
 	_stop()
+	if action != "rest" and board.motion.is_resting():
+		board.exit_posture()
 	status_text.text = ""
 	if not action.is_empty() and world.near(cell):
 		_perform_action(cell, action)
@@ -814,7 +819,15 @@ func _perform_action(position: Vector2i, action: String) -> void:
 		_:
 			var result: String = world.interact(position, action)
 			if not result.is_empty():
-				if action in ["door", "window"]:
+				if action == "rest":
+					var tile: String = world.terrain_at(position)
+					if tile == "b":
+						board.enter_posture(&"lying", position)
+						status_text.text = "你正躺在床榻上歇息（按方向键即可起身）。"
+					elif tile == "q" or tile == "S":
+						board.enter_posture(&"sitting", position)
+						status_text.text = "你正坐在椅凳上小憩（按方向键即可起身）。"
+				elif action in ["door", "window"]:
 					board.invalidate_lightmap()
 				else:
 					board.invalidate_world_cache()
