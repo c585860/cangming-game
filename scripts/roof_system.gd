@@ -13,13 +13,63 @@ const ROOF_FADE_FAR := 6.4
 
 var enabled := true
 var buildings: Dictionary = {} # anchor: Vector2i -> Array[Vector2i]
-var building_roof_tiles: Dictionary = {} # anchor: Vector2i -> Dictionary[Vector2i, bool]
-var building_bounds: Dictionary = {} # anchor: Vector2i -> Rect2i (tile rect of roof_set)
+var building_roof_tiles: Dictionary = {} # anchor: Vector2i -> Dictionary[Vector2i, Vector3i(north_d, south_d, edge_mask)]
+var building_bounds: Dictionary = {} # anchor: Vector2i -> Rect2i (largest inscribed rect)
+var building_bbox: Dictionary = {} # anchor: Vector2i -> Rect2i (full bounding box for O(1) distance cull)
 var building_stories: Dictionary = {} # anchor: Vector2i -> int (1, 2, or 3)
 var building_style: Dictionary = {} # anchor: Vector2i -> String ("H", "N", "B")
 var building_alpha: Dictionary = {} # anchor: Vector2i -> float
 var building_target: Dictionary = {} # anchor: Vector2i -> float
 var revealed_interior: Dictionary = {} # Vector2i -> bool
+var _revealed_anchors: Dictionary = {} # anchor: Vector2i -> bool
+
+# Single GPU SubViewport caching all opaque static roofs (alpha >= 0.995) over cache_rect at Color.WHITE!
+var _cache_view: SubViewport
+var _cache_canvas: RoofCacheCanvas
+var _cache_rect := Rect2i()
+var _cache_key: Array = []
+var _cache_opaque_sig := 0
+var _cache_dirty := true
+var _index_version := 0
+
+
+class RoofCacheCanvas extends Control:
+	var owner_sys: RefCounted
+	var view_origin := Vector2i.ZERO
+	var cam_px_offset := Vector2.ZERO
+	var cell := 32
+	var draw_rect_tiles := Rect2i()
+	var seed := 0
+	var wetness := 0.0
+	var snow_cover := 0.0
+	var night_warmth := 0.0
+
+	func _ready() -> void:
+		texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		if owner_sys == null or not draw_rect_tiles.has_area():
+			return
+		owner_sys._draw_opaque_into_cache(self, draw_rect_tiles, seed, wetness, snow_cover, night_warmth)
+
+
+func build_cache(parent: Control) -> void:
+	if _cache_view != null:
+		return
+	_cache_view = SubViewport.new()
+	_cache_view.disable_3d = true
+	_cache_view.transparent_bg = true
+	_cache_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	parent.add_child(_cache_view)
+	_cache_canvas = RoofCacheCanvas.new()
+	_cache_canvas.owner_sys = self
+	_cache_view.add_child(_cache_canvas)
+
+
+func invalidate_cache() -> void:
+	_cache_dirty = true
+	_cache_key.clear()
 
 
 static func _hash(p: Vector2i, seed: int) -> int:
@@ -32,8 +82,12 @@ func index_buildings(cells: Dictionary, area: Rect2i) -> void:
 	buildings.clear()
 	building_roof_tiles.clear()
 	building_bounds.clear()
+	building_bbox.clear()
 	building_stories.clear()
 	building_style.clear()
+	_revealed_anchors.clear()
+	_index_version += 1
+	_cache_dirty = true
 	var visited := {}
 	for y in range(area.position.y, area.end.y):
 		for x in range(area.position.x, area.end.x):
@@ -75,7 +129,7 @@ func index_buildings(cells: Dictionary, area: Rect2i) -> void:
 			for p: Vector2i in members:
 				var tile: String = cells[p][0]
 				var south_out := not Lighting.enclosed(cells.get(p + Vector2i.DOWN, []))
-				if south_out and tile in ["#", "w", "O", "D", "o"]:
+				if south_out and tile in ["#", "w", "O", "%", "D", "o"]:
 					continue
 				roof_set[p] = true
 				min_p.x = mini(min_p.x, p.x)
@@ -84,14 +138,31 @@ func index_buildings(cells: Dictionary, area: Rect2i) -> void:
 				max_p.y = maxi(max_p.y, p.y)
 			if roof_set.is_empty():
 				continue
+			# Precompute north_d, south_d, and edge bitmask (1=N, 2=S, 4=W, 8=E) ONCE per tile!
+			var roof_meta := {}
+			for p: Vector2i in roof_set:
+				var nd := 0
+				while nd < 12 and roof_set.has(p + Vector2i(0, -(nd + 1))):
+					nd += 1
+				var sd := 0
+				while sd < 12 and roof_set.has(p + Vector2i(0, sd + 1)):
+					sd += 1
+				var em := 0
+				if not roof_set.has(p + Vector2i.UP): em |= 1
+				if not roof_set.has(p + Vector2i.DOWN): em |= 2
+				if not roof_set.has(p + Vector2i.LEFT): em |= 4
+				if not roof_set.has(p + Vector2i.RIGHT): em |= 8
+				roof_meta[p] = Vector3i(nd, sd, em)
 			var dom_style := "H"
 			if int(style_counts["N"]) > int(style_counts["H"]) and int(style_counts["N"]) >= int(style_counts["B"]):
 				dom_style = "N"
 			elif int(style_counts["B"]) > int(style_counts["H"]):
 				dom_style = "B"
+			var full_box := Rect2i(min_p, max_p - min_p + Vector2i.ONE)
 			buildings[anchor] = members
-			building_roof_tiles[anchor] = roof_set
-			building_bounds[anchor] = _largest_inscribed_rect(roof_set, Rect2i(min_p, max_p - min_p + Vector2i.ONE))
+			building_roof_tiles[anchor] = roof_meta
+			building_bbox[anchor] = full_box
+			building_bounds[anchor] = _largest_inscribed_rect(roof_set, full_box)
 			building_stories[anchor] = max_stories
 			building_style[anchor] = dom_style
 
@@ -130,40 +201,57 @@ func update_targets(player_pos: Vector2, floor_z: int, instant := false) -> void
 	building_target.clear()
 	if not enabled or floor_z != 0:
 		building_alpha.clear()
-		refresh_revealed(floor_z)
+		refresh_revealed(floor_z, true)
 		return
+	var far_pad := ROOF_FADE_FAR + 1.5
+	var revealed_changed := instant
 	for anchor: Vector2i in buildings:
-		var members: Array = buildings[anchor]
-		var min_d2 := 999999.0
-		for p: Vector2i in members:
-			var d2 := (Vector2(p) - player_pos).length_squared()
-			if d2 < min_d2:
-				min_d2 = d2
-				if min_d2 <= 0.01:
-					break
-		var dist := sqrt(min_d2)
-		var target := smoothstep(ROOF_FADE_NEAR, ROOF_FADE_FAR, dist)
+		var bbox: Rect2i = building_bbox[anchor]
+		# O(1) AABB cull: skip tile loop completely for buildings outside fade radius!
+		var dx := maxf(float(bbox.position.x) - player_pos.x, maxf(0.0, player_pos.x - float(bbox.end.x)))
+		var dy := maxf(float(bbox.position.y) - player_pos.y, maxf(0.0, player_pos.y - float(bbox.end.y)))
+		var target := 1.0
+		if dx * dx + dy * dy <= far_pad * far_pad:
+			var members: Array = buildings[anchor]
+			var min_d2 := 999999.0
+			for p: Vector2i in members:
+				var d2 := (Vector2(p) - player_pos).length_squared()
+				if d2 < min_d2:
+					min_d2 = d2
+					if min_d2 <= 0.01:
+						break
+			target = smoothstep(ROOF_FADE_NEAR, ROOF_FADE_FAR, sqrt(min_d2))
 		building_target[anchor] = target
 		if instant or not building_alpha.has(anchor):
 			building_alpha[anchor] = target
-	refresh_revealed(floor_z)
+			var now_rev := target < 0.40
+			if bool(_revealed_anchors.get(anchor, false)) != now_rev:
+				revealed_changed = true
+	if revealed_changed:
+		refresh_revealed(floor_z)
 
 
 func tick(delta: float, floor_z: int) -> bool:
 	if building_target.is_empty():
 		return false
 	var changed := false
+	var revealed_changed := false
 	var speed := 7.5 * delta
 	for key: Vector2i in building_target:
 		var target := float(building_target[key])
 		var cur := float(building_alpha.get(key, target))
 		if absf(cur - target) > 0.004:
-			building_alpha[key] = move_toward(cur, target, speed)
+			var nxt := move_toward(cur, target, speed)
+			building_alpha[key] = nxt
 			changed = true
+			if (cur < 0.40) != (nxt < 0.40):
+				revealed_changed = true
 		elif cur != target:
 			building_alpha[key] = target
 			changed = true
-	if changed:
+			if (cur < 0.40) != (target < 0.40):
+				revealed_changed = true
+	if revealed_changed:
 		refresh_revealed(floor_z)
 	return changed
 
@@ -171,81 +259,153 @@ func tick(delta: float, floor_z: int) -> bool:
 func snap(floor_z: int) -> void:
 	for key: Vector2i in building_target:
 		building_alpha[key] = building_target[key]
-	refresh_revealed(floor_z)
+	refresh_revealed(floor_z, true)
+	_cache_dirty = true
 
 
-func refresh_revealed(floor_z: int) -> void:
-	revealed_interior.clear()
+func refresh_revealed(floor_z: int, force := false) -> void:
+	var next_anchors := {}
 	if not enabled or floor_z != 0:
 		for anchor: Vector2i in buildings:
-			for p: Vector2i in buildings[anchor]:
-				revealed_interior[p] = true
+			next_anchors[anchor] = true
+	else:
+		for anchor: Vector2i in buildings:
+			if float(building_alpha.get(anchor, 1.0)) < 0.40:
+				next_anchors[anchor] = true
+	if not force and next_anchors == _revealed_anchors:
 		return
+	_revealed_anchors = next_anchors
+	revealed_interior.clear()
+	for anchor: Vector2i in _revealed_anchors:
+		for p: Vector2i in buildings[anchor]:
+			revealed_interior[p] = true
+
+
+func _opaque_signature(area: Rect2i) -> int:
+	var sig := 17
 	for anchor: Vector2i in buildings:
-		if float(building_alpha.get(anchor, 1.0)) < 0.40:
-			for p: Vector2i in buildings[anchor]:
-				revealed_interior[p] = true
+		var b_rect: Rect2i = building_bbox[anchor]
+		if not b_rect.grow(2).intersects(area):
+			continue
+		if float(building_alpha.get(anchor, 1.0)) >= 0.995:
+			sig = (sig * 31 + anchor.x * 73856093 + anchor.y * 19349663) & 0x7fffffff
+	return sig
 
 
-func draw_all(canvas: Control, board: Control, cells: Dictionary, visible: Rect2i, seed: int,
+func _draw_opaque_into_cache(canvas: Control, area: Rect2i, seed: int,
+		wetness: float, snow_cover: float, night_warmth: float) -> void:
+	for anchor: Vector2i in buildings:
+		if float(building_alpha.get(anchor, 1.0)) < 0.995:
+			continue
+		var b_box: Rect2i = building_bbox[anchor]
+		if not b_box.grow(3).intersects(area):
+			continue
+		_draw_building(canvas, canvas, anchor, area, seed, 1.0, Color.WHITE, wetness, snow_cover, night_warmth)
+
+
+func _draw_building(canvas: Control, board: Control, anchor: Vector2i, visible: Rect2i, seed: int,
+		alpha: float, light_tint: Color, wetness: float, snow_cover: float, night_warmth: float) -> void:
+	var b_rect: Rect2i = building_bounds[anchor]
+	var roof_meta: Dictionary = building_roof_tiles[anchor]
+	var stories: int = int(building_stories.get(anchor, 1))
+	var style: String = String(building_style.get(anchor, "H"))
+
+	for p: Vector2i in roof_meta:
+		if visible.has_point(p):
+			_draw_base_tile(canvas, board, roof_meta[p], p, seed, alpha, light_tint, wetness, snow_cover, stories)
+
+	if stories == 1:
+		_draw_corner_finials(canvas, board, b_rect, alpha, light_tint, false)
+		return
+
+	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
+	var s := float(board.cell)
+	var base_px := Rect2(Vector2((b_rect.position - board.view_origin) * board.cell) + cam_offset,
+		Vector2(b_rect.size) * s)
+	if base_px.size.x < s * 4.5 or base_px.size.y < s * 4.5:
+		_draw_corner_finials(canvas, board, b_rect, alpha, light_tint, false)
+		return
+
+	var t2_inset_x := minf(s * 0.95, base_px.size.x * 0.12)
+	var t2_inset_top := minf(s * 0.72, base_px.size.y * 0.11)
+	var t2_inset_bot := minf(s * 1.15, base_px.size.y * 0.16)
+	var t2_rect := Rect2(
+		base_px.position.x + t2_inset_x,
+		base_px.position.y + t2_inset_top,
+		base_px.size.x - t2_inset_x * 2.0,
+		base_px.size.y - t2_inset_top - t2_inset_bot
+	)
+	_draw_upper_story_tier(canvas, t2_rect, s, 2, stories == 2, style, alpha, light_tint, wetness, snow_cover, night_warmth)
+
+	if stories >= 3 and t2_rect.size.x >= s * 5.0 and t2_rect.size.y >= s * 4.2:
+		var t3_inset_x := minf(s * 1.05, t2_rect.size.x * 0.16)
+		var t3_inset_top := minf(s * 0.65, t2_rect.size.y * 0.14)
+		var t3_inset_bot := minf(s * 1.35, t2_rect.size.y * 0.25)
+		var t3_rect := Rect2(
+			t2_rect.position.x + t3_inset_x,
+			t2_rect.position.y + t3_inset_top,
+			t2_rect.size.x - t3_inset_x * 2.0,
+			t2_rect.size.y - t3_inset_top - t3_inset_bot
+		)
+		if t3_rect.size.x >= s * 2.6 and t3_rect.size.y >= s * 2.2:
+			_draw_upper_story_tier(canvas, t3_rect, s, 3, true, style, alpha, light_tint, wetness, snow_cover, night_warmth)
+
+
+func draw_all(canvas: Control, board: Control, _cells: Dictionary, visible: Rect2i, seed: int,
 		light_tint: Color, wetness: float, snow_cover: float, night_warmth := 0.0) -> void:
 	if not enabled or buildings.is_empty():
 		return
+	var target_rect: Rect2i = board.world_cache.cache_rect if board.world_cache.cache_rect.has_area() else visible
+	if _cache_view != null and target_rect.has_area():
+		var wet_b := int(round(wetness * 4.0))
+		var snow_b := int(round(snow_cover * 4.0))
+		var night_b := int(round(night_warmth * 2.0))
+		var sig := _opaque_signature(target_rect)
+		var cell_i: int = int(board.cell)
+		var key: Array = [cell_i, seed, _index_version, wet_b, snow_b, night_b, sig]
+		if _cache_dirty or key != _cache_key or not _cache_rect.encloses(visible):
+			_cache_rect = target_rect
+			var px_size: Vector2i = (_cache_rect.size * cell_i).max(Vector2i(2, 2))
+			if _cache_view.size != px_size:
+				_cache_view.size = px_size
+				_cache_canvas.size = Vector2(px_size)
+			_cache_canvas.view_origin = _cache_rect.position
+			_cache_canvas.cam_px_offset = Vector2.ZERO
+			_cache_canvas.cell = cell_i
+			_cache_canvas.draw_rect_tiles = _cache_rect
+			_cache_canvas.seed = seed
+			_cache_canvas.wetness = wetness
+			_cache_canvas.snow_cover = snow_cover
+			_cache_canvas.night_warmth = night_warmth
+			_cache_canvas.queue_redraw()
+			_cache_view.render_target_update_mode = SubViewport.UPDATE_ONCE
+			_cache_key = key
+			_cache_dirty = false
+		# 1 single GPU textured quad draws ALL opaque static multi-story roofs across the entire wide FOV!
+		var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
+		var dest := Rect2(Vector2((_cache_rect.position - board.view_origin) * cell_i) + cam_offset,
+			Vector2(_cache_rect.size * cell_i))
+		canvas.draw_texture_rect(_cache_view.get_texture(), dest, false, light_tint)
+		# Only draw the 0-1 nearby fading building(s) dynamically!
+		for anchor: Vector2i in buildings:
+			var alpha := float(building_alpha.get(anchor, 1.0))
+			if alpha <= 0.01 or alpha >= 0.995:
+				continue
+			var b_box: Rect2i = building_bbox[anchor]
+			if not b_box.grow(3).intersects(visible):
+				continue
+			_draw_building(canvas, board, anchor, visible, seed, alpha, light_tint, wetness, snow_cover, night_warmth)
+		return
+
+	# Fallback when cache SubViewport is not attached
 	for anchor: Vector2i in buildings:
 		var alpha := float(building_alpha.get(anchor, 1.0))
 		if alpha <= 0.01:
 			continue
-		var b_rect: Rect2i = building_bounds[anchor]
-		if not b_rect.grow(3).intersects(visible):
+		var b_box: Rect2i = building_bbox[anchor]
+		if not b_box.grow(3).intersects(visible):
 			continue
-		var roof_set: Dictionary = building_roof_tiles[anchor]
-		var stories: int = int(building_stories.get(anchor, 1))
-		var style: String = String(building_style.get(anchor, "H"))
-
-		# Tier 1: Base pitched Chinese roof (acts as full roof for 1-story, or 1st-story waist eave for 2/3-story!)
-		for p: Vector2i in roof_set:
-			if visible.has_point(p):
-				_draw_base_tile(canvas, board, roof_set, p, seed, alpha, light_tint, wetness, snow_cover, stories)
-
-		# For 1-story buildings, add Chinese upturned flying-eave corners & main ridge chiwen finials
-		if stories == 1:
-			_draw_corner_finials(canvas, board, b_rect, alpha, light_tint, false)
-			continue
-
-		# Tier 2 & Tier 3: True multi-story Chinese tiered pavilion (重檐二层 / 三层高阁)
-		var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
-		var s := float(board.cell)
-		var base_px := Rect2(Vector2((b_rect.position - board.view_origin) * board.cell) + cam_offset,
-			Vector2(b_rect.size) * s)
-		if base_px.size.x < s * 4.5 or base_px.size.y < s * 4.5:
-			_draw_corner_finials(canvas, board, b_rect, alpha, light_tint, false)
-			continue
-
-		# 2nd-story pavilion inset from 1st-story waist eave so the 1st-story eaves skirt stays clearly visible!
-		var t2_inset_x := minf(s * 0.95, base_px.size.x * 0.12)
-		var t2_inset_top := minf(s * 0.72, base_px.size.y * 0.11)
-		var t2_inset_bot := minf(s * 1.15, base_px.size.y * 0.16)
-		var t2_rect := Rect2(
-			base_px.position.x + t2_inset_x,
-			base_px.position.y + t2_inset_top,
-			base_px.size.x - t2_inset_x * 2.0,
-			base_px.size.y - t2_inset_top - t2_inset_bot
-		)
-		_draw_upper_story_tier(canvas, t2_rect, s, 2, stories == 2, style, alpha, light_tint, wetness, snow_cover, night_warmth)
-
-		# 3rd-story attic pavilion inset again so all 3 distinct Chinese stories & eaves are countable at a glance!
-		if stories >= 3 and t2_rect.size.x >= s * 5.0 and t2_rect.size.y >= s * 4.2:
-			var t3_inset_x := minf(s * 1.05, t2_rect.size.x * 0.16)
-			var t3_inset_top := minf(s * 0.65, t2_rect.size.y * 0.14)
-			var t3_inset_bot := minf(s * 1.35, t2_rect.size.y * 0.25)
-			var t3_rect := Rect2(
-				t2_rect.position.x + t3_inset_x,
-				t2_rect.position.y + t3_inset_top,
-				t2_rect.size.x - t3_inset_x * 2.0,
-				t2_rect.size.y - t3_inset_top - t3_inset_bot
-			)
-			if t3_rect.size.x >= s * 2.6 and t3_rect.size.y >= s * 2.2:
-				_draw_upper_story_tier(canvas, t3_rect, s, 3, true, style, alpha, light_tint, wetness, snow_cover, night_warmth)
+		_draw_building(canvas, board, anchor, visible, seed, alpha, light_tint, wetness, snow_cover, night_warmth)
 
 
 static func _draw_upper_story_tier(canvas: Control, r: Rect2, s: float, story_num: int, is_top: bool,
@@ -421,17 +581,14 @@ static func _draw_corner_finials(canvas: Control, board: Control, b_rect: Rect2i
 			Color(0.88 * light_tint.r, 0.74 * light_tint.g, 0.40 * light_tint.b, alpha))
 
 
-static func _draw_base_tile(canvas: Control, board: Control, roof_tiles: Dictionary, p: Vector2i,
+static func _draw_base_tile(canvas: Control, board: Control, meta: Vector3i, p: Vector2i,
 		seed: int, alpha: float, light_tint: Color, wetness: float, snow_cover: float, stories: int) -> void:
 	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
 	var o := Vector2((p - board.view_origin) * board.cell) + cam_offset
 	var s := float(board.cell)
-	var north_d := 0
-	while north_d < 12 and roof_tiles.has(p + Vector2i(0, -(north_d + 1))):
-		north_d += 1
-	var south_d := 0
-	while south_d < 12 and roof_tiles.has(p + Vector2i(0, south_d + 1)):
-		south_d += 1
+	var north_d := meta.x
+	var south_d := meta.y
+	var edge_mask := meta.z
 	var rel := north_d - south_d
 	var is_ridge := stories == 1 and absi(rel) <= 1 and (north_d + south_d) >= 2
 	var north_slope := rel < -1
@@ -455,8 +612,8 @@ static func _draw_base_tile(canvas: Control, board: Control, roof_tiles: Diction
 
 	canvas.draw_rect(Rect2(o, Vector2(s, s)), lit_base)
 
-	var cols := maxi(4, int(round(s / 8.0)))
-	var rows := 4
+	var cols := 2 if s <= 24.0 else maxi(3, int(round(s / 8.5)))
+	var rows := 2 if s <= 24.0 else 4
 	var cw := s / float(cols)
 	var rh := s / float(rows)
 	for r in range(rows):
@@ -467,23 +624,17 @@ static func _draw_base_tile(canvas: Control, board: Control, roof_tiles: Diction
 		var row_col := Color(lit_base.r * row_shade, lit_base.g * row_shade, lit_base.b * row_shade, alpha)
 		canvas.draw_rect(Rect2(o.x, ry, s, rh * 0.72), row_col)
 		canvas.draw_line(Vector2(o.x, ry + rh - 1.0), Vector2(o.x + s, ry + rh - 1.0), tile_dark, 1.0)
-		for c in range(cols):
-			var tx := o.x + float(c) * cw
-			canvas.draw_line(Vector2(tx, ry), Vector2(tx, ry + rh), tile_dark, 1.0)
-			if cw >= 6.0:
-				canvas.draw_line(Vector2(tx + cw * 0.45, ry + 1.0), Vector2(tx + cw * 0.45, ry + rh - 1.5), tile_hi, 1.0)
-			var cell_roll := _hash(Vector2i(p.x * 7 + c, p.y * 11 + r), seed)
-			if cell_roll % 11 == 0:
-				canvas.draw_rect(Rect2(tx + 1.0, ry + 1.0, maxf(1.0, cw - 2.0), maxf(1.0, rh - 2.0)),
-					Color(tile_dark.r, tile_dark.g, tile_dark.b, alpha * 0.35))
+	for c in range(cols):
+		var tx := o.x + float(c) * cw
+		canvas.draw_line(Vector2(tx, o.y), Vector2(tx, o.y + s), tile_dark, 1.0)
+		if cw >= 7.0:
+			canvas.draw_line(Vector2(tx + cw * 0.45, o.y + 1.0), Vector2(tx + cw * 0.45, o.y + s - 1.0), tile_hi, 1.0)
 
 	if snow_cover > 0.04:
 		var snow_patch := 0.78 + 0.22 * (float(roll % 17) / 16.0)
 		var sa := clampf(snow_cover * 0.78 * snow_patch, 0.0, 0.84) * alpha
 		var snow_col := Color(minf(0.92 * light_tint.r + 0.06, 1.0), minf(0.95 * light_tint.g + 0.08, 1.0), minf(1.0 * light_tint.b + 0.10, 1.0), sa)
-		for r in range(rows):
-			var ry := o.y + float(r) * rh
-			canvas.draw_rect(Rect2(o.x, ry, s, rh * 0.76), snow_col)
+		canvas.draw_rect(Rect2(o.x, o.y, s, s * 0.86), snow_col)
 
 	if is_ridge:
 		var ry := o.y + s * 0.36 if rel <= 0 else o.y + s * 0.12
@@ -492,10 +643,10 @@ static func _draw_base_tile(canvas: Control, board: Control, roof_tiles: Diction
 		canvas.draw_rect(Rect2(o.x, ry, s, maxf(1.5, bh * 0.32)), ridge_hi)
 		canvas.draw_rect(Rect2(o.x, ry + bh, s, maxf(2.0, s * 0.08)), Color(0.04, 0.06, 0.08, 0.44 * alpha))
 
-	var n_edge := not roof_tiles.has(p + Vector2i.UP)
-	var s_edge := not roof_tiles.has(p + Vector2i.DOWN)
-	var w_edge := not roof_tiles.has(p + Vector2i.LEFT)
-	var e_edge := not roof_tiles.has(p + Vector2i.RIGHT)
+	var n_edge := (edge_mask & 1) != 0
+	var s_edge := (edge_mask & 2) != 0
+	var w_edge := (edge_mask & 4) != 0
+	var e_edge := (edge_mask & 8) != 0
 	var trim := maxf(2.8, s * 0.13)
 	var gable_light := Color(0.84 * light_tint.r, 0.80 * light_tint.g, 0.72 * light_tint.b, alpha)
 	var gable_dark := Color(0.70 * light_tint.r, 0.67 * light_tint.g, 0.60 * light_tint.b, alpha)

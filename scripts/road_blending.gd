@@ -82,18 +82,17 @@ static func blend_tile(board: Control, cells: Dictionary, p: Vector2i, seed: int
 		tint_override := Color.WHITE) -> void:
 	if board.has_method("surface_id"):
 		return
+	var self_road := is_road(cells, p)
+	var self_soft := (not self_road) and is_soft_ground(cells, p)
+	if not self_road and not self_soft:
+		return
 	var o := _origin(board, p)
 	var s := float(board.cell)
 	var roll := _hash(p, seed ^ 0x41d73)
 	var grass_col: Color = SEASON_GRASS_BASE.get(season, Color("54683b")) * tint_override
 	var soil_col: Color = SEASON_SOIL_BASE.get(season, Color("655941")) * tint_override
 
-	var n_road := is_road(cells, p + Vector2i.UP)
-	var s_road := is_road(cells, p + Vector2i.DOWN)
-	var w_road := is_road(cells, p + Vector2i.LEFT)
-	var e_road := is_road(cells, p + Vector2i.RIGHT)
-
-	if is_road(cells, p):
+	if self_road:
 		var n_soft := is_soft_ground(cells, p + Vector2i.UP)
 		var s_soft := is_soft_ground(cells, p + Vector2i.DOWN)
 		var w_soft := is_soft_ground(cells, p + Vector2i.LEFT)
@@ -143,7 +142,13 @@ static func blend_tile(board: Control, cells: Dictionary, p: Vector2i, seed: int
 			board.draw_rect(Rect2(o.x + s - band, o.y, band, s), Color(soil_col.r, soil_col.g, soil_col.b, 0.45))
 			_draw_tuft_strip(board, o + Vector2(s, 0), Vector2(0, s), Vector2(-1, 0), s, roll ^ 0x59, grass_col, soil_col)
 
-	elif is_soft_ground(cells, p):
+	elif self_soft:
+		var n_road := is_road(cells, p + Vector2i.UP)
+		var s_road := is_road(cells, p + Vector2i.DOWN)
+		var w_road := is_road(cells, p + Vector2i.LEFT)
+		var e_road := is_road(cells, p + Vector2i.RIGHT)
+		if not ((n_road and w_road) or (n_road and e_road) or (s_road and w_road) or (s_road and e_road)):
+			return
 		# 3. Inner concave L-corner fillets (eliminates the jagged step notches in diagonal roads!)
 		var fillet_r := s * 0.66
 		var inner_specs := [

@@ -49,6 +49,11 @@ uniform float puddle_phase = 0.0;
 uniform float noise_seed;
 uniform bool below_ground;
 uniform vec2 player_feet;
+uniform vec2 player_light_pos = vec2(-999.0, -999.0);
+uniform float player_light_energy = 0.0;
+uniform float player_light_radius = 5.0;
+uniform vec3 player_light_color = vec3(1.0, 0.56, 0.22);
+uniform float player_light_flicker = 0.8;
 
 float hash21(vec2 p) {
 	vec3 h = fract(vec3(p.xyx) * 0.1031);
@@ -235,6 +240,126 @@ vec3 local_lighting_halo(ivec2 own, vec2 receiver_xy) {
 	return halo;
 }
 
+float _portable_ray_vis(vec3 start_pos, vec3 end_pos, ivec2 target_cell, bool target_wall) {
+	vec3 delta = end_pos - start_pos;
+	float dist2d = length(delta.xy);
+	if (dist2d < 0.14) {
+		return 1.0;
+	}
+	int steps = clamp(int(ceil(dist2d * 4.5)), 4, 34);
+	float inv_steps = 1.0 / float(steps);
+	float vis = 1.0;
+	ivec2 start_cell = clamp(ivec2(floor(start_pos.xy)), ivec2(0), map_size - ivec2(1));
+	ivec2 prev_cell = start_cell;
+	for (int s = 1; s < steps; s++) {
+		float t = (float(s) - 0.35) * inv_steps;
+		vec3 p = start_pos + delta * t;
+		ivec2 c = ivec2(floor(p.xy));
+		if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, map_size))) {
+			return 0.0;
+		}
+		if (c == start_cell) {
+			continue;
+		}
+		// Never self-occlude the front face of the wall/object we are illuminating!
+		if (c == target_cell && target_wall) {
+			continue;
+		}
+		if (c == prev_cell) {
+			continue;
+		}
+		prev_cell = c;
+		vec4 g = texelFetch(geometry, c, 0);
+		int kind = int(round(g.g * 255.0));
+		float h = g.r * 3.0;
+		if (kind == 1) {
+			// Solid brick/plaster wall or closed timber door completely blocks light!
+			return 0.0;
+		} else if (kind == 2) {
+			// Closed Chinese oiled-paper lattice window lets warm diffused glow filter through
+			vis *= 0.34;
+		} else if (kind == 3 || kind == 4) {
+			// Open/broken window or open door lets firelight spill cleanly through
+			vis *= 0.96;
+		} else if (kind == 5) {
+			// Tree trunk/canopy casts soft dappled shadow
+			vis *= mix(0.62, 0.88, smoothstep(0.0, 1.4, p.z));
+		} else if ((kind == 6 || kind == 7) && h > p.z + 0.05) {
+			// Tall furniture (wardrobe/bookshelf) & fences cast height-aware physical shadows!
+			float block = smoothstep(p.z, p.z + 0.55, h);
+			vis *= mix(1.0, 0.24, block);
+		}
+		if (vis < 0.015) {
+			return 0.0;
+		}
+	}
+	return vis;
+}
+
+vec3 player_portable_light(vec3 receiver, ivec2 own, bool wall, bool sprite) {
+	if (player_light_energy <= 0.001) {
+		return vec3(0.0);
+	}
+	// Realistic multi-harmonic flame flicker + subtle live hand-flame sway
+	float f1 = sin(TIME * 6.8) * 0.55 + sin(TIME * 14.3 + 1.1) * 0.30 + sin(TIME * 23.7 + 2.4) * 0.15;
+	float f2 = cos(TIME * 9.4 + 0.7) * 0.60 + sin(TIME * 19.1 + 0.3) * 0.40;
+	float flicker_amp = mix(0.035, 0.135, clamp(player_light_flicker, 0.0, 1.0));
+	float wave = 1.0 + f1 * flicker_amp;
+	vec2 sway = vec2(f1, f2) * (0.018 + 0.022 * player_light_flicker);
+	vec3 flame = vec3(player_light_pos + sway, 0.92 + 0.025 * f2);
+
+	float d2 = length(receiver.xy - flame.xy);
+	float radius = player_light_radius * (0.97 + 0.05 * wave);
+	if (d2 >= radius) {
+		return vec3(0.0);
+	}
+
+	// Soft 3-ray penumbra shadow cast against walls, closed doors, windows & tall furniture
+	vec2 dir2 = d2 > 0.001 ? (receiver.xy - flame.xy) / d2 : vec2(1.0, 0.0);
+	vec2 perp = vec2(-dir2.y, dir2.x) * (0.09 + 0.05 * smoothstep(0.5, 4.0, d2));
+	float vis = _portable_ray_vis(flame, receiver, own, wall) * 0.50;
+	vis += _portable_ray_vis(flame + vec3(perp, 0.0), receiver, own, wall) * 0.25;
+	vis += _portable_ray_vis(flame - vec3(perp, 0.0), receiver, own, wall) * 0.25;
+	if (vis <= 0.002) {
+		return vec3(0.0);
+	}
+
+	// Physical 3D inverse-square falloff + smooth horizon roll-off
+	vec3 to_l = flame - receiver;
+	float dist3 = length(to_l);
+	float cutoff = 1.0 - smoothstep(radius * 0.42, radius, d2);
+	float falloff = cutoff / (0.36 + 0.46 * dist3 * dist3);
+
+	// Directional surface response (ground receives z-incidence, walls/furniture catch side firelight!)
+	float incidence = wall ? (0.48 + 0.52 * clamp(length(to_l.xy) / max(dist3, 0.001), 0.0, 1.0))
+		: sprite ? (0.58 + 0.42 * clamp(abs(to_l.z) / max(dist3, 0.001), 0.0, 1.0))
+		: (0.42 + 0.58 * clamp(to_l.z / max(dist3, 0.001), 0.0, 1.0));
+
+	// Realistic firelight blackbody gradient: hot golden-white near ember, deep amber-orange at edge
+	float core = exp(-d2 * d2 * 1.45);
+	float rim = smoothstep(radius * 0.25, radius * 0.92, d2);
+	vec3 col = mix(player_light_color, vec3(1.0, 0.91, 0.72), core * 0.55);
+	col = mix(col, player_light_color * vec3(1.0, 0.62, 0.34), rim * 0.55);
+
+	float raw_e = player_light_energy * wave * falloff * vis * incidence;
+	return col * (vec3(1.0) - exp(-vec3(raw_e) * 0.145)) * 1.08;
+}
+
+vec3 player_flame_scatter(vec2 receiver_xy, ivec2 own, bool wall) {
+	if (player_light_energy <= 0.001) {
+		return vec3(0.0);
+	}
+	float d = length(receiver_xy - player_light_pos);
+	if (d > 2.0) {
+		return vec3(0.0);
+	}
+	float vis = _portable_ray_vis(vec3(player_light_pos, 0.92), vec3(receiver_xy, 0.55), own, wall);
+	float wave = 0.95 + 0.07 * sin(TIME * 11.3) + 0.04 * sin(TIME * 21.7);
+	// Soft physical atmospheric scatter right around the flame (exponential Gaussian, zero hard rings!)
+	float scatter = exp(-d * d * 2.8) * vis * wave;
+	return player_light_color * scatter * (0.045 + 0.0032 * player_light_energy);
+}
+
 vec3 ambient_motes(vec2 world, vec2 local, bool indoors, float river_prox) {
 	if (below_ground || rain_level > 0.25 || snow_cover > 0.4) {
 		return vec3(0.0);
@@ -315,7 +440,8 @@ vec3 integrate_air(vec3 surface, vec2 local, vec2 world, vec2 light_uv, ivec2 ce
 		air_ambient = vec3(0.025, 0.033, 0.048) + sky_at(cell, 0.58) * 0.60 + reflected * 0.34;
 	}
 	float phase = mix(1.62, 0.76, smoothstep(0.13, 0.91, sun_ray.z));
-	vec3 lamp = local_lighting_cell(cell, vec3(local, AIR_HEIGHTS.y), false);
+	vec3 lamp = local_lighting_cell(cell, vec3(local, AIR_HEIGHTS.y), false)
+		+ player_portable_light(vec3(local, AIR_HEIGHTS.y), cell, false, false) * 0.75;
 	vec3 fog_light = air_ambient + lamp * 0.62;
 	vec3 radiant = vec3(0.0);
 	float through = 1.0;
@@ -438,7 +564,8 @@ void fragment() {
 			}
 		}
 		vec3 reflected = sun_color * bounce * sun_energy * (0.86 - ao);
-		vec3 lamp = local_lighting(own, vec3(receiver, z_surface), character);
+		vec3 lamp = local_lighting(own, vec3(receiver, z_surface), character)
+			+ player_portable_light(vec3(receiver, z_surface), own, wall, sprite);
 		vec3 exposure = skylight * (1.0 - 0.27 * contact - ao)
 			+ sun_color * direct * sun_energy + reflected + lamp;
 		if (character) {
@@ -475,6 +602,7 @@ void fragment() {
 			lit = integrate_air(lit, receiver, world_receiver, light_uv, own, z_surface, indoors, reflected);
 		}
 		lit += local_lighting_halo(own, receiver);
+		lit += player_flame_scatter(receiver, own, wall);
 		lit += ambient_motes(world, local, indoors, river_sample.r);
 		vec2 centered = (UV - vec2(0.5)) * 2.0;
 		float vignette = 1.0 - 0.10 * smoothstep(0.55, 1.42, dot(centered, centered));

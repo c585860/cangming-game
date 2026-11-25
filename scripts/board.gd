@@ -52,11 +52,19 @@ var weather_fx := WeatherFx.new()
 var lighting_key: Array = []
 var baked_light_area := Rect2i()
 var baked_light_minutes := -99999
+var baked_ray_minutes := -99999
 var geometry_key: Array = []
 var surface_key: Array = []
 var emitter_area := Rect2i()
 var emitter_herbs := -1
 var geometry_area := Rect2i()
+var cells_area := Rect2i()
+var _last_baked_region: Dictionary = {}
+var _last_baked_area := Rect2i()
+var _last_baked_z := -999
+var _preload_phase := 0 # 0=idle, 1=world_slices, 2=mask_slices, 3=commit_swap
+var _preload_rect := Rect2i()
+var _preload_props := Rect2i()
 var cells: Dictionary = {}
 var below_cells: Dictionary = {}
 var current_season := "spring"
@@ -97,6 +105,7 @@ func build(model: World, weather_model: Weather = null) -> void:
 	clip_contents = true
 
 	world_cache.build(self)
+	roof_system.build_cache(self)
 	scene_lighting.build(self)
 	scene_lighting.set_world_texture(world_cache.get_texture())
 
@@ -156,9 +165,21 @@ func _process(delta: float) -> void:
 	var roofs_changed := roof_system.tick(delta, world.floor)
 	var marks_changed := footprints.tick(delta, weather)
 
-	# 4. High-res near shadow cascade follows smooth player & wind-swaying tree canopies
+	# 4. High-res near shadow cascade, smooth dawn/dusk interpolation & live 60 FPS moving firelight
+	if scene_lighting.tick_smooth_light(delta):
+		roof_layer.queue_redraw()
+		player_layer.queue_redraw()
 	if geometry_area.has_area():
 		scene_lighting.tick_near_cascade(geometry_area, motion.visual_pos, visual_time, delta)
+		var st_live: Dictionary = world.character_status()
+		var live_ls: int = int(st_live.get("light_source", 0))
+		scene_lighting.set_player_light(geometry_area, motion.visual_pos, live_ls, motion.facing_x)
+		if live_ls > 0:
+			player_layer.queue_redraw()
+
+	# 4.5. Double-buffered frame-sliced background preload (~4-5ms/frame) so wide-FOV walking NEVER stutters!
+	if geometry_area.has_area():
+		_tick_incremental_preload()
 
 	# 5. Pure GPU pan inside world_cache margin (0 CPU tile/mask redraws!)
 	if cam_moved:
@@ -203,6 +224,7 @@ func snap_visuals() -> void:
 	roof_system.update_targets(motion.visual_pos, world.floor, true)
 	roof_system.snap(world.floor)
 	_sync_render_state()
+	scene_lighting.snap_smooth_light()
 	roof_layer.queue_redraw()
 	player_layer.queue_redraw()
 	markers.queue_redraw()
@@ -235,6 +257,24 @@ func follow(p: Vector2i) -> void:
 	if not _camera_initialized or big_jump:
 		camera_world = camera_target
 		_camera_initialized = true
+		_update_view()
+		return
+	# Fast path: if all GPU caches already enclose visible area and time hasn't hit the next light step,
+	# skip heavy _sync_render_state() — 60 FPS _process() handles smooth pan & lighting seamlessly!
+	if size.x >= 2.0 and size.y >= 2.0 and geometry_area.has_area():
+		_recompute_camera_window()
+		var visible := Rect2i(view_origin, view_size).intersection(bounds)
+		var sky := CanglingCalendar.at_minute(world.minutes)
+		var min_step := 1 if absf(float(sky.sun_altitude)) < deg_to_rad(18.0) else 5
+		if world_cache.cache_rect.encloses(visible) \
+				and baked_light_area.encloses(visible) \
+				and cells_area.encloses(visible.grow(2).intersection(bounds)) \
+				and absi(world.minutes - baked_light_minutes) < min_step \
+				and emitter_herbs == world.herbs:
+			roof_layer.queue_redraw()
+			player_layer.queue_redraw()
+			markers.queue_redraw()
+			return
 	_update_view()
 
 
@@ -298,19 +338,73 @@ func _get_tooltip(at_position: Vector2) -> String:
 	return SITE_NAMES.get(world.site_at(p), "")
 
 
+func _tick_incremental_preload() -> void:
+	var visible := Rect2i(view_origin, view_size).intersection(bounds)
+	if not visible.has_area():
+		return
+	if _preload_phase == 0:
+		if not world_cache.needs_preload(visible, cell):
+			return
+		var margin := WorldCache.margin_for_cell(cell)
+		var target_rect := visible.grow(margin).intersection(bounds)
+		var target_props := target_rect.grow_individual(1, 0, 1, 2).intersection(bounds)
+		# Only start async preload if our geometry & cells already cover the target rect!
+		if not geometry_area.encloses(target_props):
+			return
+		if not cells_area.encloses(target_props):
+			if not _last_baked_region.is_empty() and _last_baked_z == world.floor and _last_baked_area == geometry_area:
+				cells_area = target_props.grow(8).intersection(geometry_area)
+				_populate_cells_from_baked(_last_baked_region, geometry_area, cells_area, world.floor)
+				roof_system.index_buildings(cells, cells_area)
+			else:
+				return
+		var prect := world_cache.begin_preload(world, cells, below_cells, visible, bounds, cell,
+			current_season, scene_lighting.active_emitters, scene_lighting.current_lamp_power)
+		if prect.has_area():
+			_preload_rect = prect
+			_preload_props = prect.grow_individual(1, 0, 1, 2).intersection(bounds)
+			_preload_phase = 1
+	elif _preload_phase == 1:
+		if world_cache.step_preload_slice():
+			var npcs := _collect_npc_characters(_preload_rect)
+			scene_lighting.begin_surface_preload(cells, _preload_rect, _preload_props, cell,
+				world.seed ^ (world.floor * 0x65bd4e97), current_season, npcs)
+			_preload_phase = 2
+	elif _preload_phase == 2:
+		if scene_lighting.step_surface_preload_slice(12):
+			_preload_phase = 3
+	elif _preload_phase == 3:
+		# Atomic 0.01ms GPU pointer swap — back buffer is 100% rendered on GPU!
+		world_cache.commit_preload()
+		scene_lighting.set_world_texture(world_cache.get_texture())
+		scene_lighting.commit_surface_preload()
+		scene_lighting.set_cache_window(geometry_area, world_cache.cache_rect)
+		var npcs := _collect_npc_characters(world_cache.cache_rect)
+		surface_key = [world_cache.cache_rect, cell, current_season, world.floor, npcs.size()]
+		_preload_phase = 0
+		roof_layer.queue_redraw()
+
+
 func invalidate_lightmap() -> void:
+	_preload_phase = 0
 	lighting_key.clear()
 	baked_light_area = Rect2i()
 	baked_light_minutes = -99999
+	baked_ray_minutes = -99999
 	geometry_key.clear()
+	cells_area = Rect2i()
+	_last_baked_region.clear()
 	surface_key.clear()
 	emitter_area = Rect2i()
 	emitter_herbs = -1
 	world_cache.invalidate()
+	roof_system.invalidate_cache()
 
 
 func invalidate_world_cache() -> void:
+	_preload_phase = 0
 	world_cache.invalidate()
+	roof_system.invalidate_cache()
 	surface_key.clear()
 	if world != null and size.x >= 2.0 and size.y >= 2.0:
 		_sync_render_state()
@@ -320,37 +414,31 @@ func invalidate_weather() -> void:
 	lighting_key.clear()
 	baked_light_area = Rect2i()
 	baked_light_minutes = -99999
+	baked_ray_minutes = -99999
 	surface_key.clear()
 	world_cache.invalidate()
+	roof_system.invalidate_cache()
 	_update_view()
 
 
 func _collect_sites(region: Rect2i) -> Dictionary:
-	var sites := {}
 	if world.floor != 0:
-		return sites
-	for y in range(region.position.y, region.end.y):
-		for x in range(region.position.x, region.end.x):
-			var p := Vector2i(x, y)
-			var site: StringName = world.site_at(p)
-			if site in [&"merchant", &"ferryman", &"altar", &"herb"]:
-				sites[p] = site
-	return sites
+		return {}
+	return world.active_sites_in_rect(region)
 
 
 func _collect_npc_characters(region: Rect2i) -> Array:
 	var list: Array = []
 	if world.floor == 0:
-		for y in range(region.position.y, region.end.y):
-			for x in range(region.position.x, region.end.x):
-				var p := Vector2i(x, y)
-				var site: StringName = world.site_at(p)
-				if site == &"merchant" or site == &"ferryman":
-					list.append([Vector2(p), site, false, p, null])
+		var sites: Dictionary = world.active_sites_in_rect(region)
+		for p: Vector2i in sites:
+			var site: StringName = sites[p]
+			if site == &"merchant" or site == &"ferryman":
+				list.append([Vector2(p), site, false, p, null])
 	return list
 
 
-func _populate_cells_from_baked(baked: Dictionary, area: Rect2i, z: int) -> void:
+func _populate_cells_from_baked(baked: Dictionary, baked_area: Rect2i, sub_area: Rect2i, z: int) -> void:
 	cells.clear()
 	below_cells.clear()
 	var tiles_buf: PackedByteArray = baked["tiles"]
@@ -359,17 +447,20 @@ func _populate_cells_from_baked(baked: Dictionary, area: Rect2i, z: int) -> void
 	var has_below := z > 0 and baked.has("below_tiles")
 	var bt_buf: PackedByteArray = baked["below_tiles"] if has_below else PackedByteArray()
 	var bs_buf: PackedByteArray = baked["below_surfaces"] if has_below else PackedByteArray()
-	var w := area.size.x
-	var h := area.size.y
-	var ox := area.position.x
-	var oy := area.position.y
+	var bw := baked_area.size.x
+	var bx0 := baked_area.position.x
+	var by0 := baked_area.position.y
+	var sx0 := maxi(sub_area.position.x, bx0)
+	var sy0 := maxi(sub_area.position.y, by0)
+	var sx1 := mini(sub_area.end.x, baked_area.end.x)
+	var sy1 := mini(sub_area.end.y, baked_area.end.y)
 	var chars := _ascii_chars
 	var empty_up := _empty_upper
-	var idx := 0
-	for y in range(h):
-		var wy := oy + y
-		for x in range(w):
-			var p := Vector2i(ox + x, wy)
+	for wy in range(sy0, sy1):
+		var row_off := (wy - by0) * bw - bx0
+		for wx in range(sx0, sx1):
+			var idx := row_off + wx
+			var p := Vector2i(wx, wy)
 			var tb := tiles_buf[idx]
 			var sb := surf_buf[idx]
 			var t_str := chars[tb] if tb < 128 else " "
@@ -379,7 +470,6 @@ func _populate_cells_from_baked(baked: Dictionary, area: Rect2i, z: int) -> void
 				var btb := bt_buf[idx]
 				var bsb := bs_buf[idx]
 				below_cells[p] = [chars[btb] if btb < 128 else " ", chars[bsb] if bsb < 128 else ""]
-			idx += 1
 
 
 func _sync_render_state() -> void:
@@ -388,7 +478,8 @@ func _sync_render_state() -> void:
 	var visible := Rect2i(view_origin, view_size).intersection(bounds)
 	if not visible.has_area():
 		return
-	var cached_needed := visible.grow(WorldCache.CACHE_MARGIN + 2).intersection(bounds)
+	var cache_margin := WorldCache.margin_for_cell(cell)
+	var cached_needed := visible.grow(cache_margin + 2).intersection(bounds)
 	var props := cached_needed.grow_individual(1, 0, 1, 2).intersection(bounds)
 
 	var sky := CanglingCalendar.at_minute(world.minutes)
@@ -402,18 +493,31 @@ func _sync_render_state() -> void:
 	var rebuilt_geom := false
 
 	if static_key != geometry_key or not geometry_area.encloses(required):
-		geometry_area = props.grow(reach + 6).intersection(bounds)
+		var static_changed := (static_key != geometry_key)
+		# Large +18 tile geometry margin + background C++ multi-core sector prewarm eliminate frequent hitches!
+		geometry_area = props.grow(reach + 18).intersection(bounds)
+		world.prewarm_area(geometry_area.grow(24))
 		var baked: Dictionary = world.bake_region_data(geometry_area, z, layers, current_season)
-		_populate_cells_from_baked(baked, geometry_area, z)
+		_last_baked_region = baked
+		_last_baked_area = geometry_area
+		_last_baked_z = z
+		cells_area = props.grow(10).intersection(geometry_area)
+		_populate_cells_from_baked(baked, geometry_area, cells_area, z)
 		scene_lighting.set_geometry_baked(baked, geometry_area, layers, z, world.seed)
-		roof_system.index_buildings(cells, geometry_area)
+		roof_system.index_buildings(cells, cells_area)
 		geometry_key = static_key
 		lighting_key.clear()
 		baked_light_area = Rect2i()
-		surface_key.clear()
 		emitter_area = Rect2i()
-		world_cache.invalidate()
+		if static_changed:
+			surface_key.clear()
+			world_cache.invalidate()
+			roof_system.invalidate_cache()
 		rebuilt_geom = true
+	elif not cells_area.encloses(props) and not _last_baked_region.is_empty() and _last_baked_z == z and _last_baked_area == geometry_area:
+		cells_area = props.grow(10).intersection(geometry_area)
+		_populate_cells_from_baked(_last_baked_region, geometry_area, cells_area, z)
+		roof_system.index_buildings(cells, cells_area)
 	roof_system.update_targets(motion.visual_pos, z, rebuilt_geom)
 
 	if not emitter_area.encloses(props) or emitter_herbs != world.herbs:
@@ -423,24 +527,34 @@ func _sync_render_state() -> void:
 		scene_lighting.update_emitters_baked(point_baked, geometry_area)
 		emitter_herbs = world.herbs
 
-	# Cache far-field solar/bounce/volume/ambient across multiple walking steps inside LIGHT_MARGIN!
+	# Smooth twilight: update ambient + scalars every 1 min (fast ~0.3ms), while heavy 4x4 raymarched solar/volume/bounce
+	# only re-bakes every 4 min or when moving outside baked_light_area!
+	var in_twilight := absf(float(sky.sun_altitude)) < deg_to_rad(18.0)
+	var min_step := 1 if in_twilight else 5
+	var ray_step := 4 if in_twilight else 10
 	var weather_key: Array = [z, weather.current_kind, int(round(weather.wetness * 20.0)),
 		int(round(weather.snow_cover * 20.0)), int(round(weather.rain * 20.0)), int(round(weather.snow * 20.0)), visible.size]
-	var needs_light_bake := (weather_key != lighting_key) \
+	var need_rays := (weather_key != lighting_key) \
 		or (not baked_light_area.encloses(visible)) \
-		or (absi(world.minutes - baked_light_minutes) >= 5)
+		or (absi(world.minutes - baked_ray_minutes) >= ray_step)
+	var needs_light_bake := need_rays or (absi(world.minutes - baked_light_minutes) >= min_step)
 	if needs_light_bake:
 		var ambient_region := props.grow(SceneLighting.LIGHT_MARGIN).intersection(geometry_area)
 		var ambient_bytes: PackedByteArray = world.bake_ambient_data(geometry_area, ambient_region, z,
 			Lighting._natural_light(sky), float(sky.sun_warmth))
-		scene_lighting.update_light_baked(ambient_bytes, geometry_area, visible, sky, z, weather, motion.visual_pos, visual_time)
-		baked_light_area = visible.grow(maxi(1, SceneLighting.LIGHT_MARGIN - 2)).intersection(bounds)
+		scene_lighting.update_light_baked(ambient_bytes, geometry_area, visible, sky, z, weather, motion.visual_pos, visual_time, need_rays)
+		if need_rays:
+			baked_light_area = visible.grow(maxi(1, SceneLighting.LIGHT_MARGIN - 2)).intersection(bounds)
+			baked_ray_minutes = world.minutes
 		baked_light_minutes = world.minutes
 		lighting_key = weather_key
 
-	# GPU-cached static world & surface mask (re-rendered ONLY when stepping outside 4-tile margin or changing state!)
+	# GPU-cached static world & surface mask (synchronous fallback on zoom/teleport/edit; normal walking uses double-buffered preload!)
 	var cache_rebuilt := world_cache.ensure_updated(world, cells, below_cells, visible, bounds, cell,
 		current_season, scene_lighting.active_emitters, scene_lighting.current_lamp_power)
+	if cache_rebuilt:
+		_preload_phase = 0
+		scene_lighting.set_world_texture(world_cache.get_texture())
 	var crect := world_cache.cache_rect
 	if crect.has_area():
 		scene_lighting.set_cache_window(geometry_area, crect)
@@ -456,6 +570,8 @@ func _sync_render_state() -> void:
 		scene_lighting.current_daylight, view_world_exact, size / float(cell), size,
 		view_origin, view_size, roof_system.revealed_interior)
 	scene_lighting.set_view(geometry_area, view_world_exact, size, cell, motion.visual_pos)
+	var st_sync: Dictionary = world.character_status()
+	scene_lighting.set_player_light(geometry_area, motion.visual_pos, int(st_sync.get("light_source", 0)), motion.facing_x)
 
 
 func _draw() -> void:
@@ -502,8 +618,24 @@ func _draw_player() -> void:
 	var pcell := Vector2i(roundi(motion.visual_pos.x), roundi(motion.visual_pos.y))
 	if not visible.grow(1).has_point(pcell):
 		return
+	var st: Dictionary = world.character_status()
+	var ls: int = int(st.get("light_source", 0))
 	var tint := motion.compute_player_tint(cells, scene_lighting, weather)
+	if ls > 0:
+		var flicker := 0.92 + 0.08 * sin(visual_time * 13.7) + 0.05 * sin(visual_time * 23.1)
+		var warm := Color(1.06, 0.80, 0.56) if ls == 1 else (Color(1.08, 0.88, 0.64) if ls == 2 else Color(1.10, 0.95, 0.74))
+		tint = tint.lerp(warm * flicker, 0.58 if ls == 1 else 0.68)
 	motion.draw_character(self, player_layer, &"player", motion.visual_pos, true, world.pos, tint, world.worn_overlays())
+	# Tiny physical flame tip held in character's hand (real wall-occluded light is rendered by GPU atmosphere.gdshader!)
+	if ls > 0 and not motion.is_resting():
+		var f_sway := Vector2(sin(visual_time * 9.5) * 0.7, -absf(cos(visual_time * 15.2)) * 0.8)
+		var hand_off := Vector2(0.68 if motion.facing_x >= 0 else 0.32, 0.56)
+		var tip := (motion.visual_pos - Vector2(view_origin)) * float(cell) + cam_px_offset + hand_off * float(cell) + f_sway
+		var fcol := Color(1.0, 0.52, 0.16, 0.88) if ls == 1 else (Color(1.0, 0.72, 0.28, 0.90) if ls == 2 else Color(1.0, 0.84, 0.45, 0.92))
+		var r := maxf(1.6, float(cell) * (0.065 if ls == 1 else 0.08))
+		player_layer.draw_circle(tip, r * 1.9, Color(fcol.r, fcol.g, fcol.b, 0.24))
+		player_layer.draw_circle(tip, r, fcol)
+		player_layer.draw_circle(tip + Vector2(0.0, -r * 0.25), r * 0.48, Color(1.0, 0.96, 0.82, 0.95))
 
 
 func _draw_markers() -> void:
@@ -534,8 +666,20 @@ func _draw_markers() -> void:
 			markers.draw_line(p_mid, g_mid, Color(0.95, 0.78, 0.36, 0.65), 1.6, true)
 	var pcell := Vector2i(roundi(motion.visual_pos.x), roundi(motion.visual_pos.y))
 	if visible.grow(1).has_point(pcell) and not motion.is_resting():
+		var st: Dictionary = world.character_status()
+		var mmode: int = int(st.get("move_mode", 0))
+		var hauling: bool = bool(st.get("hauling", false))
+		var ring_col := Color(0.92, 0.82, 0.56, 0.65)
+		if hauling:
+			ring_col = Color(0.36, 0.84, 0.84, 0.82)
+		elif mmode == 1:
+			ring_col = Color(0.95, 0.72, 0.28, 0.82)
+		elif mmode == 2:
+			ring_col = Color(0.55, 0.72, 0.88, 0.72)
+		elif mmode == 3:
+			ring_col = Color(0.55, 0.55, 0.58, 0.68)
 		var center := (motion.visual_pos - Vector2(view_origin)) * float(cell) + cam_px_offset + Vector2(cell * 0.5, cell * 0.86)
 		markers.draw_set_transform(center, 0, Vector2(1.0, 0.34))
-		markers.draw_arc(Vector2.ZERO, cell * 0.40, 0, TAU, 24, Color(0.92, 0.82, 0.56, 0.65), 1.2, true)
+		markers.draw_arc(Vector2.ZERO, cell * 0.40, 0, TAU, 24, ring_col, 1.3, true)
 		markers.draw_set_transform(Vector2.ZERO)
 	Tiles.finish_frame()

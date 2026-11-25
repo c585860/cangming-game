@@ -39,72 +39,190 @@ char floor_for(Use use) {
     return use == Use::store ? 'd' : 'i';
 }
 
+// CCB-style rich lived-in room furnishing (40-55% density with guaranteed clear doorways & central walkway).
 void furnish(Lot &lot, int z, Rect2i room, Use use, bool enters_from_left, int doorway, std::mt19937 &rng) {
     const int width = room.size.x, depth = room.size.y;
     const int aisle = width / 2;
+    const int door_local = doorway - room.position.y;
     const char floor = floor_for(use);
-    auto put = [&](int x, int y, char thing, char finish = 0) {
-        if (x < 0 || x >= width || y < 0 || y >= depth) return;
-        if (thing != 'i' && (x == aisle || y+room.position.y == doorway)) return;
-        if (!enters_from_left) x = width-1-x;
-        const char current = lot.cell(z,room.position.x+x,room.position.y+y);
-        if (current == '#' || current == 'w' || current == 'D' || current == ' ' || current == '.') return;
-        lot.put(z, room.position.x+x, room.position.y+y, thing, finish ? finish : floor);
+
+    auto blocked_door = [&](int x, int y) -> bool {
+        if (y == door_local && (x == 0 || x == 1)) return true;
+        if (x == aisle && y == door_local) return true;
+        return false;
     };
-    for (int y = 0; y < depth; ++y) {
-        for (int x = 0; x < width; ++x) put(x,y,'i');
-    }
-    switch (use) {
-        case Use::shop:
-            for (int x = 0; x < width; ++x) {
-                put(x,0,'K');
-                if (depth >= 7) put(x,depth-2,'K');
-                if (width >= 7 && depth >= 9) put(x,depth/2,'k');
+    auto put_raw = [&](int x, int y, char thing, char finish = 0, bool allow_aisle = false) {
+        if (x < 0 || x >= width || y < 0 || y >= depth) return;
+        if (thing != 'i') {
+            if (blocked_door(x, y)) return;
+            if (!allow_aisle && x == aisle) return;
+        }
+        const int gx = enters_from_left ? x : (width - 1 - x);
+        const char current = lot.cell(z, room.position.x + gx, room.position.y + y);
+        if (current == '#' || current == 'w' || current == 'D' || current == ' ' || current == '.') return;
+        lot.put(z, room.position.x + gx, room.position.y + y, thing, finish ? finish : floor);
+    };
+    auto put = [&](int x, int y, char thing, char finish = 0) {
+        put_raw(x, y, thing, finish, false);
+    };
+    auto put_rug = [&](int x0, int y0, int x1, int y1) {
+        for (int y = std::max(0, y0); y <= std::min(depth - 1, y1); ++y) {
+            for (int x = std::max(0, x0); x <= std::min(width - 1, x1); ++x) {
+                const int gx = enters_from_left ? x : (width - 1 - x);
+                const char cur = lot.cell(z, room.position.x + gx, room.position.y + y);
+                if (cur == 'i') lot.put(z, room.position.x + gx, room.position.y + y, 'i', 'R');
             }
-            put(width-1,depth-1,'c');
-            for (int y = 0; y < depth; ++y) put(aisle,y,'i','R');
-            break;
-        case Use::kitchen:
-            put(0,0,'h'); put(width-1,0,'u');
-            for (int x = 1; x < width-1; ++x) put(x,0,'k');
-            put(width-1,1,'k'); put(width-1,2,'c');
-            if (depth >= 5) { put(1,depth-2,'t'); put(0,depth-2,'q'); }
-            break;
-        case Use::bedroom: {
-            const int back = doorway-room.position.y >= depth-2 ? 0 : depth-1;
-            const int inward = back == 0 ? 1 : -1;
-            put(width-1,back,'b'); put(width-1,back+inward,'b');
-            put(0,back,'F'); put(0,back+inward,'c');
-            put(width-2,back,'S'); put(0,depth/2,'l');
+        }
+    };
+
+    for (int y = 0; y < depth; ++y) {
+        for (int x = 0; x < width; ++x) put_raw(x, y, 'i', floor, true);
+    }
+
+    switch (use) {
+        case Use::shop: {
+            // Rich apothecary/merchant shop: rows of display cabinets, counters, ledger desk, crates & carpet
+            for (int x = 0; x < width; ++x) {
+                put(x, 0, x == width - 1 ? 'r' : 'K');
+                if (depth >= 6) put(x, depth - 1, x == 0 ? 'c' : (x == width - 1 ? 'C' : 'K'));
+            }
+            for (int y = 2; y < depth - 1; y += 2) {
+                put(width - 1, y, y % 4 == 0 ? 'C' : 'K');
+            }
+            if (width >= 5 && depth >= 5) {
+                const int mid_y = depth / 2;
+                put(width - 2, mid_y, 'k');
+                put(width - 1, mid_y, 'k');
+                put(width - 2, mid_y + 1, 'q');
+                put(0, depth - 2, 'l');
+                put(1, depth - 2, 'q');
+            }
+            put(0, 1, 'P');
+            put_rug(aisle, 0, aisle, depth - 1);
             break;
         }
-        case Use::hall:
-            for (int x = 0; x < width; ++x) put(x,0,'S');
-            if (depth >= 4) {
-                const int row = depth >= 6 ? 2 : 1;
-                put(width-2,row,'t'); put(width-1,row,'t'); put(width-1,row+1,'q');
+        case Use::kitchen: {
+            // Rich CCB domestic kitchen: hearth + full L-shaped counter run + washstand + water vat + pantry + dining set
+            put(0, 0, 'h');
+            for (int x = 1; x < width - 1; ++x) put(x, 0, 'k');
+            put(width - 1, 0, 'u');
+            for (int y = 1; y < std::min(depth - 1, 4); ++y) {
+                put(width - 1, y, y == 1 ? 'k' : (y == 2 ? 'a' : 'c'));
             }
-            for (int y = 1; y < depth-1; ++y) put(aisle,y,'i','R');
-            put(width-1,depth-1,'P');
+            put(0, depth - 1, 'r');
+            if (width >= 4) put(1, depth - 1, 'c');
+            put(width - 1, depth - 1, 'C');
+            // Dining table surrounded by stools/chairs
+            if (depth >= 4 && width >= 4) {
+                const int ty = std::max(2, depth - 2);
+                const int tx = std::min(width - 2, std::max(1, width / 2));
+                put_raw(tx, ty, 't', floor, true);
+                if (tx + 1 < width - 1) put(tx + 1, ty, 't');
+                put(tx - 1, ty, 'q');
+                if (ty - 1 >= 1) put_raw(tx, ty - 1, 'q', floor, true);
+                if (ty + 1 < depth) put_raw(tx, ty + 1, 'q', floor, true);
+            }
             break;
-        case Use::study:
-            for (int x = 0; x < width; ++x) put(x,0,'r');
-            for (int y = 1; y < std::min(4,depth-1); ++y) put(width-1,y,'r');
-            put(0,depth-1,'l'); put(1,depth-1,'q');
+        }
+        case Use::bedroom: {
+            // Rich CCB bedroom: 2-tile canopy bed, bedside table/lamp, wardrobe, dresser, study desk + chair, bench, bonsai & rug!
+            const int back = door_local >= depth - 2 ? 0 : depth - 1;
+            const int inward = back == 0 ? 1 : -1;
+            const int front = depth - 1 - back;
+            // 2-tile canopy bed against the far wall
+            put(width - 1, back, 'b');
+            put(width - 1, back + inward, 'b');
+            // Bedside table + bench at foot of bed
+            put(width - 2, back, 't');
+            if (depth >= 4) put(width - 1, back + inward * 2, 'S');
+            // Wardrobe & dresser along opposite wall
+            put(0, back, 'F');
+            put(0, back + inward, 'c');
+            if (width >= 5) put(1, back, 'c');
+            // Reading desk + armchair + bookshelf
+            const int desk_y = std::clamp(depth / 2, 1, std::max(1, depth - 2));
+            if (desk_y != door_local) {
+                put(0, desk_y, 'l');
+                put(1, desk_y, 'q');
+            }
+            put(width - 1, front, 'r');
+            if (width >= 4) put(width - 2, front, 'P');
+            if (width >= 4 && depth >= 4) {
+                put_rug(1, std::min(back, back + inward), width - 2, std::max(back, back + inward));
+            }
             break;
-        case Use::bath:
-            put(0,0,'u'); put(width-1,0,'a'); put(width-1,1,'a');
+        }
+        case Use::hall: {
+            // Rich Jiangnan reception hall: benches, Eight-Immortals table + 4 chairs, curio cabinet, bookshelf, bonsai & silk carpet
+            for (int x = 0; x < width; ++x) {
+                put(x, 0, (x == 0 || x == width - 1) ? 'P' : 'S');
+            }
+            put(width - 1, 1, 'K');
+            if (depth >= 4) put(width - 1, depth - 2, 'r');
+            put(width - 1, depth - 1, 'c');
+            if (width >= 4) put(0, depth - 1, 'S');
+            if (width >= 5) put(1, depth - 1, 'S');
+            if (depth >= 4 && width >= 4) {
+                const int ty = depth / 2;
+                const int tx = std::max(1, width - 2);
+                put(tx, ty, 't');
+                if (tx - 1 >= 1 && tx - 1 != aisle) put(tx - 1, ty, 't');
+                put(tx, ty - 1, 'q');
+                put(tx, ty + 1, 'q');
+                if (tx - 1 >= 0 && tx - 1 != aisle) put(tx - 1, ty + 1, 'q');
+            }
+            put_rug(std::max(1, aisle - 1), 1, std::min(width - 2, aisle + 1), depth - 2);
             break;
+        }
+        case Use::study: {
+            // Rich scholar's study: wall-to-wall bookshelves, twin scholar desk + armchair, curio cabinet, tea table, bonsai & rug
+            for (int x = 0; x < width; ++x) put(x, 0, x == width - 1 ? 'K' : 'r');
+            for (int y = 1; y < depth - 1; ++y) put(width - 1, y, (y % 3 == 0) ? 'c' : 'r');
+            put(0, depth - 1, 'l');
+            if (width >= 4) put(1, depth - 1, 'l');
+            if (depth >= 3) put(1, depth - 2, 'q');
+            put(width - 1, depth - 1, 'P');
+            if (depth >= 5 && width >= 4) {
+                put(width - 2, 2, 't');
+                put(width - 2, 3, 'q');
+                put(0, 1, 'S');
+            }
+            put_rug(1, 1, std::max(1, width - 2), std::max(1, depth - 2));
+            break;
+        }
+        case Use::bath: {
+            // Rich washroom: porcelain washstand, twin water vats, linen wardrobe, towel cabinet, stool & bonsai
+            put(0, 0, 'u');
+            put(width - 1, 0, 'a');
+            if (depth >= 3) put(width - 1, 1, 'a');
+            put(0, depth - 1, 'c');
+            put(width - 1, depth - 1, 'F');
+            if (width >= 4) put(1, 0, 'q');
+            if (width >= 4 && depth >= 3) put(width - 2, depth - 1, 'P');
+            break;
+        }
         case Use::store:
-        case Use::workshop:
-            for (int x = 0; x < width; ++x) put(x,0,random_int(rng,0,3) == 0 ? 'c' : use == Use::store ? 'C' : 'k');
-            for (int y = 2; y < depth-1; y += 2) {
-                put(width-1,y,use == Use::store ? 'C' : 'k');
-                put(0,y,'r');
+        case Use::workshop: {
+            // Rich storeroom / artisan workshop: workbenches, cargo chests, racks, forge hearth, quenching vat & tool cabinets
+            for (int x = 0; x < width; ++x) {
+                put(x, 0, (x % 3 == 0) ? 'c' : (use == Use::store ? 'C' : 'k'));
             }
-            put(width-1,depth-1,use == Use::workshop ? 'h' : 'a');
+            for (int y = 2; y < depth - 1; ++y) {
+                if (y % 2 == 0) {
+                    put(width - 1, y, use == Use::store ? 'C' : 'k');
+                    put(0, y, 'r');
+                } else if (width >= 5) {
+                    put(width - 1, y, 'C');
+                }
+            }
+            put(width - 1, depth - 1, use == Use::workshop ? 'h' : 'a');
+            if (width >= 4) put(width - 2, depth - 1, use == Use::workshop ? 'a' : 'C');
+            put(0, depth - 1, 'c');
+            if (depth >= 4 && width >= 4) put(1, depth - 2, 'q');
             break;
+        }
     }
+    (void)rng;
 }
 
 std::array<Use,4> uses(Name name, int floor, bool alt) {
@@ -199,7 +317,6 @@ void build_street_plot(Block &block, Vector2i origin, const char *kind, std::mt1
             lot.put(z,wall,door,'D','i');
             furnish(lot,z,Rect2i(x,top,w,h),use,enter_left,door,rng);
         };
-        // Keep furniture inside the stepped footprint and clear of all door rows.
         room(left+1+cut,front+1,hall-left-2-cut,splits[0]-front-1,hall-1,false,types[0]);
         room(left+1,splits[0]+1,hall-left-2,back-splits[0]-1,hall-1,false,types[1]);
         if (split_right) {

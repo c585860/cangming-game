@@ -8,7 +8,7 @@ extends RefCounted
 
 const Lighting = preload("res://scripts/lighting.gd")
 
-const WALL_TILES := ["#", "w", "O", "D", "o"]
+const WALL_TILES := ["#", "w", "O", "%", "D", "o"]
 
 
 static func _origin(board: Control, p: Vector2i) -> Vector2:
@@ -79,6 +79,8 @@ static func draw_wall_segment(board: Control, cells: Dictionary, p: Vector2i, se
 		_draw_solid_wall(board, cells, p, o, s, surface, _hash(p, seed))
 	elif tile == "w" or tile == "O":
 		_draw_3d_window(board, cells, p, o, s, surface, tile == "O", night_warmth)
+	elif tile == "%":
+		_draw_broken_window(board, cells, p, o, s, surface)
 	elif tile == "D" or tile == "o":
 		if surface == "G":
 			_draw_courtyard_gate(board, cells, p, o, s, tile == "o")
@@ -276,6 +278,67 @@ static func _draw_3d_window(board: Control, cells: Dictionary, p: Vector2i, o: V
 		board.draw_rect(frame_r, frame_mid, false, 1.1)
 
 
+static func _draw_broken_window(board: Control, cells: Dictionary, p: Vector2i, o: Vector2, s: float,
+		surface: String) -> void:
+	var pal := _wall_palette(surface)
+	var has_w := _is_wall(cells, p + Vector2i.LEFT)
+	var has_e := _is_wall(cells, p + Vector2i.RIGHT)
+	var has_n := _is_wall(cells, p + Vector2i.UP)
+	var has_s := _is_wall(cells, p + Vector2i.DOWN)
+	var horizontal := (int(has_w) + int(has_e)) >= (int(has_n) + int(has_s))
+
+	var frame_dark := Color("3b2416")
+	var splinter := Color("8b613d")
+	var splinter_hi := Color("b0855a")
+	var hole := Color("121518")
+
+	if horizontal:
+		var cap_h := maxf(4.0, s * 0.25)
+		var sill_h := maxf(3.0, s * 0.13)
+		var plinth_h := maxf(2.5, s * 0.11)
+		board.draw_rect(Rect2(o, Vector2(s, s)), pal["face"])
+		board.draw_rect(Rect2(o.x, o.y, s, cap_h), pal["cap"])
+		board.draw_rect(Rect2(o.x, o.y, s, maxf(1.5, cap_h * 0.28)), pal["cap_hi"])
+		board.draw_rect(Rect2(o.x, o.y + s - plinth_h, s, plinth_h), pal["plinth"])
+
+		var wx := o.x + s * 0.11
+		var wy := o.y + cap_h + s * 0.03
+		var ww := s * 0.78
+		var wh := s - cap_h - sill_h - plinth_h - s * 0.03
+		board.draw_rect(Rect2(wx, wy, ww, wh).grow(1.5), frame_dark)
+		board.draw_rect(Rect2(wx + 1.5, wy + 1.5, maxf(4.0, ww - 3.0), maxf(4.0, wh - 3.0)), hole)
+		# Jagged broken timber splinters & torn oiled-paper remnants
+		var jag1 := PackedVector2Array([
+			Vector2(wx + 2.0, wy + 2.0), Vector2(wx + ww * 0.34, wy + 2.0),
+			Vector2(wx + ww * 0.22, wy + wh * 0.44), Vector2(wx + 2.0, wy + wh * 0.30)
+		])
+		var jag2 := PackedVector2Array([
+			Vector2(wx + ww - 2.0, wy + wh - 2.0), Vector2(wx + ww * 0.62, wy + wh - 2.0),
+			Vector2(wx + ww * 0.78, wy + wh * 0.50), Vector2(wx + ww - 2.0, wy + wh * 0.62)
+		])
+		board.draw_colored_polygon(jag1, splinter)
+		board.draw_colored_polygon(jag2, splinter)
+		board.draw_line(Vector2(wx + 2.0, wy + wh * 0.78), Vector2(wx + ww * 0.28, wy + wh * 0.62), splinter_hi, 1.4)
+		board.draw_line(Vector2(wx + ww - 2.0, wy + wh * 0.22), Vector2(wx + ww * 0.72, wy + wh * 0.36), splinter_hi, 1.4)
+		# Cracked windowsill ledge
+		var sill_y := wy + wh
+		board.draw_rect(Rect2(wx - s * 0.06, sill_y, ww * 0.48, sill_h), splinter)
+		board.draw_rect(Rect2(wx + ww * 0.56, sill_y, ww * 0.50, sill_h), frame_dark)
+	else:
+		var side_pad := s * 0.14
+		var inner_w := s - side_pad * 2.0
+		var jamb_h := s * 0.15
+		board.draw_rect(Rect2(o, Vector2(s, s)), pal["face_dark"])
+		board.draw_rect(Rect2(o.x + side_pad, o.y, inner_w, jamb_h), pal["cap"])
+		board.draw_rect(Rect2(o.x + side_pad, o.y + s - jamb_h, inner_w, jamb_h), pal["cap"])
+		var wy := o.y + jamb_h
+		var wh := s - jamb_h * 2.0
+		board.draw_rect(Rect2(o.x + side_pad - 1.0, wy, inner_w + 2.0, wh), frame_dark)
+		board.draw_rect(Rect2(o.x + side_pad + 2.0, wy + 2.0, maxf(4.0, inner_w - 4.0), maxf(4.0, wh - 4.0)), hole)
+		board.draw_line(Vector2(o.x + side_pad + 2.0, wy + wh * 0.25), Vector2(o.x + side_pad + inner_w * 0.65, wy + wh * 0.36), splinter_hi, 1.4)
+		board.draw_line(Vector2(o.x + s - side_pad - 2.0, wy + wh * 0.76), Vector2(o.x + side_pad + inner_w * 0.32, wy + wh * 0.64), splinter, 1.4)
+
+
 static func _draw_chinese_door(board: Control, cells: Dictionary, p: Vector2i, o: Vector2, s: float,
 		surface: String, is_open: bool, night_warmth: float) -> void:
 	var pal := _wall_palette(surface)
@@ -383,7 +446,7 @@ static func _draw_courtyard_gate(board: Control, cells: Dictionary, p: Vector2i,
 
 
 static func _draw_chinese_fence(board: Control, cells: Dictionary, p: Vector2i, o: Vector2, s: float) -> void:
-	var conn_tiles := ["f", "D", "o", "#", "w", "O"]
+	var conn_tiles := ["f", "D", "o", "#", "w", "O", "%"]
 	var n: bool = cells.get(p + Vector2i.UP, [" "])[0] in conn_tiles
 	var so: bool = cells.get(p + Vector2i.DOWN, [" "])[0] in conn_tiles
 	var w: bool = cells.get(p + Vector2i.LEFT, [" "])[0] in conn_tiles

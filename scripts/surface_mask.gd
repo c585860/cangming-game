@@ -12,6 +12,9 @@ var props: Rect2i
 var seed: int
 var season := "spring"
 var characters: Array = [] # [world_pos: Vector2, role: StringName, animated: bool, tile: Vector2i, motion: CharacterMotion]
+var slice_y0 := 0
+var slice_y1 := 0
+var draw_chars := true
 var _pass_flags := 0
 
 
@@ -31,16 +34,20 @@ func surface_id(p: Vector2i) -> Color:
 
 func _draw() -> void:
 	_pass_flags = 0
-	for y in range(props.position.y, props.end.y):
+	var y_start := slice_y0 if slice_y1 > slice_y0 else props.position.y
+	var y_end := slice_y1 if slice_y1 > slice_y0 else props.end.y
+	for y in range(y_start, y_end):
 		for x in range(props.position.x, props.end.x):
 			var p := Vector2i(x, y)
-			Art.walls(self, cells, p, seed, season)
-			Art.detail(self, null, cells, p, seed, season)
-	_pass_flags = 128
-	for entry: Array in characters:
-		var motion: CharacterMotion = entry[4]
-		if motion != null:
-			motion.draw_character(self, self, entry[1], entry[0], entry[2], entry[3])
-		else:
-			Art.character(self, entry[3], entry[1], self)
+			if cells.has(p):
+				Art.walls(self, cells, p, seed, season)
+				Art.detail(self, null, cells, p, seed, season)
+	if draw_chars:
+		_pass_flags = 128
+		for entry: Array in characters:
+			var motion: CharacterMotion = entry[4]
+			if motion != null:
+				motion.draw_character(self, self, entry[1], entry[0], entry[2], entry[3])
+			else:
+				Art.character(self, entry[3], entry[1], self)
 	_pass_flags = 0

@@ -1,53 +1,43 @@
 extends Control
 
+# Main Game Controller — Authentic Cataclysm-Cleanwater-Bomb (CCB) Layout & Controls.
+# - Full-height viewport edge-to-edge on the left + authentic CCB Classic Right Sidebar (326px).
+# - Pure Unicode character keybinding dispatcher (scripts/ccb_keymap.gd) — uppercase keys detected
+#   directly via char(event.unicode), NOT shift+x!
+# - Pure CCB movement (Numpad 1-9, Arrows, lowercase vi-keys h/j/k/l/y/u/b/n; NO WASD hijacking).
+
 const World = preload("res://scripts/world.gd")
 const Board = preload("res://scripts/board.gd")
-const Survey = preload("res://scripts/survey.gd")
 const Atlas = preload("res://scripts/city_atlas.gd")
 const Items = preload("res://scripts/item_ui.gd")
 const ActionMenu = preload("res://scripts/ccb_action_menu.gd")
 const CCBUI = preload("res://scripts/ccb_ui.gd")
+const CCBSidebar = preload("res://scripts/ccb_sidebar.gd")
+const CCB = preload("res://scripts/ccb_theme.gd")
+const Keymap = preload("res://scripts/ccb_keymap.gd")
 const CanglingCalendar = preload("res://scripts/cangling_calendar.gd")
 const Weather = preload("res://scripts/weather.gd")
 const MoveInput = preload("res://scripts/move_input.gd")
-const UI = preload("res://scripts/ui_theme.gd")
-const INK := UI.INK_IVORY
-const SOFT := UI.INK_SOFT
-const GOLD := UI.GOLD
-const LINE := UI.BORDER_JADE
 const NONE := Vector2i(-1, -1)
 
 var world := World.new()
 var weather := Weather.new()
 var move_input := MoveInput.new()
 var board: Board
-var time_text: Label
-var phase_pill: PanelContainer
-var phase_label: Label
-var weather_pill: PanelContainer
-var weather_label: Label
-var location_text: Label
-var floor_label: Label
-var quest_text: Label
-var realm_badge: PanelContainer
-var realm_label: Label
-var stats_text: Label
-var resources_text: Label
-var needs_text: Label
-var status_text: Label
+var sidebar: CCBSidebar
 var pending_dir_action := ""
-var journal: VBoxContainer
 var action_menu: PopupMenu
 var action_cell := NONE
 var action_ids := PackedStringArray()
 var walker: Timer
 var pending_site := NONE
 var pending_action := ""
-var minimap: Survey
 var overlay_backdrop: ColorRect
 var overlay: PanelContainer
+var overlay_hotkeys: Dictionary = {}
 var opened := ""
 var look_at := NONE
+var peek_return := false
 var atlas: Atlas
 var atlas_cells := PackedByteArray()
 var atlas_seed := -1
@@ -58,164 +48,57 @@ var period_key: Key = KEY_NONE
 
 
 func _ready() -> void:
+	Board.Tiles.prewarm_game_sprites()
 	world.setup(randi())
 	weather.sync(CanglingCalendar.at_minute(world.minutes), world.seed, true)
-	var ui_font := SystemFont.new()
-	ui_font.font_names = PackedStringArray(["Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", "sans-serif"])
+	var ui_font: Font = null
+	if ResourceLoader.exists("res://art/fonts/unifont.ttf"):
+		var ff := FontFile.new()
+		if ff.load_dynamic_font("res://art/fonts/unifont.ttf") == OK:
+			ff.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
+			ff.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
+			ff.hinting = TextServer.HINTING_LIGHT
+			ui_font = ff
+	if ui_font == null:
+		var fallback := SystemFont.new()
+		fallback.font_names = PackedStringArray(["Unifont", "Consolas", "Microsoft YaHei UI", "Noto Sans CJK SC", "monospace"])
+		ui_font = fallback
 	theme = Theme.new()
 	theme.default_font = ui_font
-	theme.default_font_size = 15
+	theme.default_font_size = 14
 	_build_ui()
-	_note("晨雾贴着河面。你从南门外抵达沧菱城。")
+	_note("晨雾贴着河面。你从南门外抵达沧菱城。(按 Enter 打开动作菜单，按 ? 查看 CCB 键位)")
 	_refresh()
 
 
 func _build_ui() -> void:
 	var bg := ColorRect.new()
-	bg.color = UI.BG_DEEP
+	bg.color = CCB.BG_SCREEN
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 
-	var page := MarginContainer.new()
-	add_child(page)
-	page.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	for side in ["left", "right", "top", "bottom"]:
-		page.add_theme_constant_override("margin_" + side, 10)
-	var layout := _column(page, 8)
+	# Authentic CCB Classic Layout: Edge-to-edge full-height viewport on left + 326px CCB Terminal Sidebar on right
+	var split := HBoxContainer.new()
+	split.add_theme_constant_override("separation", 0)
+	add_child(split)
+	split.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 
-	# Top header plaque
-	var header_panel := PanelContainer.new()
-	header_panel.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_HEADER, UI.BORDER_JADE, 4, 12, 7, 1))
-	layout.add_child(header_panel)
-	var top := HBoxContainer.new()
-	top.add_theme_constant_override("separation", 8)
-	header_panel.add_child(top)
-	UI.seal_stamp(top, "沧")
-	var title_box := HBoxContainer.new()
-	title_box.add_theme_constant_override("separation", 10)
-	title_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	top.add_child(title_box)
-	var title := _label(title_box, "沧菱城", 22, GOLD)
-	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	var subtitle := _label(title_box, "云梦水乡 · 古镇", 13, UI.INK_DIM)
-	subtitle.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-
-	weather_pill = PanelContainer.new()
-	weather_pill.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	weather_label = _label(weather_pill, "晴朗", 13, GOLD)
-	top.add_child(weather_pill)
-
-	phase_pill = PanelContainer.new()
-	phase_pill.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	phase_label = _label(phase_pill, "晨曦", 13, GOLD)
-	top.add_child(phase_pill)
-
-	for spec in [["大地图", "map"], ["背包", "inventory"], ["角色", "character"], ["菜单", "pause"]]:
-		var nav := _button(top, spec[0], _show_overlay.bind(spec[1]))
-		nav.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		nav.custom_minimum_size = Vector2(72, 32)
-
-	# Main split: Framed Viewport + Scroll Sidebar
-	var center := HBoxContainer.new()
-	center.add_theme_constant_override("separation", 10)
-	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	layout.add_child(center)
-
-	var board_frame := PanelContainer.new()
-	board_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	board_frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	board_frame.add_theme_stylebox_override("panel", UI.panel_box(Color("090d0b"), UI.BORDER_GOLD.lerp(UI.BORDER_JADE, 0.5), 4, 2, 2, 1))
-	center.add_child(board_frame)
 	board = Board.new()
 	board.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	board.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	board.build(world, weather)
-	board_frame.add_child(board)
+	split.add_child(board)
 	board.cell_clicked.connect(_map_clicked)
 	board.context_requested.connect(_open_actions)
 
-	var side_panel := PanelContainer.new()
-	side_panel.custom_minimum_size.x = 276
-	side_panel.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_PANEL, UI.BORDER_JADE, 4, 10, 10, 1))
-	center.add_child(side_panel)
-	var side := _column(side_panel, 9)
-	side.clip_contents = true
-
-	# Location + Time + Minimap Card
-	var loc_row := HBoxContainer.new()
-	loc_row.add_theme_constant_override("separation", 6)
-	side.add_child(loc_row)
-	location_text = _label(loc_row, "", 19, INK)
-	location_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var floor_pill := PanelContainer.new()
-	floor_pill.add_theme_stylebox_override("panel", UI.pill_box(Color("1b2722"), UI.BORDER_JADE, 7, 2))
-	floor_pill.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	floor_label = _label(floor_pill, "地面层", 12, UI.JADE)
-	loc_row.add_child(floor_pill)
-
-	time_text = _label(side, "", 13, GOLD)
-
-	var map_frame := PanelContainer.new()
-	map_frame.add_theme_stylebox_override("panel", UI.panel_box(Color("0c110e"), UI.BORDER_JADE, 3, 2, 2, 1))
-	side.add_child(map_frame)
-	minimap = Survey.new()
-	minimap.custom_minimum_size.y = 142
-	minimap.build(world)
-	map_frame.add_child(minimap)
-
-	# Status & Resources Card
-	var status_card := PanelContainer.new()
-	status_card.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_CARD, UI.BORDER_SOFT, 4, 9, 7, 1))
-	side.add_child(status_card)
-	var status_col := _column(status_card, 5)
-	var stat_head := HBoxContainer.new()
-	stat_head.add_theme_constant_override("separation", 6)
-	status_col.add_child(stat_head)
-	var stat_title := _label(stat_head, "◈ 行旅状态", 13, SOFT)
-	stat_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	realm_badge = PanelContainer.new()
-	realm_badge.add_theme_stylebox_override("panel", UI.pill_box(Color("1b221e"), UI.BORDER_JADE, 8, 1))
-	realm_label = _label(realm_badge, "平民", 12, SOFT)
-	stat_head.add_child(realm_badge)
-	stats_text = _label(status_col, "", 14, INK)
-	resources_text = _label(status_col, "", 13, SOFT)
-	needs_text = _label(status_col, "", 12, UI.JADE, true)
-
-	# Active Quest Card
-	var quest_card := PanelContainer.new()
-	quest_card.add_theme_stylebox_override("panel", UI.accent_card(Color("1b2019"), UI.BORDER_GOLD, UI.BORDER_SOFT, 10, 8))
-	side.add_child(quest_card)
-	var quest_col := _column(quest_card, 4)
-	_label(quest_col, "◈ 当前委托", 13, GOLD)
-	quest_text = _label(quest_col, "", 14, INK, true)
-	quest_text.custom_minimum_size.y = 38
-
-	# Journal Log
-	side.add_child(UI.hairline())
-	_label(side, "◈ 见闻录", 13, SOFT)
-	var log_scroll := ScrollContainer.new()
-	log_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	log_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	side.add_child(log_scroll)
-	journal = _column(log_scroll, 6)
-	journal.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-
-	# Bottom Status Footer
-	var footer := PanelContainer.new()
-	footer.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_HEADER, UI.BORDER_SOFT, 3, 10, 4, 1))
-	layout.add_child(footer)
-	var foot_row := HBoxContainer.new()
-	foot_row.add_theme_constant_override("separation", 12)
-	footer.add_child(foot_row)
-	status_text = _label(foot_row, "", 13, GOLD)
-	status_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var hints := _label(foot_row, "回车 动作菜单 · o开 c关 e查 g拾 G拖家具 · E吃 W穿 T脱 · i囊 @身 |候 · K调", 12, UI.INK_DIM)
-	hints.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	sidebar = CCBSidebar.new()
+	sidebar.build(world)
+	split.add_child(sidebar)
 
 	action_menu = PopupMenu.new()
 	action_menu.theme = theme
-	UI.style_popup(action_menu)
+	CCB.style_popup(action_menu)
 	add_child(action_menu)
 	action_menu.id_pressed.connect(_choose_action)
 
@@ -245,23 +128,38 @@ func _process(delta: float) -> void:
 		_apply_directional_step(step)
 
 
+func _set_prompt(text: String) -> void:
+	if sidebar != null:
+		sidebar.set_prompt(text)
+
+
+func _clock_str() -> String:
+	var day_min := posmod(int(world.minutes), CanglingCalendar.MINUTES_PER_DAY)
+	return "%02d:%02d" % [day_min / 60, day_min % 60]
+
+
 func _apply_directional_step(direction: Vector2i) -> void:
 	_stop()
 	if not pending_dir_action.is_empty():
 		var target: Vector2i = world.pos + direction
 		var act := pending_dir_action
 		pending_dir_action = ""
+		_set_prompt("")
 		_execute_directional_action(act, target)
 		_refresh()
 		return
+	if peek_return:
+		look_at = NONE
+		peek_return = false
+		_set_prompt("")
 	if look_at == NONE:
 		if board.motion.is_resting():
 			board.exit_posture()
-			status_text.text = ""
+			_set_prompt("")
 		_move_one(world.pos + direction)
 	else:
 		look_at = (look_at + direction).clamp(Vector2i.ZERO, world.city_size - Vector2i.ONE)
-		status_text.text = "环视：%s" % world.location(look_at)
+		_set_prompt("环视: %s (%d,%d) — 按 Esc 返回" % [world.location(look_at), look_at.x, look_at.y])
 	_refresh()
 
 
@@ -287,12 +185,17 @@ func _button(parent: Node, text: String, callback: Callable, primary := false) -
 	var button := Button.new()
 	button.text = text
 	button.focus_mode = Control.FOCUS_NONE
-	button.custom_minimum_size.y = 34
+	button.custom_minimum_size.y = 28
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	UI.style_button(button, primary)
+	CCB.style_button(button, primary)
 	parent.add_child(button)
 	button.pressed.connect(callback)
 	return button
+
+
+func register_overlay_hotkey(ch: String, callback: Callable) -> void:
+	if not ch.is_empty() and not overlay_hotkeys.has(ch):
+		overlay_hotkeys[ch] = callback
 
 
 func _floor_name(z: int) -> String:
@@ -301,53 +204,22 @@ func _floor_name(z: int) -> String:
 	if z == 1:
 		return "二层"
 	if z == 2:
-		return "阁楼"
+		return "三层阁楼"
 	return "Z=%d" % z
 
 
 func _refresh() -> void:
 	var sky := CanglingCalendar.at_minute(world.minutes)
 	weather.sync(sky, world.seed, false)
-	time_text.text = "%s · %s" % [CanglingCalendar.time_label(world.minutes), weather.label()]
-	var phase := UI.phase_info(sky)
-	phase_label.text = phase[0]
-	phase_label.add_theme_color_override("font_color", phase[1])
-	phase_pill.add_theme_stylebox_override("panel", UI.pill_box(phase[2], phase[1].darkened(0.25), 9, 2))
-	var wb := weather.badge()
-	weather_label.text = wb[0]
-	weather_label.add_theme_color_override("font_color", wb[1])
-	weather_pill.add_theme_stylebox_override("panel", UI.pill_box(wb[2], wb[1].darkened(0.25), 9, 2))
-	location_text.text = world.location(world.pos)
-	floor_label.text = _floor_name(world.floor)
-	quest_text.text = world.quest_text
-	var cultivated := world.quest == 4
-	realm_label.text = "引气一层" if cultivated else "平民"
-	realm_label.add_theme_color_override("font_color", UI.JADE if cultivated else UI.INK_SOFT)
-	realm_badge.add_theme_stylebox_override("panel", UI.pill_box(
-		Color("173129") if cultivated else Color("1b221e"),
-		UI.JADE if cultivated else UI.BORDER_JADE, 8, 1))
-	stats_text.text = "铜钱 %d 文   ·   清露草 %d 株" % [world.coins, world.herbs]
-	resources_text.text = "行囊水壶  %d / %d 毫升" % [world.bottle_water(), world.bottle_capacity()]
-	var st: Dictionary = world.character_status()
-	var grab_tag := "  ·  [拖拽家具中]" if world.is_grabbing() else ""
-	needs_text.text = "饱食:%s · 水分:%s · 精力:%s%s" % [
-		st.get("hunger_text", "正常"), st.get("thirst_text", "正常"), st.get("fatigue_text", "尚可"), grab_tag]
 	board.follow(world.pos if look_at == NONE else look_at)
-	minimap.queue_redraw()
+	if sidebar != null:
+		sidebar.refresh(world, weather, board)
 
 
 func _note(text: String) -> void:
-	if text.is_empty():
+	if text.is_empty() or sidebar == null:
 		return
-	var record := _label(journal, "· " + text, 14, INK, true)
-	journal.move_child(record, 0)
-	if journal.get_child_count() > 10:
-		var oldest := journal.get_child(10)
-		journal.remove_child(oldest)
-		oldest.queue_free()
-	for i in range(journal.get_child_count()):
-		var item: Label = journal.get_child(i)
-		item.add_theme_color_override("font_color", INK if i == 0 else SOFT if i <= 2 else UI.INK_DIM)
+	sidebar.add_message(text, _clock_str())
 
 
 func _stop() -> void:
@@ -356,7 +228,8 @@ func _stop() -> void:
 	if wait_timer != null and wait_timer.time_left > 0.0:
 		wait_timer.stop()
 		wait_remaining = 0
-		status_text.text = "等待已中止。"
+		_set_prompt("")
+		_note("等待已中止。")
 	board.route.clear()
 	board.route_head = 0
 	pending_site = NONE
@@ -370,10 +243,11 @@ func _map_clicked(cell: Vector2i) -> void:
 		if world.near(cell):
 			var act := pending_dir_action
 			pending_dir_action = ""
+			_set_prompt("")
 			_execute_directional_action(act, cell)
 			_refresh()
 		else:
-			status_text.text = "请点击紧邻身旁的格子，或按 Esc 取消。"
+			_set_prompt("请点击紧邻身旁的格子，或按 Esc 取消。")
 		return
 	_begin_route(cell)
 
@@ -403,10 +277,11 @@ func _choose_action(id: int) -> void:
 
 func _begin_route(cell: Vector2i, action := "") -> void:
 	look_at = NONE
+	peek_return = false
 	_stop()
 	if action != "rest" and board.motion.is_resting():
 		board.exit_posture()
-	status_text.text = ""
+	_set_prompt("")
 	if not action.is_empty() and world.near(cell):
 		_perform_action(cell, action)
 	elif cell != world.pos:
@@ -418,23 +293,30 @@ func _begin_route(cell: Vector2i, action := "") -> void:
 			pending_action = action
 			walker.start()
 		else:
-			status_text.text = "没有可走的路线。"
+			_note("没有可走的路线。")
 	_refresh()
 
 
 func _move_one(next: Vector2i) -> bool:
 	var was_grabbing: bool = world.is_grabbing()
+	var was_hauling: bool = bool(world.character_status().get("hauling", false))
 	var next_tile: String = world.terrain_at(next)
 	var opens_door: bool = next_tile == "D"
-	var climbs_window: bool = next_tile == "O"
+	var climbs_window: bool = next_tile == "O" or next_tile == "%"
 	if not world.move_one(next):
 		if was_grabbing:
-			status_text.text = "家具前方受阻，无法拖动。"
+			_note("家具前方受阻，无法继续拖动。")
+		elif next_tile == "f":
+			_note("前方是木篱（按 e 翻越，或按 s 砸断）。")
+		elif next_tile == "w":
+			_note("前方是关闭的雕花木窗（按 o 推开，或按 s 砸碎）。")
 		return false
 	if opens_door or was_grabbing:
 		board.invalidate_lightmap()
+	elif was_hauling:
+		board.invalidate_world_cache()
 	if climbs_window:
-		status_text.text = "你翻越了雕花木窗。"
+		_note("你翻越了%s。" % ("残破木窗" if next_tile == "%" else "雕花木窗"))
 	return true
 
 
@@ -442,7 +324,7 @@ func _walk() -> void:
 	var step: Vector2i = board.route[board.route_head]
 	if not _move_one(step):
 		_stop()
-		status_text.text = "道路受阻。"
+		_note("道路受阻。")
 	elif world.pos == step:
 		board.route_head += 1
 		if board.route_head >= board.route.size():
@@ -465,23 +347,17 @@ func _new_game(field: LineEdit, error_label: Label) -> void:
 	board.invalidate_lightmap()
 	atlas_cells.clear()
 	look_at = NONE
+	peek_return = false
 	_stop()
 	_close_overlay()
-	_clear_journal()
-	_note("晨雾贴着河面。你从南门外抵达沧菱城。")
-	status_text.text = "城市种子：%d" % world.seed
+	sidebar.clear_messages()
+	_note("晨雾贴着河面。你从南门外抵达沧菱城。(种子 %d)" % world.seed)
 	_refresh()
-
-
-func _clear_journal() -> void:
-	for entry in journal.get_children():
-		journal.remove_child(entry)
-		entry.queue_free()
 
 
 func _save() -> void:
 	_stop()
-	status_text.text = "旅程已存档。" if world.save_game(World.SAVE_PATH) else "存档写入失败。"
+	_note("游戏进度已存档。" if world.save_game(World.SAVE_PATH) else "存档写入失败。")
 	_refresh()
 
 
@@ -492,11 +368,11 @@ func _load() -> void:
 		board.invalidate_lightmap()
 		atlas_cells.clear()
 		look_at = NONE
-		_clear_journal()
-		_note("你回到了上次落笔的地方。")
-		status_text.text = "已读取存档。"
+		peek_return = false
+		sidebar.clear_messages()
+		_note("已读取上次保存的进度。")
 	else:
-		status_text.text = "没有可读取的存档。"
+		_note("没有可读取的存档。")
 	_refresh()
 
 
@@ -504,7 +380,7 @@ func _start_wait(minutes: int) -> void:
 	_close_overlay()
 	_stop()
 	wait_remaining = minutes
-	status_text.text = "静候时光，按 Esc 可中止。"
+	_set_prompt("静候中 (%02d:%02d)... 按 Esc 中止" % [wait_remaining / 60, wait_remaining % 60])
 	wait_timer.start()
 
 
@@ -516,10 +392,11 @@ func _advance_wait() -> void:
 	wait_remaining -= 1
 	_refresh()
 	if wait_remaining > 0 and wait_remaining % 15 == 0:
-		status_text.text = "静候中，剩余 %02d:%02d；按 Esc 可中止。" % [wait_remaining / 60, wait_remaining % 60]
+		_set_prompt("静候中 (剩余 %02d:%02d)... 按 Esc 中止" % [wait_remaining / 60, wait_remaining % 60])
 	if wait_remaining == 0:
 		wait_timer.stop()
-		status_text.text = "静候结束。"
+		_set_prompt("")
+		_note("静候结束。")
 
 
 func _debug_jump_time_of_day(target_hour: int, target_minute: int) -> void:
@@ -530,7 +407,7 @@ func _debug_jump_time_of_day(target_hour: int, target_minute: int) -> void:
 		delta = CanglingCalendar.MINUTES_PER_DAY
 	world.advance_time(delta)
 	board.invalidate_weather()
-	status_text.text = "调试：时间已跳转至 %02d:%02d。" % [target_hour, target_minute]
+	_note("调试: 时间跳转至 %02d:%02d。" % [target_hour, target_minute])
 	_refresh()
 
 
@@ -544,14 +421,14 @@ func _debug_jump_season(season_index: int) -> void:
 	world.advance_time(delta_days * CanglingCalendar.MINUTES_PER_DAY)
 	weather.sync(CanglingCalendar.at_minute(world.minutes), world.seed, true)
 	board.invalidate_weather()
-	status_text.text = "调试：季节已切换至%s季。" % CanglingCalendar.SEASONS[season_index]
+	_note("调试: 季节切换至%s季。" % CanglingCalendar.SEASONS[season_index])
 	_refresh()
 
 
 func _debug_advance(delta_minutes: int, label_text: String) -> void:
 	world.advance_time(delta_minutes)
 	board.invalidate_weather()
-	status_text.text = "调试：时间推进 %s。" % label_text
+	_note("调试: 时间推进 %s。" % label_text)
 	_refresh()
 
 
@@ -561,19 +438,20 @@ func _debug_set_weather(kind: int) -> void:
 	if weather.snow_cover <= 0.12:
 		board.clear_footprints()
 	board.invalidate_weather()
-	var name := "自动（随天时季节）" if kind < 0 else weather.label()
-	status_text.text = "调试：天气已切换为「%s」。" % name
+	var wname := "自动" if kind < 0 else weather.label()
+	_note("调试: 天气切换为「%s」。" % wname)
 	_refresh()
 
 
 func _debug_toggle_roofs() -> void:
 	board.roofs_enabled = not board.roofs_enabled
 	board.invalidate_weather()
-	status_text.text = "调试：室外自动覆瓦屋顶已%s。" % ("开启" if board.roofs_enabled else "关闭")
+	_note("调试: 室外覆瓦屋顶已%s。" % ("开启" if board.roofs_enabled else "关闭"))
 	_refresh()
 
 
 func _close_overlay() -> void:
+	overlay_hotkeys.clear()
 	if overlay_backdrop != null:
 		remove_child(overlay_backdrop)
 		overlay_backdrop.queue_free()
@@ -586,6 +464,11 @@ func _close_overlay() -> void:
 	atlas = null
 
 
+func _reopen_overlay(kind: String, item_target := NONE) -> void:
+	_close_overlay()
+	_show_overlay(kind, item_target)
+
+
 func _show_overlay(kind: String, item_target := NONE) -> void:
 	move_input.reset()
 	if opened == kind:
@@ -595,8 +478,9 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 	_stop()
 	_refresh()
 	opened = kind
+	overlay_hotkeys.clear()
 	overlay_backdrop = ColorRect.new()
-	overlay_backdrop.color = Color(0.03, 0.05, 0.04, 0.72 if kind != "map" else 0.88)
+	overlay_backdrop.color = Color(0.0, 0.0, 0.0, 0.65 if kind != "map" else 0.85)
 	add_child(overlay_backdrop)
 	overlay_backdrop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 
@@ -604,49 +488,66 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 	add_child(overlay)
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	if kind == "map":
-		overlay.offset_left = 14
-		overlay.offset_right = -14
-		overlay.offset_top = 14
-		overlay.offset_bottom = -14
-	elif kind in ["debug", "action_menu", "eat", "wear", "take_off", "pickup", "character", "inventory"]:
-		overlay.anchor_left = 0.18
-		overlay.anchor_right = 0.82
-		overlay.anchor_top = 0.08
-		overlay.anchor_bottom = 0.92
+		overlay.offset_left = 10
+		overlay.offset_right = -10
+		overlay.offset_top = 10
+		overlay.offset_bottom = -10
+	elif kind in ["debug", "action_menu", "eat", "wear", "take_off", "pickup", "character", "inventory",
+			"wield", "apply", "read", "list_nearby", "messages", "help"]:
+		overlay.anchor_left = 0.14
+		overlay.anchor_right = 0.86
+		overlay.anchor_top = 0.07
+		overlay.anchor_bottom = 0.93
 		overlay.offset_left = 0
 		overlay.offset_right = 0
 		overlay.offset_top = 0
 		overlay.offset_bottom = 0
 	else:
-		overlay.anchor_left = 0.26
-		overlay.anchor_right = 0.74
+		overlay.anchor_left = 0.25
+		overlay.anchor_right = 0.75
 		overlay.anchor_top = 0.16
-		overlay.anchor_bottom = 0.68
+		overlay.anchor_bottom = 0.76
 		overlay.offset_left = 0
 		overlay.offset_right = 0
 		overlay.offset_top = 0
 		overlay.offset_bottom = 0
-	if kind == "wait":
-		overlay.anchor_top = 0.08
-		overlay.anchor_bottom = 0.90
-	overlay.add_theme_stylebox_override("panel", UI.panel_box(Color("111815"), UI.BORDER_GOLD, 6, 16, 14, 1))
-	var contents := _column(overlay, 10)
+
+	overlay.add_theme_stylebox_override("panel", CCB.box(CCB.BG_PANEL, CCB.BORDER_BRIGHT, 12, 10, 1))
+	var contents := _column(overlay, 8)
 	var heading := HBoxContainer.new()
-	heading.add_theme_constant_override("separation", 10)
+	heading.add_theme_constant_override("separation", 8)
 	contents.add_child(heading)
-	var glyphs := {"map": "图", "inventory": "囊", "character": "身", "pause": "卷", "wait": "时", "new": "始", "debug": "调",
-		"action_menu": "令", "eat": "膳", "wear": "衣", "take_off": "解", "pickup": "拾"}
-	var titles := {"map": "沧菱城舆图", "inventory": "随身行囊 (i)", "character": "人物与着装状态 (@)", "pause": "行旅名录",
-		"wait": "静候天时 (|)", "new": "重开行旅", "debug": "调试菜单 (K)",
-		"action_menu": "动作菜单 (Enter)", "eat": "进食与饮水 (E)", "wear": "穿戴衣物 (W)", "take_off": "脱下与整理着装 (T)", "pickup": "拾取与查看物品 (g / e)"}
-	UI.seal_stamp(heading, glyphs[kind])
-	var title := _label(heading, titles[kind], 21, GOLD)
+
+	var titles := {
+		"map": "全城大地图 [m]",
+		"inventory": "随身行囊 [i]",
+		"character": "人物属性与着装 [@]",
+		"pause": "系统菜单 [Esc]",
+		"wait": "静候等待 [|]",
+		"new": "新建城市种子",
+		"debug": "调试菜单 [K]",
+		"action_menu": "动作菜单 [Enter]",
+		"eat": "进食 / 饮水 [E]",
+		"wear": "穿戴衣物 [W]",
+		"take_off": "脱下与整理着装 [T / +]",
+		"pickup": "拾取与查看物品 [g / ,]",
+		"wield": "手持物品 [w]",
+		"apply": "使用 / 激活物品 [a]",
+		"read": "阅读书籍 [R]",
+		"list_nearby": "周边物品与设施 [V]",
+		"move_mode": "移动姿态 [\"]",
+		"messages": "历史消息日志 [P]",
+		"missions": "当前委托 [M]",
+		"help": "CCB 键位帮助 [? / 0]",
+	}
+	var title := _label(heading, titles.get(kind, kind), 16, CCB.C_YELLOW)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	var close := _button(heading, "合卷", _close_overlay)
+	var close := _button(heading, "[Esc] 关闭", _close_overlay)
 	close.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	close.custom_minimum_size = Vector2(72, 32)
-	contents.add_child(UI.hairline())
+	close.custom_minimum_size = Vector2(88, 26)
+	contents.add_child(CCB.divider())
+
 	match kind:
 		"map":
 			_build_atlas(contents)
@@ -660,30 +561,61 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 			CCBUI.take_off_menu(self, contents)
 		"pickup":
 			CCBUI.pickup_menu(self, contents, item_target)
+		"wield":
+			CCBUI.wield_menu(self, contents)
+		"apply":
+			CCBUI.apply_menu(self, contents)
+		"read":
+			CCBUI.read_menu(self, contents)
+		"list_nearby":
+			CCBUI.list_nearby_menu(self, contents)
+		"move_mode":
+			CCBUI.move_mode_menu(self, contents)
+		"messages":
+			CCBUI.messages_menu(self, contents)
+		"missions":
+			CCBUI.missions_menu(self, contents)
+		"help":
+			CCBUI.help_menu(self, contents)
 		"inventory":
 			Items.inventory(self, contents, item_target)
 		"character":
 			CCBUI.character_sheet(self, contents)
 		"pause":
-			_button(contents, "继续行旅", _close_overlay, true)
-			_button(contents, "静候天时…", _show_overlay.bind("wait"))
-			_button(contents, "调试菜单（K）…", _show_overlay.bind("debug"))
-			_button(contents, "记入竹简（存档）", func(): _close_overlay(); _save())
-			_button(contents, "重拾旧录（读档）", func(): _close_overlay(); _load())
-			_button(contents, "另择城势（新旅程）", _show_overlay.bind("new"))
+			var entries := [
+				["继续游戏", func(): _close_overlay(), true],
+				["键位帮助 [?]", func(): _show_overlay("help"), false],
+				["静候等待 [|]", func(): _show_overlay("wait"), false],
+				["调试菜单 [K]", func(): _show_overlay("debug"), false],
+				["保存进度 [S]", func(): _close_overlay(); _save(), false],
+				["读取存档", func(): _close_overlay(); _load(), false],
+				["新建城市（指定种子）", func(): _show_overlay("new"), false],
+			]
+			for i in range(entries.size()):
+				var letter := CCB.letter_key(i)
+				var cb: Callable = entries[i][1]
+				var b := _button(contents, "%s - %s" % [letter, entries[i][0]], cb, entries[i][2])
+				b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+				register_overlay_hotkey(letter, cb)
 		"wait":
-			_label(contents, "选择静候时长。天光、河雾与灯火将随游戏时辰流转，按 Esc 可随时中止。", 14, SOFT, true)
-			for duration in [["10 分钟", 10], ["30 分钟", 30], ["1 小时", 60], ["3 小时", 180], ["6 小时", 360], ["12 小时", 720]]:
-				_button(contents, "静候 " + duration[0], _start_wait.bind(duration[1]))
+			_label(contents, "选择静候时长 (按字母立即开始，随时按 Esc 中止)：", 12, CCB.C_LTGRAY, true)
+			var durs := [["5 分钟", 5], ["15 分钟", 15], ["30 分钟", 30], ["1 小时", 60], ["3 小时", 180], ["6 小时", 360], ["12 小时", 720]]
+			for i in range(durs.size()):
+				var letter := CCB.letter_key(i)
+				var mins: int = durs[i][1]
+				var cb := func(): _start_wait(mins)
+				var b := _button(contents, "%s - 静候 %s" % [letter, durs[i][0]], cb)
+				b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+				register_overlay_hotkey(letter, cb)
 		"new":
-			_label(contents, "城势种子", 14, SOFT)
+			_label(contents, "输入城市种子 (留空则随机生成):", 12, CCB.C_LTGRAY)
 			var field := LineEdit.new()
-			field.placeholder_text = "留空则随机生成城势"
+			field.placeholder_text = "留空随机"
 			field.max_length = 10
-			UI.style_line_edit(field)
+			CCB.style_line_edit(field)
 			contents.add_child(field)
-			var error_label := _label(contents, "", 13, Color("e19a78"), true)
-			_button(contents, "生成沧菱城", _new_game.bind(field, error_label), true)
+			var error_label := _label(contents, "", 12, CCB.C_RED, true)
+			_button(contents, "生成新城市", _new_game.bind(field, error_label), true)
 			field.text_submitted.connect(func(_text: String): _new_game(field, error_label))
 			field.grab_focus()
 		"debug":
@@ -695,97 +627,76 @@ func _build_debug_menu(contents: VBoxContainer) -> void:
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	contents.add_child(scroll)
-	var body := _column(scroll, 12)
+	var body := _column(scroll, 8)
 	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
 	var summary := PanelContainer.new()
-	summary.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_CARD, UI.BORDER_JADE, 4, 12, 8, 1))
+	summary.add_theme_stylebox_override("panel", CCB.box(CCB.BG_HEADER, CCB.BORDER, 8, 6, 1))
 	body.add_child(summary)
-	var scol := _column(summary, 3)
-	_label(scol, "当前天时：%s" % CanglingCalendar.time_label(world.minutes), 14, GOLD)
-	_label(scol, "当前天气：%s（%s） · 积水 %.0f%% · 积雪 %.0f%%" % [
-		weather.label(),
+	var scol := _column(summary, 2)
+	_label(scol, "时间: %s  |  天气: %s (%s)  |  积水 %.0f%%  积雪 %.0f%%" % [
+		CanglingCalendar.time_label(world.minutes), weather.label(),
 		"自动" if weather.override_kind < 0 else "锁定",
-		weather.wetness * 100.0, weather.snow_cover * 100.0], 13, SOFT)
+		weather.wetness * 100.0, weather.snow_cover * 100.0], 12, CCB.C_YELLOW)
 	var perf: Dictionary = world.perf_stats()
-	_label(scol, "性能：FPS %d · CPU %d 工作线程（%d 核） · 区块缓存 %d · 占用 %.0f KB · 自动释放 %d 次（%.0f KB） · 烘焙 %.1f ms" % [
+	_label(scol, "FPS:%d | CPU:%d/%d核 | 区块:%d | 内存:%.0fKB | 释放:%d次(%.0fKB) | 烘焙:%.1fms" % [
 		Engine.get_frames_per_second(),
-		int(perf.get("cpu_threads", 1)),
-		int(perf.get("hardware_threads", 1)),
-		int(perf.get("cached_sectors", 0)),
-		float(perf.get("memory_kb", 0.0)),
-		int(perf.get("auto_trim_count", 0)),
-		float(perf.get("auto_freed_kb", 0.0)),
-		float(perf.get("last_bake_ms", 0.0))], 12, UI.JADE)
+		int(perf.get("cpu_threads", 1)), int(perf.get("hardware_threads", 1)),
+		int(perf.get("cached_sectors", 0)), float(perf.get("memory_kb", 0.0)),
+		int(perf.get("auto_trim_count", 0)), float(perf.get("auto_freed_kb", 0.0)),
+		float(perf.get("last_bake_ms", 0.0))], 12, CCB.C_CYAN)
 
-	# Time of day presets
-	_label(body, "◈ 时间点跳转", 14, GOLD)
+	_label(body, "[ 时间跳转 ]", 12, CCB.C_CYAN)
 	var time_grid := GridContainer.new()
 	time_grid.columns = 3
-	time_grid.add_theme_constant_override("h_separation", 8)
-	time_grid.add_theme_constant_override("v_separation", 8)
+	time_grid.add_theme_constant_override("h_separation", 6)
+	time_grid.add_theme_constant_override("v_separation", 4)
 	body.add_child(time_grid)
 	for preset in [["拂晓 05:30", 5, 30], ["清晨 07:20", 7, 20], ["正午 12:00", 12, 0],
 			["午后 15:30", 15, 30], ["黄昏 17:45", 17, 45], ["子夜 00:30", 0, 30]]:
 		_button(time_grid, preset[0], func(): _debug_jump_time_of_day(preset[1], preset[2]); _close_overlay())
 
 	var step_row := HBoxContainer.new()
-	step_row.add_theme_constant_override("separation", 8)
+	step_row.add_theme_constant_override("separation", 6)
 	body.add_child(step_row)
-	for step_spec in [["+1 小时", 60], ["+3 小时", 180], ["+6 小时", 360], ["+1 天", 1440]]:
+	for step_spec in [["+1小时", 60], ["+3小时", 180], ["+6小时", 360], ["+1天", 1440]]:
 		_button(step_row, step_spec[0], func(): _debug_advance(step_spec[1], step_spec[0]); _close_overlay())
 
-	# Season jump
-	_label(body, "◈ 切换季节", 14, GOLD)
+	_label(body, "[ 切换季节 ]", 12, CCB.C_CYAN)
 	var season_row := HBoxContainer.new()
-	season_row.add_theme_constant_override("separation", 8)
+	season_row.add_theme_constant_override("separation", 6)
 	body.add_child(season_row)
 	for i in range(CanglingCalendar.SEASONS.size()):
 		var sname: String = CanglingCalendar.SEASONS[i]
 		_button(season_row, sname + "季", func(): _debug_jump_season(i); _close_overlay())
 
-	# Weather overrides
-	_label(body, "◈ 切换天气（雨天即显积水反光，雪天即覆雪留脚印）", 14, GOLD)
+	_label(body, "[ 切换天气 ]", 12, CCB.C_CYAN)
 	var weather_grid := GridContainer.new()
 	weather_grid.columns = 3
-	weather_grid.add_theme_constant_override("h_separation", 8)
-	weather_grid.add_theme_constant_override("v_separation", 8)
+	weather_grid.add_theme_constant_override("h_separation", 6)
+	weather_grid.add_theme_constant_override("v_separation", 4)
 	body.add_child(weather_grid)
 	var weather_specs := [
-		["自动（随季节）", -1],
-		["晴朗", Weather.Kind.CLEAR],
-		["多云阴天", Weather.Kind.CLOUDY],
-		["烟雨（细雨）", Weather.Kind.LIGHT_RAIN],
-		["大雨（深积水）", Weather.Kind.HEAVY_RAIN],
-		["小雪（薄雪）", Weather.Kind.LIGHT_SNOW],
-		["大雪（厚雪脚印）", Weather.Kind.HEAVY_SNOW],
+		["自动", -1], ["晴朗", Weather.Kind.CLEAR], ["多云阴天", Weather.Kind.CLOUDY],
+		["烟雨", Weather.Kind.LIGHT_RAIN], ["大雨", Weather.Kind.HEAVY_RAIN],
+		["小雪", Weather.Kind.LIGHT_SNOW], ["大雪", Weather.Kind.HEAVY_SNOW],
 	]
 	for spec in weather_specs:
 		var is_active: bool = (spec[1] == -1 and weather.override_kind < 0) or (spec[1] >= 0 and weather.override_kind == spec[1])
 		_button(weather_grid, spec[0], func(): _debug_set_weather(spec[1]); _close_overlay(), is_active)
 
-	# Visual options
-	_label(body, "◈ 画面与建筑调试", 14, GOLD)
+	_label(body, "[ 画面与内存 ]", 12, CCB.C_CYAN)
 	var opt_row := HBoxContainer.new()
-	opt_row.add_theme_constant_override("separation", 8)
+	opt_row.add_theme_constant_override("separation", 6)
 	body.add_child(opt_row)
-	_button(opt_row, "室外自动覆瓦屋顶：%s" % ("开" if board.roofs_enabled else "关"),
+	_button(opt_row, "屋顶显示:%s" % ("开" if board.roofs_enabled else "关"),
 		func(): _debug_toggle_roofs(); _close_overlay(), board.roofs_enabled)
-	_button(opt_row, "清空脚印（雪/水）", func(): board.clear_footprints(); board.markers.queue_redraw(); _close_overlay())
-	_button(opt_row, "立即释放冷缓存", func():
+	_button(opt_row, "清空脚印", func(): board.clear_footprints(); board.markers.queue_redraw(); _close_overlay())
+	_button(opt_row, "释放冷缓存", func():
 		var freed_kb := float(world.trim_memory(true)) / 1024.0
 		var freed_pages: int = board.Tiles.trim_unused_pages(0)
-		status_text.text = "内存管理：已释放 %.0f KB 区块缓存、%d 页图集。" % [freed_kb, freed_pages]
+		_note("内存管理: 已释放 %.0f KB 区块缓存、%d 页图集。" % [freed_kb, freed_pages])
 		_close_overlay())
-
-
-func _stat_row(parent: Node, label_text: String, value_text: String, value_color: Color) -> void:
-	var row := HBoxContainer.new()
-	parent.add_child(row)
-	var k := _label(row, label_text, 15, SOFT)
-	k.custom_minimum_size.x = 110
-	var v := _label(row, value_text, 15, value_color)
-	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
 
 func _gui_input(event: InputEvent) -> void:
@@ -795,13 +706,13 @@ func _gui_input(event: InputEvent) -> void:
 
 func _build_atlas(contents: VBoxContainer) -> void:
 	var panel := HBoxContainer.new()
-	panel.add_theme_constant_override("separation", 12)
+	panel.add_theme_constant_override("separation", 8)
 	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	contents.add_child(panel)
 	var atlas_frame := PanelContainer.new()
 	atlas_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	atlas_frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	atlas_frame.add_theme_stylebox_override("panel", UI.panel_box(Color("0b100d"), UI.BORDER_JADE, 4, 2, 2, 1))
+	atlas_frame.add_theme_stylebox_override("panel", CCB.box(Color("050505"), CCB.BORDER, 1, 1, 1))
 	panel.add_child(atlas_frame)
 	atlas = Atlas.new()
 	atlas.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -809,37 +720,31 @@ func _build_atlas(contents: VBoxContainer) -> void:
 	atlas_frame.add_child(atlas)
 
 	var side_card := PanelContainer.new()
-	side_card.custom_minimum_size.x = 252
-	side_card.add_theme_stylebox_override("panel", UI.panel_box(UI.BG_CARD, UI.BORDER_JADE, 4, 12, 10, 1))
+	side_card.custom_minimum_size.x = 240
+	side_card.add_theme_stylebox_override("panel", CCB.box(CCB.BG_HEADER, CCB.BORDER, 8, 8, 1))
 	panel.add_child(side_card)
-	var side := _column(side_card, 8)
-	_label(side, "◈ 选中区块", 13, SOFT)
-	var name_label := _label(side, "", 20, UI.JADE, true)
-	var details := _label(side, "", 14, INK, true)
-	side.add_child(UI.hairline())
+	var side := _column(side_card, 6)
+	_label(side, "[ 选中区块 ]", 12, CCB.C_CYAN)
+	var name_label := _label(side, "", 16, CCB.C_YELLOW, true)
+	var details := _label(side, "", 12, CCB.C_WHITE, true)
+	side.add_child(CCB.divider())
 	var tools := HBoxContainer.new()
-	tools.add_theme_constant_override("separation", 8)
+	tools.add_theme_constant_override("separation", 6)
 	side.add_child(tools)
 	_button(tools, "观全城", atlas.fit)
 	_button(tools, "前往此地", atlas.travel, true)
-	var quest_box := PanelContainer.new()
-	quest_box.add_theme_stylebox_override("panel", UI.accent_card(Color("171e19"), UI.BORDER_GOLD, UI.BORDER_SOFT, 9, 7))
-	side.add_child(quest_box)
-	var qcol := _column(quest_box, 3)
-	_label(qcol, "◈ 当前委托", 13, GOLD)
-	_label(qcol, world.quest_text, 14, INK, true)
-
-	side.add_child(UI.hairline())
-	_label(side, "◈ 图例与操作", 13, SOFT)
-	_label(side, "● 金点：城中地标\n● 玉点：旅人所在\n滚轮缩放 · 中键拖拽 · 右键前往", 13, UI.INK_DIM, true)
-
+	side.add_child(CCB.divider())
+	_label(side, "[ 当前委托 ]", 12, CCB.C_CYAN)
+	_label(side, world.quest_text, 12, CCB.C_WHITE, true)
+	side.add_child(CCB.divider())
+	_label(side, "滚轮缩放 | 中键拖拽 | 右键自动寻路", 11, CCB.C_DKGRAY, true)
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	side.add_child(spacer)
-	_label(side, "%d × %d 格  ·  种子 %d" % [world.city_size.x, world.city_size.y, world.seed], 12, UI.INK_DIM)
-	atlas.selection_changed.connect(func(title: String, data: String):
-		name_label.text = title
-		details.text = data)
+	_label(side, "%d x %d | 种子 %d" % [world.city_size.x, world.city_size.y, world.seed], 11, CCB.C_DKGRAY)
+	atlas.selection_changed.connect(func(title_txt: String, data_txt: String):
+		name_label.text = title_txt
+		details.text = data_txt)
 	atlas.destination_requested.connect(_travel_from_overview)
 	if atlas_cells.is_empty() or atlas_seed != world.seed:
 		atlas_cells = world.city_survey()
@@ -869,14 +774,13 @@ func _perform_action(position: Vector2i, action: String) -> void:
 					var tile: String = world.terrain_at(position)
 					if tile == "b":
 						board.enter_posture(&"lying", position)
-						status_text.text = "你正躺在床榻上歇息（按方向键即可起身）。"
+						_set_prompt("正躺在床榻上歇息 (按方向键起身)")
 					elif tile == "q" or tile == "S":
 						board.enter_posture(&"sitting", position)
-						status_text.text = "你正坐在椅凳上小憩（按方向键即可起身）。"
-				elif action in ["door", "window", "stairs_up", "stairs_down"]:
+						_set_prompt("正坐在椅凳上歇息 (按方向键起身)")
+				elif action in ["door", "window", "smash", "stairs_up", "stairs_down"]:
 					board.invalidate_lightmap()
 				elif action in ["grab", "release_grab"]:
-					status_text.text = result
 					board.markers.queue_redraw()
 				else:
 					board.invalidate_world_cache()
@@ -899,35 +803,60 @@ func _candidates_for_dir_action(act: String) -> Array[Vector2i]:
 				"close":
 					if t in ["o", "O"] or (t in ["c", "C", "F", "K", "r"] and world.is_container_open(p)):
 						found.append(p)
+				"smash":
+					if t in ["w", "O", "D", "o", "f", "b", "q", "S", "t", "l", "k", "K", "c", "F", "r", "C", "a", "u", "P", "g"]:
+						found.append(p)
 				"grab":
 					if t in ["q", "S", "t", "l", "C", "c", "a", "u", "b", "k", "K", "r", "P"]:
 						found.append(p)
 				"examine":
-					if t in ["c", "C", "F", "K", "r", "b", "q", "S", "t", "l", "k", "h", "u", "a", "D", "o", "w", "O"] or not world.items_at(p).is_empty():
+					if t in ["c", "C", "F", "K", "r", "b", "q", "S", "t", "l", "k", "h", "u", "a", "D", "o", "w", "O", "%", "f"] \
+							or not world.items_at(p).is_empty() \
+							or world.site_at(p) in [&"merchant", &"ferryman", &"altar", &"herb"]:
 						found.append(p)
+				"chat":
+					if world.site_at(p) in [&"merchant", &"ferryman"]:
+						found.append(p)
+				"drop_dir", "peek":
+					found.append(p)
 	return found
 
 
 func _start_directional_action(act: String) -> void:
 	if act == "grab" and world.is_grabbing():
 		var msg: String = world.release_grab()
-		status_text.text = msg
 		_note(msg)
 		board.markers.queue_redraw()
 		_refresh()
 		return
 	var cands := _candidates_for_dir_action(act)
 	if cands.is_empty():
-		var labels := {"open": "打开的门、窗或柜子", "close": "关闭的门、窗或柜子", "grab": "抓取拖拽的家具", "examine": "检查或互动的对象"}
-		status_text.text = "身旁没有可%s。" % labels.get(act, "操作的目标")
+		var labels := {
+			"open": "打开的门、窗或柜子",
+			"close": "关闭的门、窗或柜子",
+			"smash": "砸碎的物件",
+			"grab": "抓取拖拽的家具",
+			"examine": "检查或翻越的对象",
+			"chat": "交谈的人物",
+		}
+		_note("身旁没有可%s。" % labels.get(act, "操作的目标"))
 		return
-	if cands.size() == 1:
+	if cands.size() == 1 and act not in ["drop_dir", "peek"]:
 		_execute_directional_action(act, cands[0])
 		_refresh()
 		return
 	pending_dir_action = act
-	var prompts := {"open": "向哪个方向开门/窗/柜？", "close": "向哪个方向关门/窗/柜？", "grab": "抓取哪个方向的家具？", "examine": "检查哪个方向？"}
-	status_text.text = "%s（按方向键/小键盘或点击邻格，Esc 取消）" % prompts.get(act, "请选择方向")
+	var prompts := {
+		"open": "向哪个方向开门/窗/柜？",
+		"close": "向哪个方向关门/窗/柜？",
+		"smash": "向哪个方向砸碎？",
+		"grab": "抓取哪个方向的家具？",
+		"examine": "检查 / 翻越哪个方向？",
+		"drop_dir": "向哪个方向丢弃物品？",
+		"peek": "向哪个方向探头窥视？",
+		"chat": "与哪个方向的人物交谈？",
+	}
+	_set_prompt("%s (方向键/小键盘/vi键/点击邻格，Esc取消)" % prompts.get(act, "选择方向"))
 
 
 func _execute_directional_action(act: String, target: Vector2i) -> void:
@@ -935,9 +864,8 @@ func _execute_directional_action(act: String, target: Vector2i) -> void:
 		"open":
 			var msg: String = world.open_at(target)
 			if msg.is_empty():
-				status_text.text = "那个方向没有可打开的门、窗或柜子。"
+				_note("那个方向没有可打开的门、窗或柜子。")
 			else:
-				status_text.text = msg
 				_note(msg)
 				board.invalidate_lightmap()
 				if world.is_container_open(target) and not world.items_at(target).is_empty():
@@ -945,64 +873,115 @@ func _execute_directional_action(act: String, target: Vector2i) -> void:
 		"close":
 			var msg: String = world.close_at(target)
 			if msg.is_empty():
-				status_text.text = "那个方向没有可关闭的门、窗或柜子。"
+				_note("那个方向没有可关闭的门、窗或柜子。")
 			else:
-				status_text.text = msg
 				_note(msg)
 				board.invalidate_lightmap()
+		"smash":
+			var msg: String = world.smash_at(target)
+			_note(msg)
+			board.invalidate_lightmap()
 		"grab":
 			var msg: String = world.grab_furniture(target)
-			status_text.text = msg
 			_note(msg)
 			board.markers.queue_redraw()
+		"drop_dir":
+			_show_overlay("inventory", target)
+		"peek":
+			var delta := target - world.pos
+			look_at = (world.pos + delta * 3).clamp(Vector2i.ZERO, world.city_size - Vector2i.ONE)
+			peek_return = true
+			_set_prompt("窥视: %s (%d,%d) — 按任意方向键或 Esc 缩回" % [world.location(look_at), look_at.x, look_at.y])
+		"chat":
+			var s: StringName = world.site_at(target)
+			if s == &"merchant" or s == &"ferryman":
+				_note(world.interact(target, "talk"))
+			else:
+				_note("那个方向没有人可以交谈。")
 		"examine":
+			var s: StringName = world.site_at(target)
+			if s == &"merchant" or s == &"ferryman":
+				_note(world.interact(target, "talk"))
+				return
+			if s == &"herb":
+				_perform_action(target, "gather")
+				return
+			if s == &"altar":
+				_perform_action(target, "cultivate")
+				return
 			var t: String = world.terrain_at(target)
-			if t in ["c", "C", "F", "K", "r"]:
+			# CCB examine: fences / open & broken windows climb directly; containers open & show loot;
+			# hearths warm up; tables/counters with items loot, empty climb!
+			if t in ["f", "O", "%"]:
+				var cmsg: String = world.climb_at(target)
+				_note(cmsg)
+				board.invalidate_lightmap()
+			elif t in ["c", "C", "F", "K", "r"]:
 				_perform_action(target, "container")
 			elif not world.items_at(target).is_empty():
 				_show_overlay("pickup", target)
+			elif t in ["t", "l", "k"]:
+				var cmsg: String = world.climb_at(target)
+				_note(cmsg)
+			elif t == "h":
+				_perform_action(target, "warm_hearth")
+			elif t == "u":
+				_perform_action(target, "wash")
 			else:
 				var msg: String = world.interact(target, "inspect")
-				if msg.is_empty():
-					msg = "这里似乎没有什么特别的东西。"
-				status_text.text = msg
-				_note(msg)
+				_note(msg if not msg.is_empty() else "那里没有什么特别的东西。")
 
 
 func _run_ccb_action(act_id: String) -> void:
 	match act_id:
+		"action_menu":
+			_show_overlay("action_menu")
 		"sky":
-			var msg := CCBUI.observe_sky_message(self)
-			status_text.text = msg
-			_note(msg)
+			_note(CCBUI.observe_sky_message(self))
 		"look":
 			_stop()
+			peek_return = false
 			look_at = world.pos if look_at == NONE else NONE
-			status_text.text = "环视：%s" % world.location(look_at) if look_at != NONE else ""
+			_set_prompt("环视: %s (%d,%d) — 按 Esc 结束" % [world.location(look_at), look_at.x, look_at.y] if look_at != NONE else "")
 			_refresh()
-		"map", "inventory", "eat", "wear", "take_off", "pickup", "character", "wait", "debug":
+		"map", "inventory", "eat", "wear", "take_off", "pickup", "character", "wait", "debug", \
+				"wield", "apply", "read", "list_nearby", "move_mode", "messages", "missions", "help":
 			_show_overlay(act_id)
 		"drop":
-			_show_overlay("inventory")
-		"open", "close", "examine", "grab":
+			_show_overlay("inventory", world.pos)
+		"open", "close", "smash", "examine", "grab", "drop_dir", "peek", "chat":
 			_start_directional_action(act_id)
+		"apply_wielded":
+			_note(world.apply_wielded())
+			board.player_layer.queue_redraw()
+			_refresh()
+		"haul":
+			_note(world.toggle_haul())
+			board.markers.queue_redraw()
+			_refresh()
+		"safe_mode":
+			_note(world.toggle_safe_mode())
+			_refresh()
+		"zoom_in":
+			board.zoom = clampi(board.zoom + 1, 0, Board.ZOOMS.size() - 1)
+			board._update_view()
+		"zoom_out":
+			board.zoom = clampi(board.zoom - 1, 0, Board.ZOOMS.size() - 1)
+			board._update_view()
 		"stairs_up":
-			var msg: String = world.change_floor(1)
-			status_text.text = msg
-			_note(msg)
+			_note(world.change_floor(1))
 			board.invalidate_lightmap()
 			_refresh()
 		"stairs_down":
-			var msg: String = world.change_floor(-1)
-			status_text.text = msg
-			_note(msg)
+			_note(world.change_floor(-1))
 			board.invalidate_lightmap()
 			_refresh()
 		"stand":
 			board.exit_posture()
-			status_text.text = "你起身整了整衣衫。"
+			_set_prompt("")
+			_note("你起身整了整衣衫。")
 			_refresh()
-		"sleep", "rest_nearby":
+		"sleep":
 			var pos: Vector2i = world.pos
 			var bed := NONE
 			var seat := NONE
@@ -1020,9 +999,7 @@ func _run_ccb_action(act_id: String) -> void:
 				_perform_action(seat, "rest")
 			else:
 				world.rest_minutes(30, false)
-				var msg := "你寻了处角落小憩半个时辰。"
-				status_text.text = msg
-				_note(msg)
+				_note("你在原地小憩了半个时辰。")
 			_refresh()
 		"save":
 			_save()
@@ -1055,9 +1032,6 @@ func _repeat_period() -> void:
 	var held := Input.is_physical_key_pressed(period_key) if period_key != KEY_NONE else Input.is_key_pressed(KEY_PERIOD)
 	if not held or not opened.is_empty() or action_menu.visible:
 		return
-	for modifier: Key in [KEY_SHIFT, KEY_CTRL, KEY_ALT, KEY_META]:
-		if Input.is_key_pressed(modifier):
-			return
 	_period_tick()
 	period_timer.start(0.11)
 
@@ -1066,14 +1040,12 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if not event is InputEventKey or not event.pressed:
 		return
 	var key: Key = event.physical_keycode
-	var kc: Key = event.keycode
-	var shift: bool = event.shift_pressed
-	var ctrl_or_alt: bool = event.ctrl_pressed or event.alt_pressed or event.meta_pressed
 
 	if key == KEY_ESCAPE and not event.echo:
 		if not pending_dir_action.is_empty():
 			pending_dir_action = ""
-			status_text.text = "已取消操作。"
+			_set_prompt("")
+			_note("已取消操作。")
 			get_viewport().set_input_as_handled()
 			return
 		if wait_timer.time_left > 0.0:
@@ -1085,6 +1057,8 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			_close_overlay()
 		elif look_at != NONE or not board.route.is_empty():
 			look_at = NONE
+			peek_return = false
+			_set_prompt("")
 			_stop()
 			_refresh()
 		else:
@@ -1092,99 +1066,38 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 
+	# Active CCB Overlay: dispatch lettered shortcuts ('a'..'z', 'A'..'Z', ',') directly via event.unicode!
 	if not opened.is_empty():
 		if atlas != null and atlas.keyboard(key):
 			get_viewport().set_input_as_handled()
+			return
+		if opened != "new" and not event.echo and not (event.ctrl_pressed or event.alt_pressed or event.meta_pressed):
+			var ch := Keymap.event_char(event)
+			if not ch.is_empty() and overlay_hotkeys.has(ch):
+				var cb: Callable = overlay_hotkeys[ch]
+				cb.call()
+				get_viewport().set_input_as_handled()
 		return
 
-	if not event.echo and not ctrl_or_alt:
-		# Enter -> CCB Action Menu
-		if kc == KEY_ENTER or kc == KEY_KP_ENTER or key == KEY_ENTER or key == KEY_KP_ENTER:
-			_show_overlay("action_menu")
+	# If waiting for a direction (o/c/s/e/G/D/X/C), accept movement direction keys first!
+	if not pending_dir_action.is_empty():
+		if move_input.is_movement_key(event):
+			var d := move_input.key_to_dir(event)
+			if d != Vector2i.ZERO:
+				_apply_directional_step(d)
 			get_viewport().set_input_as_handled()
 			return
-		# CCB Shift+Key bindings (uppercase letters & symbols — zero conflict with lowercase WASD!)
-		if shift:
-			if key == KEY_E:
-				_show_overlay("eat")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_W:
-				_show_overlay("wear")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_T or key == KEY_EQUAL:
-				_show_overlay("take_off")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_G:
-				_start_directional_action("grab")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_D:
-				_show_overlay("inventory")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_2 or kc == KEY_AT:
-				_show_overlay("character")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_BACKSLASH or kc == KEY_BAR:
-				_show_overlay("wait")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_4 or kc == KEY_DOLLAR:
-				_run_ccb_action("sleep")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_COMMA or kc == KEY_LESS:
-				_run_ccb_action("stairs_up")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_PERIOD or kc == KEY_GREATER:
-				_run_ccb_action("stairs_down")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_K:
-				_show_overlay("debug")
-				get_viewport().set_input_as_handled()
-				return
-		else:
-			# CCB lowercase single-key bindings (o open, c close, e examine, g/, pickup, i inv, m map, x/L look, k debug)
-			if key == KEY_O:
-				_start_directional_action("open")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_C:
-				_start_directional_action("close")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_E:
-				_start_directional_action("examine")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_G or key == KEY_COMMA:
-				_show_overlay("pickup")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_I:
-				_show_overlay("inventory")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_M:
-				_show_overlay("map")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_K:
-				_show_overlay("debug")
-				get_viewport().set_input_as_handled()
-				return
-			if key == KEY_X or key == KEY_L:
-				_run_ccb_action("look")
-				get_viewport().set_input_as_handled()
-				return
 
-	if (kc == KEY_PERIOD or kc == KEY_KP_5 or key == KEY_KP_5) and not (shift or ctrl_or_alt):
+	# Pure CCB Unicode-character action bindings (uppercase detected directly via char(event.unicode), NOT shift+x!)
+	if not event.echo:
+		var act := Keymap.match_action(event)
+		if not act.is_empty():
+			_run_ccb_action(act)
+			get_viewport().set_input_as_handled()
+			return
+
+	# Pass 1 turn ('.' / '5' / KP_5)
+	if Keymap.is_wait_turn_key(event):
 		if not event.echo:
 			_stop()
 			period_key = key
@@ -1192,7 +1105,9 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			period_timer.start(0.27)
 		get_viewport().set_input_as_handled()
 		return
-	if move_input.is_movement_key(event) and not shift:
+
+	# Pure CCB 8-direction movement (Numpad 1-9, Arrows, lowercase vi-keys h/j/k/l/y/u/b/n)
+	if move_input.is_movement_key(event):
 		var direction := move_input.handle_key_press(event)
 		if direction != Vector2i.ZERO:
 			_apply_directional_step(direction)
