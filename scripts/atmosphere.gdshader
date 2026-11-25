@@ -5,6 +5,7 @@ render_mode unshaded, blend_disabled;
 
 uniform sampler2D scene : hint_screen_texture, filter_nearest;
 uniform sampler2D solar_map : filter_linear, repeat_disable;
+uniform sampler2D solar_near_map : filter_linear, repeat_disable;
 uniform sampler2D volume_map : filter_linear, repeat_disable;
 uniform sampler2D bounce_map : filter_linear, repeat_disable;
 uniform sampler2D surface_mask : filter_nearest, repeat_disable;
@@ -18,8 +19,11 @@ uniform ivec2 map_size;
 uniform vec2 view_world;
 uniform vec2 map_offset;
 uniform vec2 view_span;
+uniform vec2 far_offset;
 uniform vec2 light_span;
 uniform float light_margin;
+uniform vec2 near_offset;
+uniform float near_span = 18.0;
 uniform float volume_sample_inset;
 uniform float bounce_sample_inset;
 uniform vec2 mask_sample_scale;
@@ -39,6 +43,7 @@ uniform float rain_level = 0.0;
 uniform float wetness = 0.0;
 uniform float snow_cover = 0.0;
 uniform float cloud_cover = 0.0;
+uniform float puddle_phase = 0.0;
 uniform float noise_seed;
 uniform bool below_ground;
 uniform vec2 player_feet;
@@ -55,22 +60,6 @@ float noise2(vec2 p) {
 	f = f * f * (3.0 - 2.0 * f);
 	return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
 		mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0)), f.x), f.y);
-}
-
-float rain_ripples(vec2 p, float t) {
-	vec2 uv = p * 1.05;
-	vec2 id = floor(uv);
-	vec2 f = fract(uv) - 0.5;
-	float h = hash21(id + vec2(noise_seed * 0.17, 3.7));
-	if (h < 0.62) {
-		return 0.0;
-	}
-	float cycle = fract(t * (1.15 + 0.50 * h) + h * 11.3);
-	vec2 center = vec2(hash21(id + vec2(1.3, 9.1)), hash21(id + vec2(5.7, 2.4))) - 0.5;
-	vec2 d = (f - center * 0.45) * vec2(1.0, 1.45);
-	float dist = length(d);
-	float ring = 1.0 - smoothstep(0.0, 0.042, abs(dist - cycle * 0.36));
-	return ring * (1.0 - cycle) * smoothstep(0.0, 0.15, cycle);
 }
 
 int surface_class(ivec2 at) {
@@ -90,6 +79,7 @@ vec3 sky_at(ivec2 p, float aperture_weight) {
 vec3 ambient_at(vec2 local, ivec2 own) {
 	ivec2 start = ivec2(floor(local - 0.5));
 	vec2 fraction = fract(local - 0.5);
+	fraction = fraction * fraction * (3.0 - 2.0 * fraction);
 	vec3 total = vec3(0.0);
 	float weight = 0.0;
 	int same_class = surface_class(own);
@@ -99,7 +89,6 @@ vec3 ambient_at(vec2 local, ivec2 own) {
 			if (surface_class(p) != same_class) {
 				continue;
 			}
-			// A diagonal tap must also have a clear shared edge.
 			if (p.x != own.x && p.y != own.y && surface_class(ivec2(p.x, own.y)) != same_class
 				&& surface_class(ivec2(own.x, p.y)) != same_class) {
 				continue;
@@ -116,8 +105,21 @@ vec3 ambient_at(vec2 local, ivec2 own) {
 	return total / max(weight, 0.001);
 }
 
+vec3 sample_cascaded_solar(vec2 receiver_local) {
+	vec2 far_uv = (receiver_local - far_offset) / light_span;
+	vec3 far_vis = texture(solar_map, far_uv).rgb;
+	vec2 near_uv = (receiver_local - near_offset) / vec2(near_span);
+	vec2 margin = abs(near_uv - vec2(0.5)) * 2.0;
+	float edge = max(margin.x, margin.y);
+	if (edge >= 0.98) {
+		return far_vis;
+	}
+	vec3 near_vis = texture(solar_near_map, near_uv).rgb;
+	float blend = 1.0 - smoothstep(0.72, 0.96, edge);
+	return mix(far_vis, near_vis, blend);
+}
+
 float body_shadow(vec2 world, float height, vec3 heading) {
-	// Project a standing silhouette toward the same sun used for walls and windows.
 	vec3 scale = vec3(0.22, 0.16, 0.54);
 	vec3 origin = vec3(world - player_feet, height - 0.55) / scale;
 	vec3 direction = heading / scale;
@@ -139,9 +141,9 @@ float lamp_shadow(vec3 receiver, vec3 light_pos) {
 	return 1.0 - smoothstep(0.73, 1.22, length(origin + ray * t));
 }
 
-vec3 local_lighting(ivec2 own, vec3 receiver, bool self_character) {
-	vec4 indices = texelFetch(lamp_slots, own, 0);
-	vec4 transmission = texelFetch(lamp_slots, own + ivec2(map_size.x, 0), 0);
+vec3 local_lighting_cell(ivec2 cell, vec3 receiver, bool self_character) {
+	vec4 indices = texelFetch(lamp_slots, cell, 0);
+	vec4 transmission = texelFetch(lamp_slots, cell + ivec2(map_size.x, 0), 0);
 	vec3 total = vec3(0.0);
 	for (int i = 0; i < 4; i++) {
 		int index = int(round(indices[i]));
@@ -157,7 +159,7 @@ vec3 local_lighting(ivec2 own, vec3 receiver, bool self_character) {
 			continue;
 		}
 		float d = length(receiver - lamp.xyz);
-		float cutoff = 1.0 - smoothstep(5.0, 8.7, d);
+		float cutoff = 1.0 - smoothstep(4.8, 8.8, d);
 		float shadow = 0.0;
 		if (!self_character) {
 			vec2 player_local = player_feet - view_world + map_offset;
@@ -174,6 +176,36 @@ vec3 local_lighting(ivec2 own, vec3 receiver, bool self_character) {
 		total += meta.rgb * energy;
 	}
 	return vec3(0.94) * (vec3(1.0) - exp(-total * 0.145));
+}
+
+vec3 local_lighting(ivec2 own, vec3 receiver, bool self_character) {
+	// Non-grid smooth bilinear blend of point light visibility across neighboring open cells
+	// so lantern illumination flows continuously without 32px square tile seams!
+	ivec2 start = ivec2(floor(receiver.xy - 0.5));
+	vec2 f = fract(receiver.xy - 0.5);
+	f = f * f * (3.0 - 2.0 * f);
+	int same_class = surface_class(own);
+	vec3 total = vec3(0.0);
+	float weight = 0.0;
+	for (int y = 0; y < 2; y++) {
+		for (int x = 0; x < 2; x++) {
+			ivec2 c = clamp(start + ivec2(x, y), ivec2(0), map_size - ivec2(1));
+			if (surface_class(c) != same_class) {
+				continue;
+			}
+			if (c.x != own.x && c.y != own.y && surface_class(ivec2(c.x, own.y)) != same_class
+				&& surface_class(ivec2(own.x, c.y)) != same_class) {
+				continue;
+			}
+			float w = (x == 1 ? f.x : 1.0 - f.x) * (y == 1 ? f.y : 1.0 - f.y);
+			total += local_lighting_cell(c, receiver, self_character) * w;
+			weight += w;
+		}
+	}
+	if (weight <= 0.001) {
+		return local_lighting_cell(own, receiver, self_character);
+	}
+	return total / weight;
 }
 
 vec3 local_lighting_halo(ivec2 own, vec2 receiver_xy) {
@@ -220,14 +252,15 @@ vec3 ambient_motes(vec2 world, vec2 local, bool indoors, float river_prox) {
 	float pulse = 0.5 + 0.5 * sin(TIME * (2.2 + fract(h * 17.1) * 2.5) + h * 60.0);
 	if (!indoors && lamp_power > 0.25 && river_prox > 0.15) {
 		vec3 fly_col = mix(vec3(0.88, 0.94, 0.45), vec3(0.45, 0.96, 0.76), fract(h * 7.3));
-		return fly_col * spark * pulse * lamp_power * river_prox * 0.40;
+		return fly_col * spark * pulse * lamp_power * river_prox * 0.36;
 	}
 	if (!indoors && sun_energy > 0.15 && mist_time > 0.2) {
-		return sun_color * spark * pulse * sun_energy * mist_time * 0.13;
+		return sun_color * spark * pulse * sun_energy * mist_time * 0.12;
 	}
 	return vec3(0.0);
 }
 
+#include "res://scripts/weather_surface.gdshaderinc"
 #include "res://scripts/river_surface.gdshaderinc"
 #include "res://scripts/indoor_beam.gdshaderinc"
 #include "res://scripts/diffuse_receiver.gdshaderinc"
@@ -280,7 +313,7 @@ vec3 integrate_air(vec3 surface, vec2 local, vec2 world, vec2 light_uv, ivec2 ce
 		air_ambient = vec3(0.025, 0.033, 0.048) + sky_at(cell, 0.58) * 0.60 + reflected * 0.34;
 	}
 	float phase = mix(1.62, 0.76, smoothstep(0.13, 0.91, sun_ray.z));
-	vec3 lamp = local_lighting(cell, vec3(local, AIR_HEIGHTS.y), false);
+	vec3 lamp = local_lighting_cell(cell, vec3(local, AIR_HEIGHTS.y), false);
 	vec3 fog_light = air_ambient + lamp * 0.62;
 	vec3 radiant = vec3(0.0);
 	float through = 1.0;
@@ -304,16 +337,12 @@ vec3 roll_off_highlights(vec3 light) {
 
 ivec2 sprite_owner(vec4 mask) {
 	ivec3 packed_cell = ivec3(round(mask.rgb * 255.0));
-	ivec2 offset = packed_cell.xy + 256 * ivec2(packed_cell.z & 3, (packed_cell.z >> 4) & 3);
-	return ivec2(map_offset) + offset - ivec2(2);
+	ivec2 offset = packed_cell.xy + 256 * ivec2(packed_cell.z & 7, (packed_cell.z >> 4) & 7);
+	return ivec2(floor(map_offset)) + offset - ivec2(2);
 }
 
 bool is_character_mask(vec4 mask) {
 	return mask.a > 0.5 && (int(round(mask.b * 255.0)) & 128) != 0;
-}
-
-bool is_roof_mask(vec4 mask) {
-	return mask.a > 0.5 && (int(round(mask.b * 255.0)) & 64) != 0 && (int(round(mask.b * 255.0)) & 128) == 0;
 }
 
 float interior_shadow_gain(vec3 exposure) {
@@ -338,50 +367,6 @@ float contact_shade(vec2 local, ivec2 own, vec4 own_tile) {
 	return min(0.23, shade * 0.16);
 }
 
-vec3 apply_rain_puddles(vec3 lit, vec3 base, vec2 world, float direct, vec3 lamp) {
-	if (wetness <= 0.01) {
-		return lit;
-	}
-	float p1 = noise2(world * vec2(0.18, 0.22) + vec2(noise_seed * 0.37, 11.4));
-	float p2 = noise2(world * vec2(0.51, 0.45) - vec2(7.1, noise_seed * 0.19));
-	float field = p1 * 0.66 + p2 * 0.34;
-	float threshold = 0.70 - wetness * 0.14;
-	float puddle = smoothstep(threshold, threshold + 0.11, field) * smoothstep(0.08, 0.40, wetness);
-	// Wet ground darkens naturally and picks up subtle directional sheen from sky & lamps.
-	vec3 wet_surface = lit * (1.0 - 0.18 * wetness);
-	float day = clamp(sky_energy * 1.45 + sun_energy * 0.20, 0.0, 1.0);
-	vec3 sky_refl = mix(vec3(0.07, 0.11, 0.18), sky_color * (0.64 + 0.14 * day), day);
-	float ripple = rain_level > 0.03 ? rain_ripples(world, TIME) * rain_level : 0.0;
-	wet_surface += (sky_refl * 0.055 + lamp * 0.10) * wetness;
-	if (puddle > 0.005) {
-		float rim = smoothstep(0.0, 0.25, puddle) * (1.0 - smoothstep(0.25, 0.65, puddle));
-		vec3 water_bed = wet_surface * (0.72 - 0.12 * rim);
-		vec3 reflection = sky_refl * (0.76 + 0.18 * noise2(world * 0.75 + vec2(0.0, TIME * 0.10)));
-		reflection += sun_color * direct * sun_energy * 0.28;
-		reflection += lamp * (0.72 + 0.28 * ripple);
-		reflection += (sky_refl * 0.7 + lamp * 0.45 + vec3(0.16)) * ripple * 0.22;
-		float refl_weight = clamp(0.32 + 0.28 * puddle + 0.08 * ripple, 0.0, 0.60);
-		wet_surface = mix(water_bed, reflection, refl_weight * puddle);
-	}
-	return wet_surface;
-}
-
-vec3 apply_snow_blanket(vec3 lit, vec3 base, vec3 exposure, vec2 world, float strength) {
-	if (strength <= 0.01) {
-		return lit;
-	}
-	float drift = noise2(world * vec2(0.32, 0.35) + vec2(noise_seed * 0.19, 4.3));
-	float fine = noise2(world * vec2(1.45, 1.45) - vec2(2.1, noise_seed * 0.11));
-	float base_luma = dot(base, vec3(0.299, 0.587, 0.114));
-	// Preserve subtle stone-joint and foliage crevice texture under thin/medium snow.
-	float crevice = smoothstep(0.06, 0.34, base_luma);
-	float coverage = clamp(strength * (0.78 + 0.32 * drift) * mix(0.68, 1.0, crevice), 0.0, 0.94);
-	float sparkle = pow(fine, 5.0) * (0.14 * sun_energy + 0.08 * sky_energy);
-	vec3 snow_albedo = mix(vec3(0.80, 0.87, 0.94), vec3(0.95, 0.97, 1.0), 0.45 + 0.35 * drift);
-	vec3 snow_lit = snow_albedo * (exposure + vec3(0.05, 0.07, 0.10) * (0.35 + sky_energy)) + vec3(sparkle);
-	return mix(lit, snow_lit, coverage);
-}
-
 void fragment() {
 	vec2 viewport_pos = UV * view_span;
 	vec2 world = view_world + viewport_pos;
@@ -391,36 +376,13 @@ void fragment() {
 	ivec2 owner = sprite_owner(mask);
 	bool sprite = mask.a > 0.5 && all(greaterThanEqual(owner, ivec2(0))) && all(lessThan(owner, map_size));
 	bool character = sprite && is_character_mask(mask);
-	bool roof = sprite && is_roof_mask(mask);
 	if (sprite) {
 		own = owner;
 	}
 	vec4 ambient = texelFetch(ambient_map, own, 0);
 	vec3 base = texture(scene, SCREEN_UV).rgb;
-	if (ambient.a < 0.5 && !roof) {
+	if (ambient.a < 0.5) {
 		COLOR = vec4(base, 1.0);
-	} else if (roof) {
-		// Outdoor sunlit/moonlit/snowy pitched roof rendering.
-		vec2 receiver = local;
-		vec3 lamp = local_lighting(own, vec3(receiver, 2.55), true) * 0.45;
-		float slope_hint = mix(0.88, 1.06, smoothstep(0.18, 0.36, dot(base, vec3(0.299, 0.587, 0.114))));
-		vec3 roof_exposure = outdoor_ambient * slope_hint
-			+ sun_color * sun_energy * (0.86 * slope_hint)
-			+ vec3(0.64, 0.79, 1.0) * moon_energy * 0.55 + lamp;
-		vec3 lit = base * roof_exposure * mix(vec3(1.0), season_tint, 0.60);
-		if (wetness > 0.01) {
-			float day = clamp(sky_energy * 1.4 + sun_energy * 0.2, 0.0, 1.0);
-			vec3 sheen = mix(vec3(0.08, 0.12, 0.18), sky_color * 0.58, day);
-			lit = lit * (1.0 - 0.16 * wetness) + sheen * (0.14 * wetness * slope_hint);
-		}
-		if (snow_cover > 0.01) {
-			lit = apply_snow_blanket(lit, base, roof_exposure, world, snow_cover * 0.86);
-		}
-		vec2 light_uv = (receiver - map_offset + vec2(light_margin)) / light_span;
-		lit = integrate_air(lit, receiver, world, light_uv, own, 2.35, false, vec3(0.0));
-		vec2 centered = (UV - vec2(0.5)) * 2.0;
-		float vignette = 1.0 - 0.11 * smoothstep(0.55, 1.42, dot(centered, centered));
-		COLOR = vec4(roll_off_highlights(lit) * vignette, 1.0);
 	} else {
 		vec4 tile = texelFetch(geometry, own, 0);
 		int material = int(round(tile.g * 255.0));
@@ -428,9 +390,9 @@ void fragment() {
 		bool wall = !character && material >= 1 && material <= 4;
 		bool window = sprite && !character && (material == 2 || material == 3);
 		vec2 receiver = sprite ? vec2(own) + clamp(local - vec2(own), vec2(0.13), vec2(0.87)) : local;
-		vec2 light_uv = (receiver - map_offset + vec2(light_margin)) / light_span;
+		vec2 light_uv = (receiver - far_offset) / light_span;
 		vec3 skylight = ambient_at(receiver, own);
-		vec3 solar = texture(solar_map, light_uv).rgb;
+		vec3 solar = sample_cascaded_solar(receiver);
 		float height = character ? 1.15 : max(0.14, tile.r * 3.0);
 		float cap = 1.0 - smoothstep(0.13, 0.50, local.y - float(own.y));
 		float z_surface = character ? mix(0.45, 1.05, cap) : sprite ? mix(height * 0.55, height, cap) : 0.04;
@@ -448,19 +410,31 @@ void fragment() {
 		float contact = sprite ? 0.0 : 1.0 - smoothstep(0.18, 1.0, length((world - player_feet) / vec2(0.37, 0.20)));
 		float ao = sprite ? 0.0 : contact_shade(local, own, tile);
 		vec3 bounce = vec3(0.0);
-		if (sun_energy > 0.0001 && indoors && (character || material != 1)) {
-			bounce = sample_room_bounce(receiver, own);
+		if (sun_energy > 0.0001) {
+			if (indoors && (character || material != 1)) {
+				bounce = sample_room_bounce(receiver, own);
+			} else if (!indoors) {
+				// Outdoor colored environmental bounce (foliage green, river aqua, warm plaster ochre)
+				// shines most noticeably into shaded corners, wall bases, and under-eaves!
+				float shade_boost = mix(1.0, 0.45, clamp(direct, 0.0, 1.0));
+				bounce = sample_outdoor_bounce(receiver, own) * (0.58 * shade_boost);
+			}
 		}
 		if (sprite && wall) {
 			ivec2 face = own + ivec2(0, 1);
-			if (material == 1 && face.y < map_size.y && surface_class(face) == 1) {
-				skylight += sky_at(face, 1.12) * (0.55 - 0.30 * cap);
-				if (sun_energy > 0.0001) {
-					bounce = sample_room_bounce(vec2(receiver.x, float(face.y) + 0.08), face) * (0.83 - 0.25 * cap);
+			if (material == 1 && face.y < map_size.y) {
+				if (surface_class(face) == 1) {
+					skylight += sky_at(face, 1.12) * (0.55 - 0.30 * cap);
+					if (sun_energy > 0.0001) {
+						bounce = sample_room_bounce(vec2(receiver.x, float(face.y) + 0.08), face) * (0.85 - 0.25 * cap);
+					}
+				} else if (sun_energy > 0.0001 && surface_class(face) == 0) {
+					// Exterior south wall base picks up colored bounce from adjacent sunlit grass, stone, or river!
+					bounce = sample_outdoor_bounce(vec2(receiver.x, float(face.y) + 0.12), face) * (0.72 - 0.30 * cap);
 				}
 			}
 		}
-		vec3 reflected = sun_color * bounce * sun_energy * (0.83 - ao);
+		vec3 reflected = sun_color * bounce * sun_energy * (0.86 - ao);
 		vec3 lamp = local_lighting(own, vec3(receiver, z_surface), character);
 		vec3 exposure = skylight * (1.0 - 0.27 * contact - ao)
 			+ sun_color * direct * sun_energy + reflected + lamp;
@@ -475,6 +449,7 @@ void fragment() {
 				float moon = moon_energy > 0.0001 ? solar.r * (1.0 - 0.94 * body_shadow(world, 0.045, moon_ray)) : 0.0;
 				lit = shade_river(lit, world, local, river_sample.g, direct, moon, lamp);
 			} else {
+				float smooth_hold = ground_hold_at(local, world);
 				float shore_dist = 8.0 * (river_sample.b - 0.5);
 				float wet_bank = (1.0 - smoothstep(-0.95, 0.02, shore_dist)) * smoothstep(-1.4, -0.05, shore_dist);
 				if (wet_bank > 0.001) {
@@ -482,13 +457,13 @@ void fragment() {
 					lit += sky_color * (0.03 + 0.04 * direct * sun_energy) * wet_bank;
 				}
 				if (snow_cover > 0.01) {
-					lit = apply_snow_blanket(lit, base, exposure, world, snow_cover);
+					lit = apply_snow_blanket(lit, base, exposure, world, snow_cover, smooth_hold);
 				} else if (wetness > 0.01) {
-					lit = apply_rain_puddles(lit, base, world, direct, lamp);
+					lit = apply_rain_puddles(lit, base, world, SCREEN_UV, direct, lamp, smooth_hold);
 				}
 			}
 		} else if (sprite && !indoors && !character && snow_cover > 0.01) {
-			lit = apply_snow_blanket(lit, base, exposure, world, snow_cover * cap * 0.52);
+			lit = apply_snow_blanket(lit, base, exposure, world, snow_cover * cap * 0.45, 0.0);
 		}
 		if (indoors && !wall) {
 			lit *= interior_shadow_gain(exposure);
@@ -499,7 +474,7 @@ void fragment() {
 		lit += local_lighting_halo(own, receiver);
 		lit += ambient_motes(world, local, indoors, river_sample.r);
 		vec2 centered = (UV - vec2(0.5)) * 2.0;
-		float vignette = 1.0 - 0.11 * smoothstep(0.55, 1.42, dot(centered, centered));
+		float vignette = 1.0 - 0.10 * smoothstep(0.55, 1.42, dot(centered, centered));
 		COLOR = vec4(roll_off_highlights(lit) * vignette, 1.0);
 	}
 }

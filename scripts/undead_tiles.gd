@@ -194,7 +194,8 @@ static func draw(board: Control, id: String, p: Vector2i, roll := 0, mask := -1,
 		tint := Color.WHITE, offset := Vector2.ZERO, flip := false, season := "") -> void:
 	if board.has_method("surface_id"):
 		tint = board.call("surface_id", p)
-	draw_at(board, id, Vector2((p - board.view_origin) * board.cell), float(board.cell), roll, mask,
+	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
+	draw_at(board, id, Vector2((p - board.view_origin) * board.cell) + cam_offset, float(board.cell), roll, mask,
 		orientation, tint, offset, flip, season)
 
 

@@ -1,7 +1,7 @@
 extends Control
 
-# Lightweight animated rain & snowfall screen-space layer rendered above the lit board,
-# automatically masked out over revealed building interiors.
+# Crisp pixel-art harmonized rain & snow precipitation layer,
+# automatically masked out over buildings whose roofs have faded open.
 var rain := 0.0
 var snow := 0.0
 var daylight := 1.0
@@ -13,6 +13,7 @@ var revealed_interior: Dictionary = {}
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 
 
 func configure(rain_strength: float, snow_strength: float, day_level: float,
@@ -58,54 +59,64 @@ func _draw() -> void:
 
 
 func _draw_rain() -> void:
-	var count := int(lerpf(65.0, 210.0, rain))
-	var bright := lerpf(0.55, 0.92, daylight)
-	var base_col := Color(0.76 * bright, 0.86 * bright, 0.94 * bright, 0.14 + 0.15 * rain)
-	var slant := Vector2(-5.5 - 3.5 * rain, 22.0 + 14.0 * rain)
-	var speed := 460.0 + 220.0 * rain
+	# Razor-thin 1px tapered Jiangnan drizzle/rain streaks (no thick blurry bars).
+	var count := int(lerpf(90.0, 260.0, rain))
+	var bright := lerpf(0.58, 0.94, daylight)
+	var slant := Vector2(-4.0 - 3.0 * rain, 24.0 + 18.0 * rain)
+	var speed := 620.0 + 300.0 * rain
 	for i in range(count):
 		var rx := _hash(i, 17)
 		var ry := _hash(i, 53)
-		var layer := 0.65 + 0.60 * _hash(i, 91)
-		var y := fposmod(ry * size.y + elapsed * speed * layer, size.y + 40.0) - 20.0
-		var x := fposmod(rx * size.x - elapsed * speed * 0.24 * layer, size.x + 40.0) - 20.0
-		var p := Vector2(x, y)
-		var seg := slant * layer
+		var depth := 0.55 + 0.65 * _hash(i, 91)
+		var y := fposmod(ry * size.y + elapsed * speed * depth, size.y + 48.0) - 24.0
+		var x := fposmod(rx * size.x - elapsed * speed * 0.17 * depth, size.x + 48.0) - 24.0
+		var p := Vector2(floorf(x), floorf(y))
+		var seg := slant * depth
 		if _inside_revealed(p + seg * 0.5):
 			continue
-		var col := base_col
-		col.a *= 0.60 + 0.40 * layer
-		draw_line(p, p + seg, col, 1.0 if layer < 1.0 else 1.3, true)
-	var splashes := int(lerpf(10.0, 32.0, rain))
-	var splash_col := Color(0.84 * bright, 0.92 * bright, 0.98 * bright, 0.22 * rain)
+		var a := (0.09 + 0.13 * rain) * (0.45 + 0.55 * depth)
+		var mid := p + seg * 0.55
+		# Faint tail -> crisp fine lead tip
+		draw_line(p, mid, Color(0.76 * bright, 0.85 * bright, 0.93 * bright, a * 0.45), 1.0, false)
+		draw_line(mid, p + seg, Color(0.86 * bright, 0.92 * bright, 0.98 * bright, a), 1.0, false)
+	# Tiny pixel-scale ground impact splash ticks
+	var splashes := int(lerpf(18.0, 56.0, rain))
 	for i in range(splashes):
-		var phase := fposmod(elapsed * 2.6 + _hash(i, 211), 1.0)
-		var cycle := int(floor(elapsed * 2.6 + _hash(i, 211)))
-		var sx := _hash(i + cycle * 97, 307) * size.x
-		var sy := _hash(i + cycle * 59, 419) * size.y
+		var phase := fposmod(elapsed * 3.4 + _hash(i, 211), 1.0)
+		var cycle := int(floor(elapsed * 3.4 + _hash(i, 211)))
+		var sx := floorf(_hash(i + cycle * 97, 307) * size.x)
+		var sy := floorf(_hash(i + cycle * 59, 419) * size.y)
 		if _inside_revealed(Vector2(sx, sy)):
 			continue
-		var rad := 1.4 + phase * 4.2
-		var c := splash_col
-		c.a *= (1.0 - phase)
-		draw_set_transform(Vector2(sx, sy), 0.0, Vector2(1.0, 0.45))
-		draw_arc(Vector2.ZERO, rad, 0.0, TAU, 12, c, 1.0, true)
-	draw_set_transform(Vector2.ZERO)
+		var a := (1.0 - phase) * (0.16 + 0.16 * rain)
+		var col := Color(0.86 * bright, 0.93 * bright, 0.99 * bright, a)
+		var spread := floorf(1.0 + phase * 2.6)
+		draw_rect(Rect2(sx - spread, sy, 1.0, 1.0), col)
+		draw_rect(Rect2(sx + spread, sy, 1.0, 1.0), col)
+		if phase < 0.45:
+			draw_rect(Rect2(sx, sy - 1.0, 1.0, 1.0), col)
 
 
 func _draw_snow() -> void:
-	var count := int(lerpf(55.0, 175.0, snow))
+	# Pixel-snapped 1x1 / 2x2 crisp drifting snow flecks harmonized with 32x32 tiles.
+	var count := int(lerpf(80.0, 230.0, snow))
 	var bright := lerpf(0.68, 1.0, daylight)
 	for i in range(count):
 		var rx := _hash(i, 701)
 		var ry := _hash(i, 811)
-		var depth := 0.45 + 0.85 * _hash(i, 919)
-		var fall := (42.0 + 38.0 * snow) * depth
-		var sway := sin(elapsed * (1.1 + depth * 0.9) + rx * TAU * 4.0) * (10.0 + 8.0 * depth)
-		var y := fposmod(ry * size.y + elapsed * fall, size.y + 24.0) - 12.0
-		var x := fposmod(rx * size.x - elapsed * (18.0 + 16.0 * snow) * depth + sway, size.x + 24.0) - 12.0
-		if _inside_revealed(Vector2(x, y)):
+		var depth := 0.40 + 0.80 * _hash(i, 919)
+		var fall := (34.0 + 32.0 * snow) * depth
+		var sway := sin(elapsed * (0.9 + depth * 0.8) + rx * TAU * 4.0) * (8.0 + 7.0 * depth)
+		var y := fposmod(ry * size.y + elapsed * fall, size.y + 20.0) - 10.0
+		var x := fposmod(rx * size.x - elapsed * (14.0 + 14.0 * snow) * depth + sway, size.x + 20.0) - 10.0
+		var px := floorf(x)
+		var py := floorf(y)
+		if _inside_revealed(Vector2(px, py)):
 			continue
-		var radius := (1.1 + 1.5 * depth) * (0.85 + 0.25 * snow)
-		var col := Color(0.92 * bright, 0.96 * bright, 1.0 * bright, (0.35 + 0.42 * depth) * (0.65 + 0.35 * snow))
-		draw_circle(Vector2(x, y), radius, col)
+		var sz := 2.0 if depth > 0.90 else 1.0
+		var a := (0.28 + 0.46 * depth) * (0.62 + 0.38 * snow)
+		var col := Color(0.93 * bright, 0.96 * bright, 1.0 * bright, a)
+		draw_rect(Rect2(px, py, sz, sz), col)
+		if depth > 1.08:
+			draw_rect(Rect2(px - 1.0, py, 1.0, 1.0), Color(col.r, col.g, col.b, a * 0.35))
+			draw_rect(Rect2(px + sz, py, 1.0, 1.0), Color(col.r, col.g, col.b, a * 0.35))
