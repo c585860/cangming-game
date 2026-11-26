@@ -21,7 +21,7 @@ bool entry(const Dictionary &obj, const char *name, int64_t low, int64_t high) {
 
 bool CanglingWorld::save_game(const String &path) const {
     Dictionary data;
-    data["version"] = 6;
+    data["version"] = 8;
     data["generator"] = city.layout;
     data["seed"] = static_cast<int64_t>(seed);
     data["pos"] = Array::make(pos.x, pos.y);
@@ -30,6 +30,9 @@ bool CanglingWorld::save_game(const String &path) const {
     data["quest"] = quest;
     data["herbs"] = herbs;
     data["coins"] = coins;
+    data["jobs_done"] = jobs_done;
+    data["player_name"] = player_name;
+    data["skills"] = skill_set.save_dict();
     Array picked;
     for (std::size_t i = 0; i < collected.size(); ++i) if (collected[i]) picked.push_back(static_cast<int>(i));
     data["collected"] = picked;
@@ -57,7 +60,7 @@ bool CanglingWorld::load_game(const String &path) {
     const Variant parsed = JSON::parse_string(FileAccess::get_file_as_string(path));
     if (parsed.get_type() != Variant::DICTIONARY) return false;
     const Dictionary data = parsed;
-    if (!entry(data, "version", 1, 6) || !entry(data, "quest", 0, 4) || !entry(data, "minutes", 0, 1000000000) ||
+    if (!entry(data, "version", 1, 8) || !entry(data, "quest", 0, 4) || !entry(data, "minutes", 0, 1000000000) ||
         !entry(data, "herbs", 0, 4) || !entry(data, "coins", 0, 1000000000) || data.get("collected", Variant()).get_type() != Variant::ARRAY) return false;
     const int version = data["version"];
     const Array picked = data["collected"];
@@ -88,8 +91,8 @@ bool CanglingWorld::load_game(const String &path) {
         City restored;
         restored.reset(next_seed, next_layout);
         for (int i = 0; i < saved_doors.size(); ++i) {
-            if (saved_doors[i].get_type() != Variant::INT) return false;
-            const int64_t k = saved_doors[i];
+            if (saved_doors[i].get_type() != Variant::INT && saved_doors[i].get_type() != Variant::FLOAT) return false;
+            const int64_t k = static_cast<int64_t>(saved_doors[i]);
             next_doors.insert(k);
         }
         if (version >= 6 && data.get("tile_overrides", Variant()).get_type() == Variant::ARRAY) {
@@ -133,10 +136,21 @@ bool CanglingWorld::load_game(const String &path) {
     minutes = data["minutes"];
     herbs = data["herbs"];
     coins = data["coins"];
+    jobs_done = entry(data, "jobs_done", 0, 1000000000) ? static_cast<int>(data["jobs_done"]) : 0;
+    npc_talk_count.fill(0);
     char_state.reset_defaults();
     if (version >= 6 && data.get("character", Variant()).get_type() == Variant::DICTIONARY) {
         char_state.load_dict(data["character"]);
     }
+    skill_set.reset_defaults();
+    if (version >= 7 && data.get("skills", Variant()).get_type() == Variant::DICTIONARY) {
+        skill_set.load_dict(data["skills"]);
+    }
+    char_state.sync_with_skills(skill_set);
+    if (version >= 7 && data.get("player_name", Variant()).get_type() == Variant::STRING) {
+        set_player_name(data["player_name"]);
+    }
+    remote_players.clear();
     return true;
 }
 }

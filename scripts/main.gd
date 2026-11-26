@@ -18,11 +18,23 @@ const Keymap = preload("res://scripts/ccb_keymap.gd")
 const CanglingCalendar = preload("res://scripts/cangling_calendar.gd")
 const Weather = preload("res://scripts/weather.gd")
 const MoveInput = preload("res://scripts/move_input.gd")
+const NetSession = preload("res://scripts/net_session.gd")
+const SkillUI = preload("res://scripts/skill_ui.gd")
 const NONE := Vector2i(-1, -1)
+const REALTIME_MIN_PER_SEC := 1.0 / 1.5 # Real-time clock: 1 game minute every 1.5 real seconds (~36 min/day)
 
 var world := World.new()
 var weather := Weather.new()
 var move_input := MoveInput.new()
+var net_session := NetSession.new()
+var skill_tab := "wuxue"
+var selected_skill_id := ""
+var work_active := false
+var work_target := NONE
+var work_elapsed := 0.0
+var work_duration := 2.5
+var work_label := ""
+var realtime_clock_accum := 0.0
 var board: Board
 var sidebar: CCBSidebar
 var pending_dir_action := ""
@@ -67,7 +79,7 @@ func _ready() -> void:
 	theme.default_font = ui_font
 	theme.default_font_size = 14
 	_build_ui()
-	_note("晨雾贴着河面。你从南门外抵达沧菱城。(按 Enter 打开动作菜单，按 ? 查看 CCB 键位)")
+	_note("烟雨画桥，青瓦红灯。你踏入沧灵南门（随身潜能 30 点、铜钱 10 文）。先向城中师傅请教入门技艺，再到工坊实体工位按 e 劳作赚潜能与铜钱，按 J 看技能面板，按 M 查全城师傅方位。")
 	_refresh()
 
 
@@ -121,6 +133,33 @@ func _build_ui() -> void:
 
 
 func _process(delta: float) -> void:
+	# Real-time clock progression (independent of player actions; only pauses in system/debug/help menus)
+	if opened not in ["pause", "new", "help", "debug"] and (wait_timer == null or wait_timer.time_left <= 0.0):
+		realtime_clock_accum += delta * REALTIME_MIN_PER_SEC
+		if realtime_clock_accum >= 1.0:
+			var whole_mins := int(realtime_clock_accum)
+			realtime_clock_accum -= float(whole_mins)
+			world.advance_time(whole_mins)
+			_refresh()
+	# Multiplayer hook tick (0 overhead when offline; syncs local snapshot when host/client)
+	net_session.tick(delta, world, board.motion.facing_x if board != null else 1,
+		str(board.motion.posture) if board != null and board.motion.is_resting() else "")
+	# Active 2.5s Real-Time Workstation Progress Bar (NO lock; Esc or movement interrupts cleanly!)
+	if work_active:
+		if not opened.is_empty():
+			_cancel_workstation(false)
+		else:
+			work_elapsed += delta
+			board.work_progress = clampf(work_elapsed / maxf(0.1, work_duration), 0.0, 1.0)
+			board.work_label = work_label
+			board.markers.queue_redraw()
+			if work_elapsed >= work_duration:
+				var target := work_target
+				_cancel_workstation(false)
+				var res: Dictionary = net_session.dispatch_action(world, {"type": "workstation", "target": target})
+				_note(str(res.get("message", "")))
+				_refresh()
+		return
 	if not opened.is_empty() or (action_menu != null and action_menu.visible):
 		return
 	var step := move_input.tick(delta)
@@ -139,6 +178,8 @@ func _clock_str() -> String:
 
 
 func _apply_directional_step(direction: Vector2i) -> void:
+	if work_active:
+		_cancel_workstation(true)
 	_stop()
 	if not pending_dir_action.is_empty():
 		var target: Vector2i = world.pos + direction
@@ -351,7 +392,7 @@ func _new_game(field: LineEdit, error_label: Label) -> void:
 	_stop()
 	_close_overlay()
 	sidebar.clear_messages()
-	_note("晨雾贴着河面。你从南门外抵达沧菱城。(种子 %d)" % world.seed)
+	_note("烟雨画桥，青瓦红灯。你再次踏入沧灵南门。(种子 %d)" % world.seed)
 	_refresh()
 
 
@@ -493,7 +534,7 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		overlay.offset_top = 10
 		overlay.offset_bottom = -10
 	elif kind in ["debug", "action_menu", "eat", "wear", "take_off", "pickup", "character", "inventory",
-			"wield", "apply", "read", "list_nearby", "messages", "help"]:
+			"wield", "apply", "read", "list_nearby", "messages", "help", "skills", "learn_npc", "multiplayer"]:
 		overlay.anchor_left = 0.14
 		overlay.anchor_right = 0.86
 		overlay.anchor_top = 0.07
@@ -519,12 +560,12 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 	contents.add_child(heading)
 
 	var titles := {
-		"map": "全城大地图 [m]",
+		"map": "沧灵城全图 [m]",
 		"inventory": "随身行囊 [i]",
 		"character": "人物属性与着装 [@]",
 		"pause": "系统菜单 [Esc]",
 		"wait": "静候等待 [|]",
-		"new": "新建城市种子",
+		"new": "重置沧灵城",
 		"debug": "调试菜单 [K]",
 		"action_menu": "动作菜单 [Enter]",
 		"eat": "进食 / 饮水 [E]",
@@ -537,7 +578,10 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		"list_nearby": "周边物品与设施 [V]",
 		"move_mode": "移动姿态 [\"]",
 		"messages": "历史消息日志 [P]",
-		"missions": "当前委托 [M]",
+		"missions": "沧灵城见闻与帮工 [M]",
+		"skills": "江湖技能面板 · 武学 / 武道 / 练气 / 仙道 [J]",
+		"learn_npc": "向师傅请教技艺 (消耗潜能)",
+		"multiplayer": "多人联机接口 (Multiplayer) [O]",
 		"help": "CCB 键位帮助 [? / 0]",
 	}
 	var title := _label(heading, titles.get(kind, kind), 16, CCB.C_YELLOW)
@@ -575,6 +619,12 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 			CCBUI.messages_menu(self, contents)
 		"missions":
 			CCBUI.missions_menu(self, contents)
+		"skills":
+			SkillUI.skill_panel(self, contents)
+		"learn_npc":
+			SkillUI.learn_panel(self, contents, item_target)
+		"multiplayer":
+			SkillUI.multiplayer_panel(self, contents)
 		"help":
 			CCBUI.help_menu(self, contents)
 		"inventory":
@@ -584,6 +634,8 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		"pause":
 			var entries := [
 				["继续游戏", func(): _close_overlay(), true],
+				["江湖技能面板 [J]", func(): _show_overlay("skills"), false],
+				["多人联机接口 [O]", func(): _show_overlay("multiplayer"), false],
 				["键位帮助 [?]", func(): _show_overlay("help"), false],
 				["静候等待 [|]", func(): _show_overlay("wait"), false],
 				["调试菜单 [K]", func(): _show_overlay("debug"), false],
@@ -752,8 +804,51 @@ func _build_atlas(contents: VBoxContainer) -> void:
 	atlas.build(world, atlas_cells)
 
 
+func _cancel_workstation(notify := true) -> void:
+	if not work_active:
+		return
+	work_active = false
+	work_target = NONE
+	work_elapsed = 0.0
+	work_label = ""
+	if board != null:
+		board.work_progress = 0.0
+		board.work_label = ""
+		board.markers.queue_redraw()
+	_set_prompt("")
+	if notify:
+		_note("已中断当前工位劳作。")
+
+
+func _start_workstation(position: Vector2i) -> void:
+	_cancel_workstation(false)
+	var chk: Dictionary = world.can_work_at_station(position)
+	if not bool(chk.get("ok", false)):
+		_note(str(chk.get("reason", "无法在此工位劳作。")))
+		return
+	var ws: Dictionary = chk.get("station", {})
+	work_active = true
+	work_target = position
+	work_elapsed = 0.0
+	work_duration = float(ws.get("duration_sec", 2.5))
+	work_label = str(ws.get("name", "工位劳作"))
+	if board != null:
+		if position.x < world.pos.x:
+			board.motion.facing_x = -1
+		elif position.x > world.pos.x:
+			board.motion.facing_x = 1
+		board.work_progress = 0.02
+		board.work_label = work_label
+		board.markers.queue_redraw()
+	_set_prompt("正在「%s」劳作中 (%.1f 秒，按 Esc 可随时中断)..." % [work_label, work_duration])
+
+
 func _perform_action(position: Vector2i, action: String) -> void:
 	match action:
+		"learn_menu":
+			_show_overlay("learn_npc", position)
+		"workstation":
+			_start_workstation(position)
 		"store":
 			if world.actions_at(position).has(action):
 				_show_overlay("inventory", position)
@@ -812,10 +907,11 @@ func _candidates_for_dir_action(act: String) -> Array[Vector2i]:
 				"examine":
 					if t in ["c", "C", "F", "K", "r", "b", "q", "S", "t", "l", "k", "h", "u", "a", "D", "o", "w", "O", "%", "f"] \
 							or not world.items_at(p).is_empty() \
-							or world.site_at(p) in [&"merchant", &"ferryman", &"altar", &"herb"]:
+							or not world.workstation_at(p).is_empty() \
+							or world.site_at(p) in Board.NPC_SITES:
 						found.append(p)
 				"chat":
-					if world.site_at(p) in [&"merchant", &"ferryman"]:
+					if world.site_at(p) in Board.NPC_SITES:
 						found.append(p)
 				"drop_dir", "peek":
 					found.append(p)
@@ -894,20 +990,17 @@ func _execute_directional_action(act: String, target: Vector2i) -> void:
 			_set_prompt("窥视: %s (%d,%d) — 按任意方向键或 Esc 缩回" % [world.location(look_at), look_at.x, look_at.y])
 		"chat":
 			var s: StringName = world.site_at(target)
-			if s == &"merchant" or s == &"ferryman":
+			if s in Board.NPC_SITES:
 				_note(world.interact(target, "talk"))
 			else:
 				_note("那个方向没有人可以交谈。")
 		"examine":
 			var s: StringName = world.site_at(target)
-			if s == &"merchant" or s == &"ferryman":
-				_note(world.interact(target, "talk"))
+			if s in Board.NPC_SITES:
+				_open_actions(target)
 				return
-			if s == &"herb":
-				_perform_action(target, "gather")
-				return
-			if s == &"altar":
-				_perform_action(target, "cultivate")
+			if not world.workstation_at(target).is_empty():
+				_start_workstation(target)
 				return
 			var t: String = world.terrain_at(target)
 			# CCB examine: fences / open & broken windows climb directly; containers open & show loot;
@@ -945,7 +1038,7 @@ func _run_ccb_action(act_id: String) -> void:
 			_set_prompt("环视: %s (%d,%d) — 按 Esc 结束" % [world.location(look_at), look_at.x, look_at.y] if look_at != NONE else "")
 			_refresh()
 		"map", "inventory", "eat", "wear", "take_off", "pickup", "character", "wait", "debug", \
-				"wield", "apply", "read", "list_nearby", "move_mode", "messages", "missions", "help":
+				"wield", "apply", "read", "list_nearby", "move_mode", "messages", "missions", "skills", "multiplayer", "help":
 			_show_overlay(act_id)
 		"drop":
 			_show_overlay("inventory", world.pos)
@@ -1024,7 +1117,8 @@ func _input(event: InputEvent) -> void:
 
 
 func _period_tick() -> void:
-	world.advance_time(1)
+	# Real-time clock mode: idling recovers a breath of stamina without altering game time
+	world.rest_minutes(1, false)
 	_refresh()
 
 
@@ -1042,6 +1136,10 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	var key: Key = event.physical_keycode
 
 	if key == KEY_ESCAPE and not event.echo:
+		if work_active:
+			_cancel_workstation(true)
+			get_viewport().set_input_as_handled()
+			return
 		if not pending_dir_action.is_empty():
 			pending_dir_action = ""
 			_set_prompt("")
@@ -1071,7 +1169,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		if atlas != null and atlas.keyboard(key):
 			get_viewport().set_input_as_handled()
 			return
-		if opened != "new" and not event.echo and not (event.ctrl_pressed or event.alt_pressed or event.meta_pressed):
+		if opened not in ["new", "multiplayer"] and not event.echo and not (event.ctrl_pressed or event.alt_pressed or event.meta_pressed):
 			var ch := Keymap.event_char(event)
 			if not ch.is_empty() and overlay_hotkeys.has(ch):
 				var cb: Callable = overlay_hotkeys[ch]

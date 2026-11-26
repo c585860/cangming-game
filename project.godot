@@ -1,8 +1,8 @@
 config_version=5
 
 [application]
-config/name="沧菱城"
-config/description="沧溟修真界的独立回合制原型"
+config/name="沧灵城 · 武侠江湖"
+config/description="江南水乡沧灵城 — 经典武侠新手村独立原型"
 config/use_custom_user_dir=true
 config/custom_user_dir_name="CanglingCity"
 run/main_scene="res://main.tscn"

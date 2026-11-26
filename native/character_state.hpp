@@ -1,6 +1,7 @@
 #pragma once
 
 #include "item_catalog.hpp"
+#include "skills.hpp"
 #include <array>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -35,15 +36,31 @@ struct CharacterState {
     int stat_int = 8;
     int stat_per = 8;
 
-    // CCB 6 body part hit points (0..84)
+    // CCB 6 body part hit points (dynamic max driven by 基本内功/拳脚/招架!)
+    static constexpr int kBaseMaxPartHp = 84;
     static constexpr int kMaxPartHp = 84;
+    int max_part_hp = kBaseMaxPartHp;
+    int neili = 0;
+    int max_neili = 0;
     std::array<int, 6> part_hp{84, 84, 84, 84, 84, 84}; // head, torso, l_arm, r_arm, l_leg, r_leg
+
+    // Cached martial modifiers synced from SkillSet
+    int cached_force_lv = 0;
+    int cached_dodge_lv = 0;
+    int cached_unarmed_lv = 0;
+    int cached_medicine_lv = 0;
+    int cached_cooking_lv = 0;
+    int cached_weapon_lv = 0;
 
     std::vector<int> worn;
 
     void reset_defaults();
+    void sync_with_skills(const SkillSet &skills);
     void advance_minutes(int delta_minutes, bool resting = false, bool sleeping = false);
     void spend_stamina(int amount);
+    bool is_well_fed() const { return kcal >= 1800.0 && hydration >= 50.0; }
+    bool is_starving_for_training() const { return kcal < 700.0 || hydration < 20.0; }
+    bool is_severely_injured() const { return part_hp[0] * 100 < max_part_hp * 45 || part_hp[1] * 100 < max_part_hp * 45; }
 
     int current_speed() const;
     int bash_power() const;

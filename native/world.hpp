@@ -3,6 +3,9 @@
 #include "character_state.hpp"
 #include "city.hpp"
 #include "item_catalog.hpp"
+#include "multiplayer.hpp"
+#include "skills.hpp"
+#include "workstations.hpp"
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
@@ -22,9 +25,11 @@ class CanglingWorld : public godot::RefCounted {
     int minutes = 440;
     int quest = 0;
     int herbs = 0;
-    int coins = 0;
+    int coins = 10;
+    int jobs_done = 0;
     double last_bake_ms = 0.0;
     std::array<bool, 4> collected{};
+    std::array<int, kNpcCount> npc_talk_count{};
     std::unordered_set<int64_t> doors;
     std::unordered_map<int64_t, char> tile_overrides;
     std::unordered_set<int64_t> open_containers;
@@ -38,6 +43,12 @@ class CanglingWorld : public godot::RefCounted {
     std::unordered_map<int64_t, int> vessel_water;
     int carried_water = 500;
     CharacterState char_state;
+    SkillSet skill_set;
+
+    // Multiplayer hook state (offline default: local_peer_id=1, remote_players empty)
+    int64_t local_peer_id = 1;
+    godot::String player_name = godot::String::utf8("江湖少侠");
+    std::unordered_map<int64_t, RemotePlayerState> remote_players;
 
     String generated_prop(Vector2i p);
     int generated_item(Vector2i p);
@@ -78,6 +89,8 @@ public:
     int get_quest() const { return quest; }
     int get_herbs() const { return herbs; }
     int get_coins() const { return coins; }
+    int get_jobs_done() const { return jobs_done; }
+    godot::Array npc_list() const;
     Vector2i get_city_size() const { return {city_size, city_size}; }
     int get_sector_size() const { return sector_size; }
     String get_quest_text() const;
@@ -149,6 +162,41 @@ public:
     String change_floor(int direction);
     bool save_game(const String &path) const;
     bool load_game(const String &path);
+
+    // Classic Wuxia MUD 4-Realm Skill System (20基础技艺, 开局无显示, <180请教/慢练, >=180研究)
+    godot::Array skill_realms() const;
+    godot::Array skill_list(const String &realm_filter = String("wuxue")) const;
+    Dictionary skill_summary() const;
+    int skill_level(const String &skill_id) const;
+    int get_potential() const { return skill_set.potential; }
+    int get_potential_cap() const { return skill_set.potential_cap(); }
+    int get_combat_exp() const { return skill_set.combat_exp; }
+    String practice_skill(const String &skill_id);
+    String research_skill(const String &skill_id);
+    String set_skill_jifa(const String &skill_id, const String &special_art_id);
+
+    // Master NPC Teaching (learn) & 28 Multiplayer Physical Workstations (no lock, 2.5s bar)
+    godot::Array npc_teach_list(Vector2i npc_pos) const;
+    String learn_from_npc(Vector2i npc_pos, const String &skill_id);
+    Dictionary workstation_at(Vector2i p) const;
+    godot::Array list_workstations() const;
+    godot::Array workstations_in_rect(Rect2i area) const;
+    Dictionary can_work_at_station(Vector2i p) const;
+    String complete_workstation(Vector2i p);
+
+    // Multiplayer-Ready Sync, Remote Peer & Deterministic Action Interfaces
+    int64_t get_local_peer_id() const { return local_peer_id; }
+    void set_local_peer_id(int64_t id) { local_peer_id = id > 0 ? id : 1; }
+    String get_player_name() const { return player_name; }
+    void set_player_name(const String &name);
+    Dictionary export_player_snapshot() const;
+    bool apply_remote_snapshot(int64_t peer_id, const Dictionary &snapshot);
+    void remove_remote_player(int64_t peer_id);
+    void clear_remote_players();
+    int remote_player_count() const { return static_cast<int>(remote_players.size()); }
+    godot::Array list_remote_players() const;
+    godot::Array remote_players_in_rect(Rect2i area) const;
+    Dictionary submit_player_action(const Dictionary &action);
 
     // Multi-core CPU render baking & automatic memory management APIs
     Dictionary bake_region_data(Rect2i area, int z, int layers, const String &season);

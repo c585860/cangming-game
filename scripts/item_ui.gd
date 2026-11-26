@@ -17,9 +17,9 @@ static func inventory(game: Control, contents: VBoxContainer, target: Vector2i) 
 	var scol := VBoxContainer.new()
 	scol.add_theme_constant_override("separation", 2)
 	summary.add_child(scol)
-	game._label(scol, "手持:%s (破拆:%d)  |  铜钱:%d文  |  清露草:%d株  |  水壶:%d/%d ml" % [
+	game._label(scol, "手持:%s (破拆:%d)  |  铜钱:%d文  |  帮工:%d次  |  水壶:%d/%d ml" % [
 		str(st.get("wielded_name", "空手")), int(st.get("bash_power", 12)),
-		int(game.world.coins), int(game.world.herbs),
+		int(game.world.coins), int(game.world.get_jobs_done()),
 		int(game.world.bottle_water()), int(game.world.bottle_capacity())], 12, CCB.C_YELLOW)
 	game._label(scol, "容积:%d/%d ml  |  总重:%.2f kg  |  饱食:%s  |  水分:%s  |  保暖:%d  |  累赘:%d" % [
 		int(st.get("carry_volume_ml", 0)), int(st.get("max_carry_volume_ml", 2500)),

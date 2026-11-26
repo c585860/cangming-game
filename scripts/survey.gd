@@ -137,10 +137,8 @@ func _draw_local() -> void:
 				continue
 			var tint := Color(COLORS.get(world.terrain_at(p), "446141"))
 			var site := world.site_at(p)
-			if site == &"altar":
-				tint = Color("6ae8c2")
-			elif site in [&"merchant", &"ferryman", &"herb"]:
-				tint = Color("e8bf68")
+			if site in [&"innkeeper", &"blacksmith", &"herbalist", &"martial_master", &"pawnbroker", &"boatman", &"storyteller"]:
+				tint = Color("f0c665")
 			draw_rect(Rect2(corner + Vector2(x, y) * block, Vector2.ONE * block), tint)
 	# Crisp jade-gold player marker at center
 	var pcenter := corner + Vector2(12.5, 7.5) * block

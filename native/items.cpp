@@ -215,7 +215,6 @@ String CanglingWorld::take_item(Vector2i p, int i) {
         }
     }
     ++carried[i];
-    advance_time(1);
     return String::utf8("你拿起了") + item_name(i) + String::utf8("。");
 }
 
@@ -253,7 +252,6 @@ String CanglingWorld::place_item(Vector2i p, int i) {
     if (count >= max_stack) return String::utf8("这里已经堆不下了。");
     ++count;
     --carried[i];
-    advance_time(1);
     return String::utf8("你放下了") + item_name(i) + String::utf8("。");
 }
 
@@ -277,7 +275,6 @@ String CanglingWorld::transfer_water(Vector2i p, int amount, bool fill_bottle) {
     const int delta = fill_bottle ? moved : -moved;
     carried_water += delta;
     vessel_water[key(p, floor)] = original - delta;
-    advance_time(1);
     return (fill_bottle ? String::utf8("你装入水壶 ") : String::utf8("你倒回容器 ")) +
            String::num_int64(moved) + String::utf8(" 毫升水。");
 }

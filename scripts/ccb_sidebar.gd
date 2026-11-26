@@ -145,7 +145,7 @@ func build(world: RefCounted) -> void:
 	var row3 := HBoxContainer.new()
 	row3.add_theme_constant_override("separation", 6)
 	root.add_child(row3)
-	_loc_lbl = _mk_lbl(row3, "沧菱城", 13, CCB.C_LTCYAN)
+	_loc_lbl = _mk_lbl(row3, "沧灵城", 13, CCB.C_LTCYAN)
 	_loc_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_z_lbl = _mk_lbl(row3, "Z:0 (地面)", 12, CCB.C_LTGRAY)
 
@@ -172,7 +172,7 @@ func build(world: RefCounted) -> void:
 	root.add_child(row4b)
 	_light_lbl = _mk_lbl(row4b, "光线: 明亮", 12, CCB.C_LTGRAY)
 	_light_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_quest_lbl = _mk_lbl(row4b, "铜钱 0 | 药草 0/3", 12, CCB.C_BROWN)
+	_quest_lbl = _mk_lbl(row4b, "铜钱 10文 | 帮工 0次", 12, CCB.C_BROWN)
 
 	root.add_child(CCB.divider())
 
@@ -216,7 +216,7 @@ func build(world: RefCounted) -> void:
 	root.add_child(CCB.divider())
 
 	# --- ROW 8: Compact CCB Key Strip ---
-	var key_bar := _mk_lbl(root, "Enter动作 o开 c关 s砸 e查/翻 g拾 G拖 \\运 w持 a用 E吃 W穿 T脱 R读 V周 ?键", 10, CCB.C_DKGRAY, true)
+	var key_bar := _mk_lbl(root, "Enter动作 J技能 O联机 m全图 o开 c关 e查 g拾 i囊 E吃 W穿 ?键", 10, CCB.C_DKGRAY, true)
 	key_bar.clip_text = false
 
 
@@ -242,7 +242,7 @@ func add_message(text: String, clock_text: String) -> void:
 	var col := CCB.C_WHITE
 	if "砸" in text or "碎" in text or "受阻" in text or "不足" in text or "无法" in text or "没有" in text or "已空" in text:
 		col = CCB.C_YELLOW if ("没有" in text or "受阻" in text or "无法" in text or "不足" in text or "已空" in text) else CCB.C_LTRED
-	elif "拿起" in text or "拾取" in text or "穿上" in text or "吃" in text or "饮" in text or "喝" in text or "包扎" in text or "点亮" in text or "研读" in text:
+	elif "拿起" in text or "拾取" in text or "穿上" in text or "吃" in text or "饮" in text or "喝" in text or "包扎" in text or "点亮" in text or "研读" in text or "工钱" in text or "铜钱" in text:
 		col = CCB.C_LTGREEN
 	elif "翻越" in text or "翻过" in text or "跃过" in text or "打开" in text or "推开" in text or "拖拽" in text or "拖运" in text:
 		col = CCB.C_LTCYAN
@@ -371,7 +371,10 @@ func refresh(world: RefCounted, weather: RefCounted, board: Control) -> void:
 	var lname_lit: String = str(st.get("light_name", ""))
 	var light_desc := "%s照明" % lname_lit if bool(st.get("lamp_lit", false)) and not lname_lit.is_empty() else ("室内微光" if indoors else ("日光充足" if float(sky.get("daylight", 1.0)) > 0.45 else "夜色朦胧"))
 	_light_lbl.text = "照明: %s" % light_desc
-	_quest_lbl.text = "铜钱 %d文 | 药草 %d/3" % [int(world.coins), int(world.herbs)]
+	var pot: int = int(world.get_potential())
+	var nl: int = int(st.get("neili", 0))
+	var nl_max: int = int(st.get("max_neili", 0))
+	_quest_lbl.text = "铜钱 %d文 | 潜能 %d%s" % [int(world.coins), pot, (" | 内力 %d/%d" % [nl, nl_max]) if nl_max > 0 else ""]
 
 	# Row 5: Wielded & Carry
 	var wield_txt: String = str(st.get("wielded_name", "空手"))
@@ -404,7 +407,7 @@ func refresh(world: RefCounted, weather: RefCounted, board: Control) -> void:
 				_compass_cells[slot].add_theme_color_override("font_color", CCB.C_DKGRAY)
 			else:
 				_compass_cells[slot].text = "%s:%s(%d)" % [dname, lbl_txt, dist]
-				var ccol := CCB.C_YELLOW if ("沈青" in lbl_txt or "渡夫" in lbl_txt or "药草" in lbl_txt or "石台" in lbl_txt) else CCB.C_LTGRAY
+				var ccol := CCB.C_YELLOW if ("冼老板" in lbl_txt or "王铁匠" in lbl_txt or "平大夫" in lbl_txt or "陈馆主" in lbl_txt or "周教头" in lbl_txt or "顾夫子" in lbl_txt or "唐掌柜" in lbl_txt or "老船夫" in lbl_txt or "说书先生" in lbl_txt) else CCB.C_LTGRAY
 				_compass_cells[slot].add_theme_color_override("font_color", ccol)
 
 	minimap.queue_redraw()
