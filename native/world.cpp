@@ -68,11 +68,40 @@ void CanglingWorld::_bind_methods() {
     BIND(set_skill_jifa, "skill_id", "special_art_id");
     BIND(npc_teach_list, "npc_pos");
     BIND(learn_from_npc, "npc_pos", "skill_id");
+    BIND(special_art_list);
+    BIND(npc_special_teach_list, "npc_pos");
+    BIND(learn_special_from_npc, "npc_pos", "art_id");
     BIND(workstation_at, "pos");
     BIND(list_workstations);
     BIND(workstations_in_rect, "area");
     BIND(can_work_at_station, "pos");
     BIND(complete_workstation, "pos");
+    BIND(shop_info_at, "npc_pos");
+    BIND(buy_item_from, "npc_pos", "item_id");
+    BIND(sell_item_to, "npc_pos", "item_id");
+    BIND(bank_deposit, "npc_pos", "amount");
+    BIND(bank_withdraw, "npc_pos", "amount");
+    BIND(rent_inn_room_at, "npc_pos");
+    BIND(dazuo_cycle);
+    BIND(exert_action, "kind");
+    BIND(study_book_cycle, "item_id");
+    BIND(craft_env_dict);
+    BIND(craft_recipe_list, "category_filter");
+    BIND(can_craft_recipe, "recipe_id");
+    BIND(complete_craft_recipe, "recipe_id");
+    BIND(dismantle_item, "item_id");
+    BIND(sync_environment, "ambient_c", "rain_intensity");
+    BIND(start_spar, "npc_pos");
+    BIND(step_spar_round);
+    BIND(stop_spar);
+    BIND(spar_status);
+    BIND(bounty_list);
+    BIND(active_bounty);
+    BIND(accept_bounty, "index");
+    BIND(abandon_bounty);
+    BIND(turn_in_bounty, "npc_pos");
+    BIND(notice_board_pos);
+    BIND(player_score_dict);
     BIND(get_local_peer_id);
     BIND(set_local_peer_id, "id");
     BIND(get_player_name);
@@ -105,7 +134,9 @@ void CanglingWorld::advance_time(int amount) {
 
 void CanglingWorld::rest_minutes(int amount, bool sleeping) {
     if (amount > 0) {
-        char_state.advance_minutes(amount, !sleeping, sleeping);
+        const bool inn_bonus = (floor == 1 && pos.x >= 108 && pos.x <= 117 && pos.y >= 104 && pos.y <= 113 &&
+                                char_state.inn_room_until_min > minutes);
+        char_state.advance_minutes(amount, !sleeping, sleeping, inn_bonus);
     }
 }
 
@@ -126,6 +157,8 @@ void CanglingWorld::setup(int64_t new_seed) {
     clear_items();
     char_state.reset_defaults();
     skill_set.reset_defaults();
+    spar_session.reset();
+    bounty_tracker.reset();
     char_state.sync_with_skills(skill_set);
     remote_players.clear();
     // Starting traveler provisions: flatbread, tea, portable Tung-oil lamp, tinderbox, bandages & water bottle
@@ -214,6 +247,10 @@ bool CanglingWorld::move_one(Vector2i next) {
     if (char_state.hauling) {
         haul_items_from(prev, pos);
     }
+    if (spar_session.active && !near(spar_session.npc_pos)) {
+        spar_session.reset();
+    }
+    bounty_tracker.update_proximity(pos, char_state.spar_total);
     return true;
 }
 
@@ -237,13 +274,7 @@ String CanglingWorld::apply_wielded() {
 }
 
 String CanglingWorld::read_book(int item) {
-    if (item < 0 || item >= item_types || (carried[item] <= 0 && char_state.wielded != item)) {
-        return String::utf8("你身上没有携带这本书籍。");
-    }
-    int mins = 0;
-    const String msg = char_state.read_book(item, mins);
-    if (mins > 0) rest_minutes(mins, false);
-    return msg;
+    return study_book_cycle(item);
 }
 
 String CanglingWorld::set_move_mode(int mode) {
@@ -350,6 +381,9 @@ Dictionary CanglingWorld::active_sites_in_rect(Rect2i area) const {
         if (area.has_point(npc.pos)) {
             out[npc.pos] = StringName(npc.id);
         }
+    }
+    if (area.has_point(kNoticeBoardTile)) {
+        out[kNoticeBoardTile] = StringName("notice_board");
     }
     return out;
 }
@@ -751,11 +785,367 @@ String CanglingWorld::set_skill_jifa(const String &skill_id, const String &speci
         return String::utf8("「") + String::utf8(def.name) + String::utf8("」属杂学根基，无需激发特殊武功。");
     }
     const std::string art = special_art_id.utf8().get_data();
-    skill_set.set_jifa(idx, art);
+    if (!skill_set.set_jifa(idx, art)) {
+        return String::utf8("无法激发该特殊武功（尚未习得或与「") + String::utf8(def.name) + String::utf8("」槽位不匹配）。");
+    }
+    char_state.sync_with_skills(skill_set);
     if (art.empty()) {
         return String::utf8("已取消「") + String::utf8(def.name) + String::utf8("」的激发武功。");
     }
-    return String::utf8("已将「") + special_art_id + String::utf8("」激发至「") + String::utf8(def.name) + String::utf8("」。");
+    const int sp_idx = find_special_art_index(art);
+    const String art_name = sp_idx >= 0 ? String::utf8(special_art_catalog()[static_cast<std::size_t>(sp_idx)].name) : special_art_id;
+    return String::utf8("已将「") + art_name + String::utf8("」激发至「") + String::utf8(def.name) +
+           String::utf8("」（当前有效等级 ") + String::num_int64(skill_set.effective_level_of(sid)) + String::utf8(" 级）！");
+}
+
+Array CanglingWorld::special_art_list() const {
+    return skill_set.special_arts_to_array();
+}
+
+Array CanglingWorld::npc_special_teach_list(Vector2i npc_pos) const {
+    Array out;
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc) return out;
+    const std::string nid = npc->id;
+    const auto &sp_cat = special_art_catalog();
+    const auto &b_cat = base_skill_catalog();
+    for (std::size_t i = 0; i < kSpecialArtCount; ++i) {
+        const auto &def = sp_cat[i];
+        if (nid != def.mentor_npc_id) continue;
+        const int bidx = find_base_skill_index(def.base_skill_id);
+        const int base_lv = bidx >= 0 ? skill_set.base[static_cast<std::size_t>(bidx)].level : 0;
+        const auto &st = skill_set.special[i];
+        const int pot_cost = skill_set.special_learn_pot_cost(static_cast<int>(i));
+        const int coin_cost = skill_set.special_learn_coin_cost(static_cast<int>(i));
+        bool can = true;
+        String reason;
+        if (base_lv < def.req_base_level) {
+            can = false;
+            reason = String::utf8("需「") + String::utf8(bidx >= 0 ? b_cat[static_cast<std::size_t>(bidx)].name : def.base_skill_id) +
+                     String::utf8("」≥ ") + String::num_int64(def.req_base_level) + String::utf8("级");
+        } else if (st.level >= def.max_teach_level) {
+            can = false;
+            reason = String::utf8("已达此师所授上限");
+        } else if (st.level >= base_lv) {
+            can = false;
+            reason = String::utf8("特殊武功不可超过基础等级");
+        } else if (skill_set.potential < pot_cost) {
+            can = false;
+            reason = String::utf8("潜能不足");
+        } else if (coins < coin_cost) {
+            can = false;
+            reason = String::utf8("铜钱不足");
+        } else if (char_state.is_starving_for_training()) {
+            can = false;
+            reason = String::utf8("腹饥口渴，先吃喝");
+        }
+        Dictionary row;
+        row["id"] = String::utf8(def.id);
+        row["name"] = String::utf8(def.name);
+        row["base_skill_id"] = String::utf8(def.base_skill_id);
+        row["base_skill_name"] = bidx >= 0 ? String::utf8(b_cat[static_cast<std::size_t>(bidx)].name) : String();
+        row["req_base_level"] = def.req_base_level;
+        row["current_level"] = st.level;
+        row["max_teach_level"] = def.max_teach_level;
+        row["pot_cost"] = pot_cost;
+        row["coin_cost"] = coin_cost;
+        row["desc"] = String::utf8(def.desc);
+        row["can_learn"] = can;
+        row["reason"] = reason;
+        out.append(row);
+    }
+    return out;
+}
+
+String CanglingWorld::learn_special_from_npc(Vector2i npc_pos, const String &art_id) {
+    if (!near(npc_pos)) return String::utf8("请走近师傅身旁再行请教。");
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc) return String::utf8("那里没有可请教的师傅。");
+    const std::string aid = art_id.utf8().get_data();
+    const int idx = find_special_art_index(aid);
+    if (idx < 0) return String::utf8("未知的特殊武功代号。");
+    const auto &def = special_art_catalog()[static_cast<std::size_t>(idx)];
+    if (std::string_view(npc->id) != def.mentor_npc_id) {
+        return String::utf8(npc->name) + String::utf8("并不传授「") + String::utf8(def.name) + String::utf8("」。");
+    }
+    const int bidx = find_base_skill_index(def.base_skill_id);
+    const int base_lv = bidx >= 0 ? skill_set.base[static_cast<std::size_t>(bidx)].level : 0;
+    auto &st = skill_set.special[static_cast<std::size_t>(idx)];
+    if (base_lv < def.req_base_level) {
+        return String::utf8("根基尚浅！请先将对应基础武学练至 ") + String::num_int64(def.req_base_level) + String::utf8(" 级再来请教「") + String::utf8(def.name) + String::utf8("」。");
+    }
+    if (st.level >= def.max_teach_level) {
+        return String::utf8("你在「") + String::utf8(def.name) + String::utf8("」上已达此师所授上限。");
+    }
+    if (st.level >= base_lv) {
+        return String::utf8("你的基础武学等级不足以支撑更高一层的「") + String::utf8(def.name) + String::utf8("」，请先提升基础武学！");
+    }
+    const int pot_cost = skill_set.special_learn_pot_cost(idx);
+    const int coin_cost = skill_set.special_learn_coin_cost(idx);
+    if (skill_set.potential < pot_cost) return String::utf8("潜能不足（需 ") + String::num_int64(pot_cost) + String::utf8(" 点）。");
+    if (coins < coin_cost) return String::utf8("铜钱不足（需 ") + String::num_int64(coin_cost) + String::utf8(" 文）。");
+    if (char_state.is_starving_for_training()) return String::utf8("你此刻饥肠辘辘，先吃饱喝足再来请教吧。");
+
+    const bool was_unlearned = (st.level == 0);
+    skill_set.spend_potential(pot_cost);
+    coins -= coin_cost;
+    char_state.spend_stamina(320);
+    char_state.kcal = std::max(0.0, char_state.kcal - 20.0);
+    bool leveled = false;
+    if (was_unlearned) {
+        st.level = 1;
+        st.exp = 0;
+        leveled = true;
+        // Auto-jifa on first unlock if slot is empty!
+        if (bidx >= 0 && skill_set.base[static_cast<std::size_t>(bidx)].enabled_art.empty()) {
+            skill_set.set_jifa(bidx, aid);
+        }
+    } else {
+        const int gain = skill_set.learn_exp_gain(char_state.stat_int);
+        skill_set.add_special_exp(idx, gain, leveled);
+    }
+    skill_set.add_combat_exp(6);
+    char_state.sync_with_skills(skill_set);
+
+    if (was_unlearned) {
+        return String::utf8(npc->name) + String::utf8("倾心传授，你正式领悟入门绝学「") + String::utf8(def.name) +
+               String::utf8("」（1级），并已自动激发至基础槽位！可在 [J] 技能面板随时调整激发。");
+    }
+    if (leveled) {
+        return String::utf8("你向") + String::utf8(npc->name) + String::utf8("请教「") + String::utf8(def.name) +
+               String::utf8("」，精进至 ") + String::num_int64(st.level) + String::utf8(" 级！");
+    }
+    return String::utf8("你请教「") + String::utf8(def.name) + String::utf8("」，熟练度进展至 ") +
+           String::num_int64(st.exp) + String("/") + String::num_int64(skill_exp_to_next(st.level)) + String::utf8("。");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Shops, Bank, Pawn, Inn, Dazuo, Exert, Specialized Study
+// ---------------------------------------------------------------------------
+Dictionary CanglingWorld::shop_info_at(Vector2i npc_pos) const {
+    Dictionary d;
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc) return d;
+    const ShopService svc = shop_service_for_npc(npc->id);
+    d["service"] = static_cast<int>(svc);
+    d["npc_id"] = String::utf8(npc->id);
+    d["npc_name"] = String::utf8(npc->name);
+    d["title"] = String::utf8(npc->title);
+    d["items"] = shop_catalog_for_npc(npc->id, skill_set);
+    d["coins"] = coins;
+    d["bank_coins"] = char_state.bank_coins;
+    d["inn_active"] = (char_state.inn_room_until_min > minutes);
+    return d;
+}
+
+String CanglingWorld::buy_item_from(Vector2i npc_pos, int item_id) {
+    if (!near(npc_pos)) return String::utf8("请走近掌柜身旁再行交易。");
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc) return String::utf8("那里没有掌柜。");
+    return buy_from_npc(npc->id, item_id, coins, carried, char_state);
+}
+
+String CanglingWorld::sell_item_to(Vector2i npc_pos, int item_id) {
+    if (!near(npc_pos)) return String::utf8("请走近掌柜身旁再行典当。");
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc) return String::utf8("那里没有掌柜。");
+    return sell_to_npc(npc->id, item_id, coins, carried, skill_set);
+}
+
+String CanglingWorld::bank_deposit(Vector2i npc_pos, int amount) {
+    if (!near(npc_pos)) return String::utf8("请走近通济钱庄掌柜身旁办理存银。");
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc || shop_service_for_npc(npc->id) != ShopService::Bank) return String::utf8("此处并非钱庄。");
+    return bank_transfer(amount, true, coins, char_state);
+}
+
+String CanglingWorld::bank_withdraw(Vector2i npc_pos, int amount) {
+    if (!near(npc_pos)) return String::utf8("请走近通济钱庄掌柜身旁办理取银。");
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc || shop_service_for_npc(npc->id) != ShopService::Bank) return String::utf8("此处并非钱庄。");
+    return bank_transfer(amount, false, coins, char_state);
+}
+
+String CanglingWorld::rent_inn_room_at(Vector2i npc_pos) {
+    if (!near(npc_pos)) return String::utf8("请走近客栈店小二身旁开房。");
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc || shop_service_for_npc(npc->id) != ShopService::Inn) return String::utf8("此处并非客栈。");
+    return rent_inn_room(coins, minutes, char_state);
+}
+
+Dictionary CanglingWorld::dazuo_cycle() {
+    const bool quiet = is_pos_indoors(pos, floor) || near_martial_training_station(pos);
+    return char_state.dazuo_cycle(skill_set, quiet);
+}
+
+String CanglingWorld::exert_action(const String &kind) {
+    return char_state.exert_action(kind.utf8().get_data());
+}
+
+String CanglingWorld::study_book_cycle(int item_id) {
+    const bool academy = (pos.x >= 126 && pos.x <= 135 && pos.y >= 84 && pos.y <= 94) || is_pos_indoors(pos, floor);
+    return char_state.study_book_cycle(item_id, carried, skill_set, academy);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: CCB Crafting (&), Dismantle (B), Ambient Temp/Wetness & Sparring
+// ---------------------------------------------------------------------------
+bool CanglingWorld::is_pos_indoors(Vector2i p, int z) {
+    if (!in_city(p)) return false;
+    return city.lighting_column(p, z, 1) > 0 || (effective_tile(p, z) == 'i');
+}
+
+bool CanglingWorld::is_pos_near_hearth(Vector2i p, int z) {
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            const Vector2i q = p + Vector2i(dx, dy);
+            if (in_city(q) && effective_tile(q, z) == 'h') return true;
+        }
+    }
+    return false;
+}
+
+CraftEnv CanglingWorld::current_craft_env() const {
+    CraftEnv env;
+    auto *self = const_cast<CanglingWorld *>(this);
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            const Vector2i q = pos + Vector2i(dx, dy);
+            if (!in_city(q)) continue;
+            const char t = self->effective_tile(q, floor);
+            if (t == 'h') env.near_hearth = true;
+            if (t == 'u' || t == 'a' || t == '~' || t == 'W') env.near_water = true;
+            if (floor == 0 && workstation_at_tile(q) != nullptr) env.near_workshop = true;
+        }
+    }
+    // 王记铁匠铺锻造区 (108..117, 152..161)
+    if (floor == 0 && pos.x >= 108 && pos.x <= 118 && pos.y >= 151 && pos.y <= 162) {
+        env.near_anvil = true;
+        env.near_hearth = true;
+        env.near_workshop = true;
+    }
+    return env;
+}
+
+Dictionary CanglingWorld::craft_env_dict() {
+    const CraftEnv env = current_craft_env();
+    Dictionary d;
+    d["near_hearth"] = env.near_hearth;
+    d["near_anvil"] = env.near_anvil;
+    d["near_water"] = env.near_water;
+    d["near_workshop"] = env.near_workshop;
+    return d;
+}
+
+Array CanglingWorld::craft_recipe_list(const String &category_filter) {
+    return list_recipes_for_player(carried, carried_water, char_state.wielded, skill_set, current_craft_env(), category_filter);
+}
+
+Dictionary CanglingWorld::can_craft_recipe(const String &recipe_id) {
+    const int idx = find_recipe_index(recipe_id.utf8().get_data());
+    if (idx < 0) {
+        Dictionary d;
+        d["ok"] = false;
+        d["reason"] = String::utf8("未找到该制作配方。");
+        return d;
+    }
+    return check_can_craft(recipe_catalog()[static_cast<std::size_t>(idx)], carried, carried_water,
+                           char_state.wielded, skill_set, current_craft_env());
+}
+
+String CanglingWorld::complete_craft_recipe(const String &recipe_id) {
+    const int idx = find_recipe_index(recipe_id.utf8().get_data());
+    if (idx < 0) return String::utf8("未找到该制作配方。");
+    return execute_craft(recipe_catalog()[static_cast<std::size_t>(idx)], carried, carried_water,
+                         char_state.wielded, char_state, skill_set, current_craft_env());
+}
+
+String CanglingWorld::dismantle_item(int item_id) {
+    return dismantle_item_to_rags(item_id, carried, char_state);
+}
+
+void CanglingWorld::sync_environment(double ambient_c, double rain_intensity) {
+    char_state.update_environment(ambient_c, rain_intensity, is_pos_indoors(pos, floor), is_pos_near_hearth(pos, floor));
+}
+
+Dictionary CanglingWorld::start_spar(Vector2i npc_pos) {
+    if (!near(npc_pos)) {
+        Dictionary d;
+        d["ok"] = false;
+        d["message"] = String::utf8("请走近演武对手身旁再抱拳切磋。");
+        return d;
+    }
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc) {
+        Dictionary d;
+        d["ok"] = false;
+        d["message"] = String::utf8("那里没有可切磋的对手。");
+        return d;
+    }
+    return begin_spar_session(spar_session, npc->id, npc_pos, char_state, skill_set);
+}
+
+Dictionary CanglingWorld::step_spar_round() {
+    Dictionary res = advance_spar_round(spar_session, char_state, skill_set);
+    bounty_tracker.update_proximity(pos, char_state.spar_total);
+    return res;
+}
+
+String CanglingWorld::stop_spar() {
+    return finish_spar_early(spar_session);
+}
+
+Dictionary CanglingWorld::spar_status() const {
+    return spar_session.to_dict();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Central Square Bounties & Jianghu Score
+// ---------------------------------------------------------------------------
+Array CanglingWorld::bounty_list() const {
+    return bounty_tracker.list_to_array(carried, char_state.spar_total);
+}
+
+Dictionary CanglingWorld::active_bounty() const {
+    return bounty_tracker.active_dict(carried, char_state.spar_total);
+}
+
+String CanglingWorld::accept_bounty(int index) {
+    return bounty_tracker.accept(index, char_state.spar_total);
+}
+
+String CanglingWorld::abandon_bounty() {
+    return bounty_tracker.abandon();
+}
+
+String CanglingWorld::turn_in_bounty(Vector2i npc_pos) {
+    if (!near(npc_pos)) return String::utf8("请走近目标人物身旁再交付委托。");
+    const NpcDef *npc = npc_at_tile(npc_pos);
+    if (!npc) return String::utf8("那里没有可交付委托的人物。");
+    const String msg = bounty_tracker.try_turn_in(npc->id, carried, coins, char_state, skill_set);
+    return msg.is_empty() ? String::utf8("当前没有需向此人交付的江湖委托。") : msg;
+}
+
+Dictionary CanglingWorld::player_score_dict() const {
+    Dictionary d;
+    const int total_lv = skill_set.total_levels();
+    d["name"] = player_name;
+    d["title"] = String::utf8(jianghu_title(total_lv, skill_set.combat_exp, char_state.reputation));
+    d["reputation"] = char_state.reputation;
+    d["coins"] = coins;
+    d["bank_coins"] = char_state.bank_coins;
+    d["spar_wins"] = char_state.spar_wins;
+    d["spar_total"] = char_state.spar_total;
+    d["completed_bounties"] = bounty_tracker.completed_count;
+    d["jobs_done"] = jobs_done;
+    d["total_levels"] = total_lv;
+    d["learned_count"] = skill_set.learned_count();
+    d["learned_special_count"] = skill_set.learned_special_count();
+    d["combat_exp"] = skill_set.combat_exp;
+    d["potential"] = skill_set.potential;
+    d["potential_cap"] = skill_set.potential_cap();
+    d["inn_active"] = (char_state.inn_room_until_min > minutes);
+    return d;
 }
 
 // ---------------------------------------------------------------------------
@@ -884,6 +1274,27 @@ Dictionary CanglingWorld::submit_player_action(const Dictionary &action) {
         const String sid = action.get("skill_id", String());
         const String art = action.get("special_art_id", String());
         const String msg = set_skill_jifa(sid, art);
+        res["ok"] = !msg.is_empty();
+        res["message"] = msg;
+    } else if (kind == String("learn_special")) {
+        const Vector2i target = action.get("target", pos);
+        const String aid = action.get("art_id", String());
+        const String msg = learn_special_from_npc(target, aid);
+        res["ok"] = !msg.is_empty();
+        res["message"] = msg;
+    } else if (kind == String("craft")) {
+        const String rid = action.get("recipe_id", String());
+        const String msg = complete_craft_recipe(rid);
+        res["ok"] = !msg.is_empty();
+        res["message"] = msg;
+    } else if (kind == String("study_book")) {
+        const int item_id = static_cast<int>(action.get("item_id", -1));
+        const String msg = study_book_cycle(item_id);
+        res["ok"] = !msg.is_empty();
+        res["message"] = msg;
+    } else if (kind == String("exert")) {
+        const String ek = action.get("kind", String());
+        const String msg = exert_action(ek);
         res["ok"] = !msg.is_empty();
         res["message"] = msg;
     }

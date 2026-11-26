@@ -17,7 +17,7 @@ int number(const Variant &value, int low, int high) {
 int capacity(char tile) { return tile == 'a' ? 5000 : tile == 'u' ? 1600 : 0; }
 
 int64_t number64(const Variant &value) {
-    if (value.get_type() != Variant::INT) return std::numeric_limits<int64_t>::min();
+    if (value.get_type() != Variant::INT && value.get_type() != Variant::FLOAT) return std::numeric_limits<int64_t>::min();
     return static_cast<int64_t>(value);
 }
 
@@ -49,7 +49,14 @@ Dictionary make_item_dict(int i, int count) {
     row["is_tool"] = (def.category == ItemCategory::Tool);
     row["is_book"] = (def.category == ItemCategory::Book);
     row["is_medical"] = (def.category == ItemCategory::Medical);
+    row["is_weapon"] = (def.category == ItemCategory::Weapon);
     row["bash_dmg"] = def.bash_dmg;
+    row["base_price"] = def.base_price;
+    row["rain_resist"] = def.rain_resist;
+    row["weapon_skill"] = String::utf8(def.weapon_skill);
+    row["book_skill"] = String::utf8(def.book_skill);
+    row["book_min_lit"] = def.book_min_lit;
+    row["book_max_lv"] = def.book_max_lv;
     row["weight_g"] = def.weight_g;
     row["volume_ml"] = def.volume_ml;
     row["kcal"] = def.kcal;

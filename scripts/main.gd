@@ -20,6 +20,9 @@ const Weather = preload("res://scripts/weather.gd")
 const MoveInput = preload("res://scripts/move_input.gd")
 const NetSession = preload("res://scripts/net_session.gd")
 const SkillUI = preload("res://scripts/skill_ui.gd")
+const ShopUI = preload("res://scripts/shop_ui.gd")
+const CraftUI = preload("res://scripts/craft_ui.gd")
+const AudioAmbience = preload("res://scripts/audio_ambience.gd")
 const NONE := Vector2i(-1, -1)
 const REALTIME_MIN_PER_SEC := 1.0 / 1.5 # Real-time clock: 1 game minute every 1.5 real seconds (~36 min/day)
 
@@ -27,13 +30,22 @@ var world := World.new()
 var weather := Weather.new()
 var move_input := MoveInput.new()
 var net_session := NetSession.new()
+var audio_ambience: Node
 var skill_tab := "wuxue"
 var selected_skill_id := ""
+var shop_mode := "buy"
+var craft_tab := "全部"
+var selected_craft_id := ""
+var inv_cat := "全部"
 var work_active := false
+var work_kind := "workstation" # "workstation", "craft", "study", "dazuo"
 var work_target := NONE
+var work_recipe_id := ""
+var work_item_id := -1
 var work_elapsed := 0.0
 var work_duration := 2.5
 var work_label := ""
+var spar_accum := 0.0
 var realtime_clock_accum := 0.0
 var board: Board
 var sidebar: CCBSidebar
@@ -79,7 +91,9 @@ func _ready() -> void:
 	theme.default_font = ui_font
 	theme.default_font_size = 14
 	_build_ui()
-	_note("烟雨画桥，青瓦红灯。你踏入沧灵南门（随身潜能 30 点、铜钱 10 文）。先向城中师傅请教入门技艺，再到工坊实体工位按 e 劳作赚潜能与铜钱，按 J 看技能面板，按 M 查全城师傅方位。")
+	audio_ambience = AudioAmbience.new()
+	add_child(audio_ambience)
+	_note("烟雨画桥，青瓦红灯。你踏入沧灵南门（随身潜能 30 点、铜钱 10 文）。按 M 查告示牌委托与全城师傅商铺，按 J 看技能，按 U 打坐运功，按 & 手工制作！")
 	_refresh()
 
 
@@ -139,12 +153,35 @@ func _process(delta: float) -> void:
 		if realtime_clock_accum >= 1.0:
 			var whole_mins := int(realtime_clock_accum)
 			realtime_clock_accum -= float(whole_mins)
+			_sync_env_and_audio()
 			world.advance_time(whole_mins)
 			_refresh()
 	# Multiplayer hook tick (0 overhead when offline; syncs local snapshot when host/client)
 	net_session.tick(delta, world, board.motion.facing_x if board != null else 1,
 		str(board.motion.posture) if board != null and board.motion.is_resting() else "")
-	# Active 2.5s Real-Time Workstation Progress Bar (NO lock; Esc or movement interrupts cleanly!)
+	# Active Real-Time Sparring Loop (classic Wuxia MUD 1.3s/round exchanges!)
+	var sp_st: Dictionary = world.spar_status()
+	if bool(sp_st.get("active", false)):
+		if opened.is_empty() and (action_menu == null or not action_menu.visible):
+			spar_accum += delta
+			if spar_accum >= 1.30:
+				spar_accum = 0.0
+				var r: Dictionary = world.step_spar_round()
+				var msg: String = str(r.get("message", ""))
+				if not msg.is_empty():
+					_note(msg)
+				_play_sfx("clash" if ("格" in msg or "架" in msg or "闪" in msg) else "hit")
+				if bool(r.get("finished", false)):
+					_set_prompt("")
+				else:
+					var s2: Dictionary = r.get("session", {})
+					_set_prompt("切磋中：%s 气血 %d/%d（第%d合 | 按 U 调加力，Esc 或走开收招）" % [
+						str(s2.get("npc_name", "")), int(s2.get("opp_hp", 0)), int(s2.get("opp_max_hp", 100)), int(s2.get("rounds", 0))
+					])
+				_refresh()
+	else:
+		spar_accum = 0.0
+	# Active Real-Time Progress Bar (workstation / craft / study / dazuo — NO lock; Esc or move cancels!)
 	if work_active:
 		if not opened.is_empty():
 			_cancel_workstation(false)
@@ -154,11 +191,7 @@ func _process(delta: float) -> void:
 			board.work_label = work_label
 			board.markers.queue_redraw()
 			if work_elapsed >= work_duration:
-				var target := work_target
-				_cancel_workstation(false)
-				var res: Dictionary = net_session.dispatch_action(world, {"type": "workstation", "target": target})
-				_note(str(res.get("message", "")))
-				_refresh()
+				_finish_timed_task()
 		return
 	if not opened.is_empty() or (action_menu != null and action_menu.visible):
 		return
@@ -249,9 +282,45 @@ func _floor_name(z: int) -> String:
 	return "Z=%d" % z
 
 
+func _play_sfx(kind: String) -> void:
+	if audio_ambience != null and audio_ambience.has_method("play_sfx"):
+		audio_ambience.play_sfx(kind)
+
+
+func _sync_env_and_audio() -> void:
+	var sky := CanglingCalendar.at_minute(world.minutes)
+	var base_c := 16.0
+	match str(sky.get("season", "春")):
+		"春": base_c = 16.0
+		"夏": base_c = 27.0
+		"秋": base_c = 15.0
+		"冬": base_c = 2.0
+	var hr := float(sky.get("hour", 12.0))
+	var diurnal := -4.5 * cos((hr - 14.0) * PI / 12.0)
+	var weather_chill := -3.2 * float(weather.rain) - 5.5 * float(weather.snow)
+	world.sync_environment(base_c + diurnal + weather_chill, float(weather.rain))
+	if audio_ambience != null and audio_ambience.has_method("set_environment"):
+		var indoors := false
+		var p: Vector2i = world.pos
+		if board != null and board.cells.has(p):
+			indoors = (int(board.cells[p][3]) & 1) != 0
+		var near_w := 0.0
+		if world.floor == 0:
+			for dy in range(-3, 4):
+				for dx in range(-3, 4):
+					var t: String = world.terrain_at(p + Vector2i(dx, dy))
+					if t == "W" or t == "~":
+						near_w = 0.8
+						break
+				if near_w > 0.0:
+					break
+		audio_ambience.set_environment(float(weather.rain), near_w, indoors)
+
+
 func _refresh() -> void:
 	var sky := CanglingCalendar.at_minute(world.minutes)
 	weather.sync(sky, world.seed, false)
+	_sync_env_and_audio()
 	board.follow(world.pos if look_at == NONE else look_at)
 	if sidebar != null:
 		sidebar.refresh(world, weather, board)
@@ -352,6 +421,12 @@ func _move_one(next: Vector2i) -> bool:
 		elif next_tile == "w":
 			_note("前方是关闭的雕花木窗（按 o 推开，或按 s 砸碎）。")
 		return false
+	if opens_door:
+		_play_sfx("door")
+	elif weather != null and float(weather.wetness) > 0.35 and not bool(world.character_status().get("is_indoors", false)):
+		_play_sfx("step_puddle")
+	else:
+		_play_sfx("step_stone")
 	if opens_door or was_grabbing:
 		board.invalidate_lightmap()
 	elif was_hauling:
@@ -534,7 +609,8 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		overlay.offset_top = 10
 		overlay.offset_bottom = -10
 	elif kind in ["debug", "action_menu", "eat", "wear", "take_off", "pickup", "character", "inventory",
-			"wield", "apply", "read", "list_nearby", "messages", "help", "skills", "learn_npc", "multiplayer"]:
+			"wield", "apply", "read", "list_nearby", "messages", "help", "skills", "learn_npc", "multiplayer",
+			"shop", "craft", "exert", "dismantle", "missions"]:
 		overlay.anchor_left = 0.14
 		overlay.anchor_right = 0.86
 		overlay.anchor_top = 0.07
@@ -579,8 +655,12 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		"move_mode": "移动姿态 [\"]",
 		"messages": "历史消息日志 [P]",
 		"missions": "沧灵城见闻与帮工 [M]",
-		"skills": "江湖技能面板 · 武学 / 武道 / 练气 / 仙道 [J]",
+		"skills": "江湖技能面板 · 武学 / 激发 / 研究 [J]",
 		"learn_npc": "向师傅请教技艺 (消耗潜能)",
+		"shop": "市井商贸 · 钱庄 · 典当 · 客栈",
+		"craft": "CCB 手工制作 · 烹饪 / 制药 / 锻造 / 抄录 [&]",
+		"exert": "内功盘膝打坐与运功法门 [U]",
+		"dismantle": "拆解衣物 / 床品得碎布条 [B]",
 		"multiplayer": "多人联机接口 (Multiplayer) [O]",
 		"help": "CCB 键位帮助 [? / 0]",
 	}
@@ -623,6 +703,14 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 			SkillUI.skill_panel(self, contents)
 		"learn_npc":
 			SkillUI.learn_panel(self, contents, item_target)
+		"shop":
+			ShopUI.open_panel(self, contents, item_target)
+		"craft":
+			CraftUI.open_panel(self, contents)
+		"exert":
+			SkillUI.exert_panel(self, contents)
+		"dismantle":
+			CCBUI.dismantle_menu(self, contents)
 		"multiplayer":
 			SkillUI.multiplayer_panel(self, contents)
 		"help":
@@ -807,17 +895,60 @@ func _build_atlas(contents: VBoxContainer) -> void:
 func _cancel_workstation(notify := true) -> void:
 	if not work_active:
 		return
+	var was_kind := work_kind
 	work_active = false
+	work_kind = "workstation"
 	work_target = NONE
+	work_recipe_id = ""
+	work_item_id = -1
 	work_elapsed = 0.0
 	work_label = ""
 	if board != null:
 		board.work_progress = 0.0
 		board.work_label = ""
+		if was_kind == "dazuo" and board.motion.is_resting():
+			board.exit_posture()
 		board.markers.queue_redraw()
 	_set_prompt("")
 	if notify:
-		_note("已中断当前工位劳作。")
+		if was_kind == "dazuo":
+			_note("你缓缓吐出一口浊气，收功起身。")
+		elif was_kind == "study":
+			_note("你合上书卷，暂且停读。")
+		elif was_kind == "craft":
+			_note("已中断当前制作。")
+		else:
+			_note("已中断当前工位劳作。")
+
+
+func _finish_timed_task() -> void:
+	var kind := work_kind
+	if kind == "dazuo":
+		work_elapsed = 0.0
+		var r: Dictionary = world.dazuo_cycle()
+		_note(str(r.get("message", "")))
+		_play_sfx("meditate")
+		if not bool(r.get("continue", false)):
+			_cancel_workstation(false)
+		_refresh()
+		return
+	var target := work_target
+	var rid := work_recipe_id
+	var iid := work_item_id
+	_cancel_workstation(false)
+	if kind == "workstation":
+		var res: Dictionary = net_session.dispatch_action(world, {"type": "workstation", "target": target})
+		_note(str(res.get("message", "")))
+		_play_sfx("work")
+	elif kind == "craft":
+		var res: Dictionary = net_session.dispatch_action(world, {"type": "craft", "recipe_id": rid})
+		_note(str(res.get("message", "")))
+		_play_sfx("work")
+	elif kind == "study":
+		var res: Dictionary = net_session.dispatch_action(world, {"type": "study_book", "item_id": iid})
+		_note(str(res.get("message", "")))
+		_play_sfx("book")
+	_refresh()
 
 
 func _start_workstation(position: Vector2i) -> void:
@@ -828,6 +959,7 @@ func _start_workstation(position: Vector2i) -> void:
 		return
 	var ws: Dictionary = chk.get("station", {})
 	work_active = true
+	work_kind = "workstation"
 	work_target = position
 	work_elapsed = 0.0
 	work_duration = float(ws.get("duration_sec", 2.5))
@@ -843,10 +975,79 @@ func _start_workstation(position: Vector2i) -> void:
 	_set_prompt("正在「%s」劳作中 (%.1f 秒，按 Esc 可随时中断)..." % [work_label, work_duration])
 
 
+func _start_craft_task(recipe_id: String, recipe_name: String, duration: float) -> void:
+	var chk: Dictionary = world.can_craft_recipe(recipe_id)
+	if not bool(chk.get("ok", false)):
+		_note(str(chk.get("reason", "制作条件未满足。")))
+		return
+	_close_overlay()
+	_cancel_workstation(false)
+	work_active = true
+	work_kind = "craft"
+	work_recipe_id = recipe_id
+	work_elapsed = 0.0
+	work_duration = maxf(0.8, duration)
+	work_label = "制作：" + recipe_name
+	if board != null:
+		board.work_progress = 0.02
+		board.work_label = work_label
+		board.markers.queue_redraw()
+	_set_prompt("正在制作「%s」(%.1f 秒，移动或 Esc 可中断)..." % [recipe_name, work_duration])
+
+
+func _start_study_book(item_id: int, book_name: String) -> void:
+	_cancel_workstation(false)
+	work_active = true
+	work_kind = "study"
+	work_item_id = item_id
+	work_elapsed = 0.0
+	work_duration = 2.5
+	work_label = "精读：" + book_name
+	if board != null:
+		board.work_progress = 0.02
+		board.work_label = work_label
+		board.markers.queue_redraw()
+	_set_prompt("正在精读《%s》(2.5 秒，移动或 Esc 可中断)..." % book_name)
+
+
+func _start_dazuo() -> void:
+	_cancel_workstation(false)
+	if int(world.skill_level("force")) <= 0:
+		_note("你尚未习得「基本内功」，请先赴扬威武馆向陈馆主请教。")
+		return
+	work_active = true
+	work_kind = "dazuo"
+	work_elapsed = 0.0
+	work_duration = 2.0
+	work_label = "盘膝打坐吐纳"
+	if board != null:
+		board.enter_posture(&"meditating", world.pos)
+		board.work_progress = 0.02
+		board.work_label = work_label
+		board.markers.queue_redraw()
+	_play_sfx("meditate")
+	_set_prompt("盘膝打坐运周天中（满内力后可冲关提上限，移动或 Esc 收功）...")
+
+
 func _perform_action(position: Vector2i, action: String) -> void:
 	match action:
 		"learn_menu":
 			_show_overlay("learn_npc", position)
+		"shop_menu", "bank_menu":
+			shop_mode = "buy"
+			_show_overlay("shop", position)
+		"bounty_board":
+			_show_overlay("missions")
+		"bounty_turnin":
+			_note(world.turn_in_bounty(position))
+			_play_sfx("coin")
+		"spar":
+			var sr: Dictionary = world.start_spar(position)
+			_note(str(sr.get("message", "")))
+			if bool(sr.get("ok", false)):
+				spar_accum = 0.65
+				_play_sfx("clash")
+				_set_prompt("切磋开始！（每 1.3 秒交手一合，按 U 调加力，Esc 或走开收招）")
 		"workstation":
 			_start_workstation(position)
 		"store":
@@ -908,6 +1109,7 @@ func _candidates_for_dir_action(act: String) -> Array[Vector2i]:
 					if t in ["c", "C", "F", "K", "r", "b", "q", "S", "t", "l", "k", "h", "u", "a", "D", "o", "w", "O", "%", "f"] \
 							or not world.items_at(p).is_empty() \
 							or not world.workstation_at(p).is_empty() \
+							or world.site_at(p) == &"notice_board" \
 							or world.site_at(p) in Board.NPC_SITES:
 						found.append(p)
 				"chat":
@@ -996,6 +1198,9 @@ func _execute_directional_action(act: String, target: Vector2i) -> void:
 				_note("那个方向没有人可以交谈。")
 		"examine":
 			var s: StringName = world.site_at(target)
+			if s == &"notice_board":
+				_show_overlay("missions")
+				return
 			if s in Board.NPC_SITES:
 				_open_actions(target)
 				return
@@ -1038,8 +1243,13 @@ func _run_ccb_action(act_id: String) -> void:
 			_set_prompt("环视: %s (%d,%d) — 按 Esc 结束" % [world.location(look_at), look_at.x, look_at.y] if look_at != NONE else "")
 			_refresh()
 		"map", "inventory", "eat", "wear", "take_off", "pickup", "character", "wait", "debug", \
-				"wield", "apply", "read", "list_nearby", "move_mode", "messages", "missions", "skills", "multiplayer", "help":
+				"wield", "apply", "read", "list_nearby", "move_mode", "messages", "missions", "skills", \
+				"multiplayer", "craft", "exert", "dismantle", "help":
 			_show_overlay(act_id)
+		"toggle_audio":
+			if audio_ambience != null and audio_ambience.has_method("toggle_mute"):
+				var is_m: bool = audio_ambience.toggle_mute()
+				_note("江南环境声景与交互音效已%s。" % ("静音" if is_m else "开启"))
 		"drop":
 			_show_overlay("inventory", world.pos)
 		"open", "close", "smash", "examine", "grab", "drop_dir", "peek", "chat":
@@ -1136,6 +1346,12 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	var key: Key = event.physical_keycode
 
 	if key == KEY_ESCAPE and not event.echo:
+		if bool(world.spar_status().get("active", false)):
+			_note(world.stop_spar())
+			_set_prompt("")
+			_refresh()
+			get_viewport().set_input_as_handled()
+			return
 		if work_active:
 			_cancel_workstation(true)
 			get_viewport().set_input_as_handled()

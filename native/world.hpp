@@ -1,9 +1,13 @@
 #pragma once
 
+#include "bounties.hpp"
 #include "character_state.hpp"
 #include "city.hpp"
+#include "combat.hpp"
+#include "crafting.hpp"
 #include "item_catalog.hpp"
 #include "multiplayer.hpp"
+#include "shops.hpp"
 #include "skills.hpp"
 #include "workstations.hpp"
 #include <godot_cpp/classes/ref_counted.hpp>
@@ -44,6 +48,12 @@ class CanglingWorld : public godot::RefCounted {
     int carried_water = 500;
     CharacterState char_state;
     SkillSet skill_set;
+    SparSession spar_session;
+    BountyTracker bounty_tracker;
+
+    CraftEnv current_craft_env() const;
+    bool is_pos_indoors(Vector2i p, int z);
+    bool is_pos_near_hearth(Vector2i p, int z);
 
     // Multiplayer hook state (offline default: local_peer_id=1, remote_players empty)
     int64_t local_peer_id = 1;
@@ -178,11 +188,46 @@ public:
     // Master NPC Teaching (learn) & 28 Multiplayer Physical Workstations (no lock, 2.5s bar)
     godot::Array npc_teach_list(Vector2i npc_pos) const;
     String learn_from_npc(Vector2i npc_pos, const String &skill_id);
+    godot::Array special_art_list() const;
+    godot::Array npc_special_teach_list(Vector2i npc_pos) const;
+    String learn_special_from_npc(Vector2i npc_pos, const String &art_id);
     Dictionary workstation_at(Vector2i p) const;
     godot::Array list_workstations() const;
     godot::Array workstations_in_rect(Rect2i area) const;
     Dictionary can_work_at_station(Vector2i p) const;
     String complete_workstation(Vector2i p);
+
+    // Phase 1: Shops, Bank, Pawn, Inn, Dazuo, Exert, Specialized Study
+    Dictionary shop_info_at(Vector2i npc_pos) const;
+    String buy_item_from(Vector2i npc_pos, int item_id);
+    String sell_item_to(Vector2i npc_pos, int item_id);
+    String bank_deposit(Vector2i npc_pos, int amount);
+    String bank_withdraw(Vector2i npc_pos, int amount);
+    String rent_inn_room_at(Vector2i npc_pos);
+    Dictionary dazuo_cycle();
+    String exert_action(const String &kind);
+    String study_book_cycle(int item_id);
+
+    // Phase 2: CCB Crafting (&), Dismantle (B), Ambient Temp/Wetness & Wuxia Sparring
+    Dictionary craft_env_dict();
+    godot::Array craft_recipe_list(const String &category_filter);
+    Dictionary can_craft_recipe(const String &recipe_id);
+    String complete_craft_recipe(const String &recipe_id);
+    String dismantle_item(int item_id);
+    void sync_environment(double ambient_c, double rain_intensity);
+    Dictionary start_spar(Vector2i npc_pos);
+    Dictionary step_spar_round();
+    String stop_spar();
+    Dictionary spar_status() const;
+
+    // Phase 3: Central Square Notice Board Bounties & Jianghu Score
+    godot::Array bounty_list() const;
+    Dictionary active_bounty() const;
+    String accept_bounty(int index);
+    String abandon_bounty();
+    String turn_in_bounty(Vector2i npc_pos);
+    Vector2i notice_board_pos() const { return kNoticeBoardTile; }
+    Dictionary player_score_dict() const;
 
     // Multiplayer-Ready Sync, Remote Peer & Deterministic Action Interfaces
     int64_t get_local_peer_id() const { return local_peer_id; }

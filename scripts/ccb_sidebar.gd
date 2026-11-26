@@ -216,7 +216,7 @@ func build(world: RefCounted) -> void:
 	root.add_child(CCB.divider())
 
 	# --- ROW 8: Compact CCB Key Strip ---
-	var key_bar := _mk_lbl(root, "Enter动作 J技能 O联机 m全图 o开 c关 e查 g拾 i囊 E吃 W穿 ?键", 10, CCB.C_DKGRAY, true)
+	var key_bar := _mk_lbl(root, "Enter动作 J技能 U运功 &制作 M委托 m全图 i囊 E吃 ?键", 10, CCB.C_DKGRAY, true)
 	key_bar.clip_text = false
 
 
@@ -306,10 +306,18 @@ func refresh(world: RefCounted, weather: RefCounted, board: Control) -> void:
 	_fatigue_lbl.text = "精力:%s" % str(st.get("fatigue_text", "尚可"))
 	_fatigue_lbl.add_theme_color_override("font_color", CCB.C_LTGREEN if fat < 30 else (CCB.C_YELLOW if fat < 65 else CCB.C_RED))
 
-	var warmth: int = int(st.get("warmth", 0))
-	var temp_str := "暖和" if warmth >= 35 else ("舒适" if warmth >= 15 else "微凉")
-	_temp_lbl.text = "保暖:%s(%d)" % [temp_str, warmth]
-	_temp_lbl.add_theme_color_override("font_color", CCB.C_LTGRAY if warmth >= 15 else CCB.C_CYAN)
+	var temp_str: String = str(st.get("temp_text", "舒适"))
+	var body_c: float = float(st.get("body_temp_c", 37.0))
+	var wet_i: int = int(st.get("wetness", 0))
+	_temp_lbl.text = "体温:%s" % temp_str
+	var tcol := CCB.C_LTGRAY
+	if body_c < 35.6:
+		tcol = CCB.C_LTCYAN
+	elif body_c < 36.4 or wet_i >= 35:
+		tcol = CCB.C_CYAN
+	elif body_c > 37.9:
+		tcol = CCB.C_YELLOW
+	_temp_lbl.add_theme_color_override("font_color", tcol)
 
 	var morale: int = int(st.get("morale", 10))
 	var face := ":D" if morale >= 20 else (":)" if morale >= 5 else (":|" if morale >= -10 else ":("))
@@ -350,6 +358,14 @@ func refresh(world: RefCounted, weather: RefCounted, board: Control) -> void:
 	if bool(st.get("lamp_lit", false)):
 		var lname: String = str(st.get("light_name", "照明"))
 		badges.append("[%s]" % (lname if not lname.is_empty() else "点灯"))
+	if bool(st.get("exert_warmth", false)):
+		badges.append("[御寒]")
+	var jiali_v: int = int(st.get("jiali", 0))
+	if jiali_v > 0:
+		badges.append("[加力%d]" % jiali_v)
+	var spar_st: Dictionary = world.spar_status()
+	if bool(spar_st.get("active", false)):
+		badges.append("[切磋中]")
 	_flags_lbl.text = " ".join(badges)
 
 	# Row 3: Location + Z + Coords
@@ -377,9 +393,9 @@ func refresh(world: RefCounted, weather: RefCounted, board: Control) -> void:
 	_quest_lbl.text = "铜钱 %d文 | 潜能 %d%s" % [int(world.coins), pot, (" | 内力 %d/%d" % [nl, nl_max]) if nl_max > 0 else ""]
 
 	# Row 5: Wielded & Carry
-	var wield_txt: String = str(st.get("wielded_name", "空手"))
+	var wield_txt: String = str(st.get("wielded_text", "空手"))
 	var bash_pw: int = int(st.get("bash_power", 12))
-	_wield_lbl.text = "手持: %s  (破拆:%d | 累赘:%d)" % [wield_txt, bash_pw, int(st.get("encumbrance", 0))]
+	_wield_lbl.text = "手持: %s  (破拆:%d | 防雨:%d%%)" % [wield_txt, bash_pw, int(st.get("rain_resist", 0))]
 	_wield_lbl.add_theme_color_override("font_color", CCB.C_YELLOW if int(st.get("wielded_id", -1)) >= 0 else CCB.C_WHITE)
 
 	var vol_l := float(st.get("carry_volume_ml", 0)) / 1000.0
