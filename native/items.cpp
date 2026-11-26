@@ -198,7 +198,7 @@ Array CanglingWorld::inventory() const {
 
 Array CanglingWorld::items_at(Vector2i p) {
     Array result;
-    if (!in_city(p)) return result;
+    if (!in_city(p) || !items_exposed(p)) return result;
     const auto count = items_on(p);
     for (int i = 0; i < item_types; ++i) {
         if (!count[i]) continue;
@@ -207,46 +207,92 @@ Array CanglingWorld::items_at(Vector2i p) {
     return result;
 }
 
-String CanglingWorld::take_item(Vector2i p, int i) {
-    if (!in_city(p) || !near(p) || i < 0 || i >= item_types || items_on(p)[i] == 0) return {};
-    if (carried[i] >= max_stack) return String::utf8("行囊里同类物品已满。");
-    const auto &def = item_catalog()[i];
-    if (char_state.carry_volume_ml(carried) + def.volume_ml > char_state.max_carry_volume_ml()) {
-        return String::utf8("行囊容积不足，请先穿戴更大行囊或放下部分物品。");
+bool CanglingWorld::items_exposed(Vector2i p) {
+    const char tile = effective_tile(p, floor);
+    return !is_openable_container(tile) || tile == 'r' || is_container_open(p);
+}
+
+int CanglingWorld::transfer_pickup(Vector2i p, int item, int requested, String &reason) {
+    if (!in_city(p) || !near(p)) {
+        reason = String::utf8("距离太远");
+        return 0;
     }
+    if (!items_exposed(p)) {
+        reason = String::utf8("容器已关闭");
+        return 0;
+    }
+    const int available = items_on(p)[item];
+    const int stack_space = std::max(0, max_stack - carried[item]);
+    const int unit_volume = item_catalog()[item].volume_ml;
+    const int space = std::max(0, char_state.max_carry_volume_ml() - char_state.carry_volume_ml(carried));
+    const int fitting = unit_volume > 0 ? space / unit_volume : requested;
+    const int moved = std::min({requested, available, stack_space, fitting});
+    if (moved < requested) {
+        if (moved == available) reason = String::utf8("来源余量不足");
+        else if (moved == stack_space) reason = String::utf8("同类堆叠已满");
+        else reason = String::utf8("行囊容积不足");
+    }
+    if (moved == 0) return 0;
+
     materialize_tile_items(p);
-    const int64_t k = key(p, floor);
-    if (auto it = stored_items.find(k); it != stored_items.end() && it->second[i] > 0) {
-        if (--it->second[i] == 0 && std::none_of(it->second.begin(), it->second.end(), [](int n) { return n != 0; })) {
-            stored_items.erase(it);
-        }
+    auto source = stored_items.find(key(p, floor));
+    source->second[item] -= moved;
+    carried[item] += moved;
+    if (source->second[item] == 0 && std::none_of(source->second.begin(), source->second.end(), [](int n) { return n > 0; })) {
+        stored_items.erase(source);
     }
-    ++carried[i];
-    return String::utf8("你拿起了") + item_name(i) + String::utf8("。");
+    return moved;
+}
+
+Array CanglingWorld::pickup_items(const Array &requests) {
+    Array results;
+    for (int index = 0; index < requests.size(); ++index) {
+        const Variant entry = requests[index];
+        const Dictionary row = entry.get_type() == Variant::DICTIONARY ? Dictionary(entry) : Dictionary();
+        const Variant tile = row.get("position", Variant()), level = row.get("floor", Variant());
+        const int item = number(row.get("item", Variant()), 0, item_types - 1);
+        const int requested = number(row.get("quantity", Variant()), 1, std::numeric_limits<int>::max());
+        int moved = 0;
+        String reason;
+        if (item < 0 || requested < 1 || tile.get_type() != Variant::VECTOR2I || level.get_type() != Variant::INT) {
+            reason = String::utf8("拾取条目无效");
+        } else if (static_cast<int64_t>(level) != floor) {
+            reason = String::utf8("来源位于其他楼层");
+        } else {
+            moved = transfer_pickup(tile, item, requested, reason);
+        }
+        Dictionary result;
+        result["requested"] = std::max(0, requested);
+        result["moved"] = moved;
+        result["reason"] = reason;
+        results.append(result);
+    }
+    return results;
+}
+
+String CanglingWorld::take_item(Vector2i p, int item) {
+    if (item < 0 || item >= item_types || !in_city(p) || !near(p)) return {};
+    String reason;
+    if (transfer_pickup(p, item, 1, reason) == 0) return reason;
+    return String::utf8("你拿起了") + item_name(item) + String::utf8("。");
 }
 
 String CanglingWorld::take_all_at(Vector2i p) {
     if (!in_city(p) || !near(p)) return {};
+    if (!items_exposed(p)) return String::utf8("容器已关闭。");
     const auto counts = items_on(p);
-    int picked = 0;
-    bool full = false;
-    for (int i = 0; i < item_types; ++i) {
-        for (int n = 0; n < counts[i]; ++n) {
-            const auto &def = item_catalog()[i];
-            if (char_state.carry_volume_ml(carried) + def.volume_ml > char_state.max_carry_volume_ml()) {
-                full = true;
-                break;
-            }
-            const String r = take_item(p, i);
-            if (!r.is_empty()) ++picked;
-        }
-        if (full) break;
+    int requested = 0, picked = 0;
+    String reason;
+    for (int item = 0; item < item_types; ++item) {
+        if (counts[item] == 0) continue;
+        requested += counts[item];
+        picked += transfer_pickup(p, item, counts[item], reason);
     }
-    if (picked == 0) {
-        return full ? String::utf8("行囊容积已满，无法继续拾取。") : String::utf8("此处没有可拾取的物品。");
+    if (requested == 0) return String::utf8("此处没有可拾取的物品。");
+    String msg = String::utf8("共拾取了 ") + String::num_int64(picked) + String::utf8(" 件物品。");
+    if (picked < requested) {
+        msg += String::utf8("剩余 ") + String::num_int64(requested - picked) + String::utf8(" 件留在原处。") + reason;
     }
-    String msg = String::utf8("你拾取了 ") + String::num_int64(picked) + String::utf8(" 件物品。");
-    if (full) msg += String::utf8("（行囊已满，其余留在原地）");
     return msg;
 }
 

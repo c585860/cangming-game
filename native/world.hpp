@@ -70,6 +70,8 @@ class CanglingWorld : public godot::RefCounted {
     char effective_tile(Vector2i p, int z);
     ItemCounts items_on(Vector2i p);
     void materialize_tile_items(Vector2i p);
+    bool items_exposed(Vector2i p);
+    int transfer_pickup(Vector2i p, int item, int requested, String &reason);
     String take_item(Vector2i p, int item);
     bool move_grabbed_furniture(Vector2i next_player_pos);
     void haul_items_from(Vector2i from, Vector2i to);
@@ -123,6 +125,7 @@ public:
     godot::Array inventory() const;
     godot::Array items_at(Vector2i p);
     String take_item_at(Vector2i p, int item) { return take_item(p, item); }
+    godot::Array pickup_items(const godot::Array &requests);
     String take_all_at(Vector2i p);
     String place_item(Vector2i p, int item);
     String drop_item(int item) { return place_item(pos, item); }

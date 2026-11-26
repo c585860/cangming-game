@@ -37,6 +37,7 @@ void CanglingWorld::_bind_methods() {
     BIND(terrain_at, "position"); BIND(terrain_at_level, "position", "z"); BIND(surface_at, "position"); BIND(surface_at_level, "position", "z"); BIND(prop_at, "position");
     BIND(props_in_rect, "area"); BIND(active_sites_in_rect, "area"); BIND(prewarm_area, "area");
     BIND(inventory); BIND(items_at, "position"); BIND(take_item_at, "position", "item"); BIND(take_all_at, "position");
+    BIND(pickup_items, "requests");
     BIND(place_item, "position", "item"); BIND(drop_item, "item");
     BIND(eat_item, "item"); BIND(eat_item_at, "position", "item"); BIND(drink_bottle, "ml");
     BIND(wear_item, "item"); BIND(take_off_item, "worn_index");
@@ -311,7 +312,7 @@ String CanglingWorld::eat_item(int item) {
 
 String CanglingWorld::eat_item_at(Vector2i p, int item) {
     if (!in_city(p) || !near(p) || item < 0 || item >= item_types) return {};
-    if (items_on(p)[item] <= 0) return {};
+    if (!items_exposed(p) || items_on(p)[item] <= 0) return {};
     const auto &def = item_catalog()[item];
     if (def.category != ItemCategory::Food && def.category != ItemCategory::Drink) {
         return String::utf8("这件物品无法食用或饮用。");
