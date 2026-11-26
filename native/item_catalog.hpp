@@ -6,7 +6,7 @@
 
 namespace cangling {
 
-inline constexpr int kItemCount = 50;
+inline constexpr int kItemCount = 70;
 using ItemCounts = std::array<int, kItemCount>;
 
 enum class ItemCategory : std::uint8_t {
@@ -18,6 +18,7 @@ enum class ItemCategory : std::uint8_t {
     Book = 5,
     Medical = 6,
     Misc = 7,
+    Weapon = 8,
 };
 
 enum class WearSlot : std::uint8_t {
@@ -47,6 +48,12 @@ struct ItemDef {
     int storage_ml;
     const char *overlay;
     const char *desc;
+    int base_price;           // Standard shop price in copper coins
+    int rain_resist;          // 0..100 rain resistance when worn
+    const char *weapon_skill; // "" or base weapon skill id ("sword", "blade", etc.)
+    const char *book_skill;   // "" or skill id taught by studying this book
+    int book_min_lit;         // Min literate level required to study
+    int book_max_lv;          // Max skill level studyable from this book
 };
 
 const std::array<ItemDef, kItemCount> &item_catalog();

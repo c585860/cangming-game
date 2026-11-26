@@ -27,11 +27,17 @@ const SITE_NAMES := {
 	&"pawnbroker": "唐掌柜 (利源当铺)",
 	&"boatman": "老船夫 (水埠码头)",
 	&"storyteller": "说书先生 (春风茶馆)",
+	&"grocer": "福兴掌柜 (福兴杂货铺)",
+	&"banker": "钱庄掌柜 (通济钱庄)",
+	&"waiter": "客栈店小二 (悦来客栈)",
+	&"sparring_disciple": "武馆陪练弟子 (扬威武馆)",
+	&"notice_board": "沧灵告示牌 (江湖委托)",
 	&"door": "门",
 }
 const NPC_SITES := [
 	&"innkeeper", &"blacksmith", &"herbalist", &"martial_master",
 	&"weapon_coach", &"scholar", &"pawnbroker", &"boatman", &"storyteller",
+	&"grocer", &"banker", &"waiter", &"sparring_disciple",
 ]
 const SEASON_KEYS := {"春": "spring", "夏": "summer", "秋": "autumn", "冬": "winter"}
 const NONE := Vector2i(-1, -1)
@@ -769,7 +775,34 @@ func _draw_markers() -> void:
 		markers.draw_set_transform(center, 0, Vector2(1.0, 0.34))
 		markers.draw_arc(Vector2.ZERO, cell * 0.40, 0, TAU, 24, ring_col, 1.3, true)
 		markers.draw_set_transform(Vector2.ZERO)
-	# 2.5s Real-Time Workstation Progress Bar right above player!
+	# Central Square Notice Board ('榜') wooden stand marker
+	if world != null and world.floor == 0 and cell >= 20:
+		var nb: Vector2i = world.notice_board_pos()
+		if visible.has_point(nb):
+			var nbo := Vector2((nb - view_origin) * cell) + cam_px_offset
+			var br := Rect2(nbo.x + cell * 0.16, nbo.y + cell * 0.12, cell * 0.68, cell * 0.52)
+			markers.draw_rect(Rect2(nbo.x + cell * 0.44, nbo.y + cell * 0.58, cell * 0.12, cell * 0.34), Color("4e2e1b"))
+			markers.draw_rect(br, Color("7b4c2a"))
+			markers.draw_rect(br.grow(-2.0), Color("e7dbb8"))
+			markers.draw_rect(br, Color("3c2112"), false, 1.4)
+			var nbf := get_theme_default_font()
+			if nbf != null:
+				markers.draw_string(nbf, Vector2(br.position.x + br.size.x * 0.24, br.position.y + br.size.y * 0.78), "榜", HORIZONTAL_ALIGNMENT_LEFT, -1, maxi(10, int(cell * 0.38)), Color("8f251c"))
+	# Active Wuxia Sparring opponent HP banner
+	if world != null and world.floor == 0:
+		var sp: Dictionary = world.spar_status()
+		if bool(sp.get("active", false)):
+			var opp_p: Vector2i = sp.get("npc_pos", Vector2i.ZERO)
+			if visible.grow(1).has_point(opp_p):
+				var op_top := Vector2((opp_p - view_origin) * cell) + cam_px_offset + Vector2(cell * 0.5, -14.0)
+				var ohp: float = float(sp.get("opp_hp", 1))
+				var omax: float = maxf(1.0, float(sp.get("opp_max_hp", 100)))
+				var bw := 84.0
+				var bar_r := Rect2(op_top - Vector2(bw * 0.5, 0.0), Vector2(bw, 8.0))
+				markers.draw_rect(bar_r.grow(1.5), Color(0.06, 0.04, 0.04, 0.90))
+				markers.draw_rect(Rect2(bar_r.position, Vector2(bw * clampf(ohp / omax, 0.0, 1.0), 8.0)), Color("e35d4f"))
+				markers.draw_rect(bar_r.grow(1.5), Color("e6c87a"), false, 1.0)
+	# 2.5s Real-Time Workstation / Craft / Study / Dazuo Progress Bar right above player!
 	if work_progress > 0.001:
 		var p_top := (motion.visual_pos - Vector2(view_origin)) * float(cell) + cam_px_offset + Vector2(cell * 0.5, -18.0)
 		var bw := 112.0

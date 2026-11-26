@@ -17,11 +17,11 @@ static func _needs_banner(game: Control, parent: VBoxContainer) -> void:
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 2)
 	card.add_child(col)
-	game._label(col, "饱食:%s(%dkcal) | 水分:%s(%d%%) | 精力:%s | 耐力:%d%% | 手持:%s" % [
+	game._label(col, "饱食:%s(%dkcal) | 水分:%s(%d%%) | 体温:%s | 耐力:%d%% | 手持:%s" % [
 		str(st.get("hunger_text", "正常")), int(st.get("kcal", 2400)),
 		str(st.get("thirst_text", "正常")), int(st.get("hydration", 100)),
-		str(st.get("fatigue_text", "尚可")), int(round(float(st.get("stamina", 10000)) / 100.0)),
-		str(st.get("wielded_name", "空手"))], 12, CCB.C_YELLOW)
+		str(st.get("temp_text", "舒适")), int(round(float(st.get("stamina", 10000)) / 100.0)),
+		str(st.get("wielded_text", "空手"))], 12, CCB.C_YELLOW)
 	game._label(col, "容积:%d/%d ml | 负重:%.2f kg | 保暖:%d | 累赘:%d | 水壶:%d/%d ml" % [
 		int(st.get("carry_volume_ml", 0)), int(st.get("max_carry_volume_ml", 2500)),
 		float(st.get("carry_weight_g", 0)) / 1000.0,
@@ -166,7 +166,7 @@ static func wield_menu(game: Control, contents: VBoxContainer) -> void:
 
 	if wielded_id >= 0:
 		game._label(body, "[ 当前手持 ]", 12, CCB.C_CYAN)
-		_letter_row(game, body, idx, "收起「%s」改为空手" % str(st.get("wielded_name", "")), func():
+		_letter_row(game, body, idx, "收起「%s」改为空手" % str(st.get("wielded_text", "")), func():
 			game._note(game.world.unwield())
 			game._refresh()
 			game._close_overlay(), true)
@@ -200,7 +200,7 @@ static func apply_menu(game: Control, contents: VBoxContainer) -> void:
 	game._label(body, "[ 选择要使用/激活的物品 (工具 / 照明 / 医疗 / 书籍) ]", 12, CCB.C_CYAN)
 	if int(st.get("wielded_id", -1)) >= 0:
 		found = true
-		_letter_row(game, body, idx, "[手持] 直接激活：%s" % str(st.get("wielded_name", "")), func():
+		_letter_row(game, body, idx, "[手持] 直接激活：%s" % str(st.get("wielded_text", "")), func():
 			game._note(game.world.apply_wielded())
 			game.board.player_layer.queue_redraw()
 			game._refresh()
@@ -231,18 +231,42 @@ static func read_menu(game: Control, contents: VBoxContainer) -> void:
 	var body := _make_scroll_body(contents, 4)
 	var bag: Array = game.world.inventory()
 	var idx := 0
-	game._label(body, "[ 选择要研读的书籍 (按字母开始阅读，耗时 25 分钟) ]", 12, CCB.C_CYAN)
+	var lit_lv: int = int(game.world.skill_level("literate"))
+	game._label(body, "[ 分科精读典籍 (R) — 当前读书写字 %d 级 | 按字母开启 2.5 秒实时精读 ]" % lit_lv, 12, CCB.C_CYAN)
 	for row: Dictionary in bag:
 		if not bool(row.get("is_book", false)):
 			continue
 		var id: int = int(row["id"])
-		_letter_row(game, body, idx, "%s x%d — %s" % [str(row["name"]), int(row["count"]), str(row.get("desc", ""))], func():
-			game._note(game.world.read_book(id))
-			game._refresh()
-			game._close_overlay(), true)
+		var bname: String = str(row["name"])
+		var min_lit: int = int(row.get("book_min_lit", 0))
+		var max_lv: int = int(row.get("book_max_lv", 0))
+		var req_s := (" [需读书≥%d级, 限%d级]" % [min_lit, max_lv]) if max_lv > 0 and max_lv < 300 else ""
+		_letter_row(game, body, idx, "%s x%d%s — %s" % [bname, int(row["count"]), req_s, str(row.get("desc", ""))], func():
+			game._close_overlay()
+			game._start_study_book(id, bname), lit_lv >= min_lit)
 		idx += 1
 	if idx == 0:
-		game._label(body, "  (行囊中暂无书籍。可在民居书架 r 或书案 l 上拾取线装古籍)", 12, CCB.C_DKGRAY, true)
+		game._label(body, "  (行囊中暂无典籍。可在文昌书院向顾夫子选购各科武谱，或在书架 r / 书案 l 拾取)", 12, CCB.C_DKGRAY, true)
+
+
+static func dismantle_menu(game: Control, contents: VBoxContainer) -> void:
+	_needs_banner(game, contents)
+	var body := _make_scroll_body(contents, 4)
+	var bag: Array = game.world.inventory()
+	var idx := 0
+	game._label(body, "[ 拆解衣物 / 床品 / 手巾为碎布条 (B) — 可用于应急包扎或炮制金创纱布 ]", 12, CCB.C_CYAN)
+	for row: Dictionary in bag:
+		var can_tear := bool(row.get("is_clothing", false)) or str(row.get("category", "")) == "床品" or str(row.get("key", "")) == "towel"
+		if not can_tear:
+			continue
+		var id: int = int(row["id"])
+		_letter_row(game, body, idx, "拆解 [%s] %s x%d → 碎布条" % [str(row["category"]), str(row["name"]), int(row["count"])], func():
+			game._note(game.world.dismantle_item(id))
+			game._refresh()
+			game._reopen_overlay("dismantle"), true)
+		idx += 1
+	if idx == 0:
+		game._label(body, "  (行囊中没有可拆解的衣物、床品或手巾)", 12, CCB.C_DKGRAY)
 
 
 static func move_mode_menu(game: Control, contents: VBoxContainer) -> void:
@@ -383,9 +407,29 @@ static func pickup_menu(game: Control, contents: VBoxContainer, target: Vector2i
 
 static func character_sheet(game: Control, contents: VBoxContainer) -> void:
 	var st: Dictionary = game.world.character_status()
+	var sc: Dictionary = game.world.player_score_dict()
 	var body := _make_scroll_body(contents, 8)
 
-	# 3-column CCB @ summary
+	# Classic Wuxia MUD Score Banner
+	var score_card := PanelContainer.new()
+	score_card.add_theme_stylebox_override("panel", CCB.box(CCB.BG_HEADER, CCB.BORDER_CYAN, 10, 7, 1))
+	body.add_child(score_card)
+	var sv := VBoxContainer.new()
+	sv.add_theme_constant_override("separation", 3)
+	score_card.add_child(sv)
+	game._label(sv, "【 江湖人物谱 (score) 】  %s  ·  称号：%s" % [str(sc.get("name", "江湖少侠")), str(sc.get("title", "初出茅庐"))], 14, CCB.C_YELLOW)
+	game._label(sv, "江湖声望: %d  |  江湖阅历: %d  |  潜能: %d/%d  |  切磋胜场: %d/%d  |  已完成委托: %d" % [
+		int(sc.get("reputation", 0)), int(sc.get("combat_exp", 0)),
+		int(sc.get("potential", 0)), int(sc.get("potential_cap", 200)),
+		int(sc.get("spar_wins", 0)), int(sc.get("spar_total", 0)), int(sc.get("completed_bounties", 0))
+	], 12, CCB.C_WHITE, true)
+	game._label(sv, "随身铜钱: %d 文  |  通济钱庄存银: %d 文  |  内力: %d/%d (加力:%d)  |  客栈上房: %s" % [
+		int(sc.get("coins", 0)), int(sc.get("bank_coins", 0)),
+		int(st.get("neili", 0)), int(st.get("max_neili", 0)), int(st.get("jiali", 0)),
+		"有效" if bool(sc.get("inn_active", false)) else "未开房"
+	], 12, CCB.C_LTCYAN, true)
+
+	# 2-column CCB @ summary
 	var top := HBoxContainer.new()
 	top.add_theme_constant_override("separation", 10)
 	body.add_child(top)
@@ -401,7 +445,7 @@ static func character_sheet(game: Control, contents: VBoxContainer) -> void:
 	game._label(v1, "力量 STR: %d   敏捷 DEX: %d" % [int(st.get("str", 8)), int(st.get("dex", 8))], 13, CCB.C_WHITE)
 	game._label(v1, "智力 INT: %d   感知 PER: %d" % [int(st.get("int", 8)), int(st.get("per", 8))], 13, CCB.C_WHITE)
 	game._label(v1, "速度: %d   专注: %d   破拆力: %d" % [int(st.get("speed", 100)), int(st.get("focus", 100)), int(st.get("bash_power", 12))], 12, CCB.C_YELLOW)
-	game._label(v1, "手持: %s" % str(st.get("wielded_name", "空手")), 12, CCB.C_LTCYAN)
+	game._label(v1, "手持: %s" % str(st.get("wielded_text", "空手")), 12, CCB.C_LTCYAN)
 
 	var c2 := PanelContainer.new()
 	c2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -410,10 +454,12 @@ static func character_sheet(game: Control, contents: VBoxContainer) -> void:
 	var v2 := VBoxContainer.new()
 	v2.add_theme_constant_override("separation", 3)
 	c2.add_child(v2)
-	game._label(v2, "[ 生理与状态 ]", 12, CCB.C_CYAN)
+	game._label(v2, "[ 生理与温湿 ]", 12, CCB.C_CYAN)
 	game._label(v2, "饱食: %s (%d/%d kcal)" % [str(st.get("hunger_text", "")), int(st.get("kcal", 2400)), int(st.get("kcal_max", 3600))], 12, CCB.C_WHITE)
 	game._label(v2, "水分: %s (%d%%)  精力: %s" % [str(st.get("thirst_text", "")), int(st.get("hydration", 100)), str(st.get("fatigue_text", ""))], 12, CCB.C_WHITE)
-	game._label(v2, "耐力: %d%%   疼痛: %s   姿态: %s" % [int(round(float(st.get("stamina", 10000)) / 100.0)), str(st.get("pain_text", "无痛")), str(st.get("move_mode_text", "行走"))], 12, CCB.C_LTGRAY)
+	game._label(v2, "体温: %s (%.1f℃)  潮湿: %d%%  防雨: %d%%" % [
+		str(st.get("temp_text", "舒适")), float(st.get("body_temp_c", 37.0)),
+		int(st.get("wetness", 0)), int(st.get("rain_resist", 0))], 12, CCB.C_LTCYAN)
 	game._label(v2, "容积: %d/%d ml  负重: %.2f kg  保暖:%d  累赘:%d" % [
 		int(st.get("carry_volume_ml", 0)), int(st.get("max_carry_volume_ml", 2500)),
 		float(st.get("carry_weight_g", 0)) / 1000.0, int(st.get("warmth", 0)), int(st.get("encumbrance", 0))], 12, CCB.C_LTGRAY)
@@ -464,30 +510,68 @@ static func messages_menu(game: Control, contents: VBoxContainer) -> void:
 
 
 static func missions_menu(game: Control, contents: VBoxContainer) -> void:
-	game._label(contents, "[ 沧灵城见闻与常驻行当 (M) ]", 12, CCB.C_CYAN)
+	var ab: Dictionary = game.world.active_bounty()
+	var sc: Dictionary = game.world.player_score_dict()
 	var card := PanelContainer.new()
 	card.add_theme_stylebox_override("panel", CCB.box(CCB.BG_HEADER, CCB.BORDER_CYAN, 10, 8, 1))
 	contents.add_child(card)
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 6)
+	col.add_theme_constant_override("separation", 5)
 	card.add_child(col)
-	game._label(col, "江湖历练：%s" % str(game.world.quest_text), 13, CCB.C_YELLOW, true)
-	game._label(col, "随身铜钱：%d 文  |  潜能：%d / %d  |  江湖阅历：%d  |  工位劳作：%d 次" % [
-		int(game.world.coins), int(game.world.get_potential()), int(game.world.get_potential_cap()),
-		int(game.world.get_combat_exp()), int(game.world.get_jobs_done())], 12, CCB.C_WHITE)
-	game._label(col, "当前所在：%s (%d, %d)  |  流程：先向师傅请教入门 → 再到对应工位设施按 e 劳作" % [str(game.world.location(game.world.pos)), game.world.pos.x, game.world.pos.y], 11, CCB.C_LTGRAY, true)
+	game._label(col, "江湖称号：%s  |  声望：%d  |  铜钱：%d文(钱庄%d文)  |  潜能：%d/%d  |  已完成委托：%d" % [
+		str(sc.get("title", "初出茅庐")), int(sc.get("reputation", 0)),
+		int(game.world.coins), int(sc.get("bank_coins", 0)),
+		int(game.world.get_potential()), int(game.world.get_potential_cap()),
+		int(ab.get("completed_count", 0))], 12, CCB.C_YELLOW, true)
+	if bool(ab.get("active", false)):
+		var rdy := "【已达成，可寻路交付！】" if bool(ab.get("ready", false)) else "【进行中】"
+		game._label(col, "当前委托：%s %s — %s" % [str(ab.get("title", "")), rdy, str(ab.get("desc", ""))], 12, CCB.C_LTGREEN if bool(ab.get("ready", false)) else CCB.C_LTCYAN, true)
+		var b_row := HBoxContainer.new()
+		b_row.add_theme_constant_override("separation", 6)
+		col.add_child(b_row)
+		var wp: Vector2i = ab.get("waypoint_pos", Vector2i.ZERO)
+		var tp: Vector2i = ab.get("turnin_pos", Vector2i.ZERO)
+		var dest: Vector2i = tp if (bool(ab.get("ready", false)) or wp == Vector2i.ZERO or bool(ab.get("waypoint_done", false))) else wp
+		game._button(b_row, "自动寻路前往目标 (%d,%d)" % [dest.x, dest.y], func():
+			game._close_overlay()
+			game._begin_route(dest, "bounty_turnin" if dest == tp and bool(ab.get("ready", false)) else ""), true)
+		game._button(b_row, "放弃当前委托", func():
+			game._note(game.world.abandon_bounty())
+			game._refresh()
+			game._reopen_overlay("missions"))
+	else:
+		game._label(col, "当前无进行中的江湖委托，可在下方「沧灵告示牌」直接揭榜，或前往中央广场告示牌(119,120)查看。", 12, CCB.C_LTGRAY, true)
+
 	var body := _make_scroll_body(contents, 4)
-	game._label(body, "[ 沧灵城九位传艺师傅 (点击自动寻路前往请教入门) ]", 12, CCB.C_CYAN)
+	game._label(body, "[ 沧灵告示牌 · 可重复江湖委托 (点击直接揭榜) ]", 12, Color("ffbe4f"))
+	var bounties: Array = game.world.bounty_list()
+	var idx := 0
+	for b: Dictionary in bounties:
+		var bidx: int = int(b.get("index", 0))
+		var is_a: bool = bool(b.get("active", false))
+		var tag := "[进行中]" if is_a else "[可揭榜]"
+		var line := "%s %s — 赏 %d文 / +%d潜能 / +%d阅历 / +%d声望" % [
+			tag, str(b.get("title", "")), int(b.get("coin_reward", 0)),
+			int(b.get("pot_reward", 0)), int(b.get("exp_reward", 0)), int(b.get("rep_reward", 0))
+		]
+		_letter_row(game, body, idx, line, func():
+			game._note(game.world.accept_bounty(bidx))
+			game._refresh()
+			game._reopen_overlay("missions"), not is_a)
+		idx += 1
+
+	body.add_child(CCB.divider())
+	game._label(body, "[ 沧灵城十三位师傅、掌柜与演武对手 (点击自动寻路前往) ]", 12, CCB.C_CYAN)
 	var npcs: Array = game.world.npc_list()
-	for i in range(npcs.size()):
-		var n: Dictionary = npcs[i]
-		var wp: Vector2i = n.get("pos", Vector2i.ZERO)
+	for n: Dictionary in npcs:
+		var np: Vector2i = n.get("pos", Vector2i.ZERO)
 		var txt := "%s（%s）· %s  (%d,%d)" % [
 			str(n.get("name", "")), str(n.get("place", "")),
-			str(n.get("job", "")), wp.x, wp.y]
-		_letter_row(game, body, i, txt, func():
+			str(n.get("job", "")), np.x, np.y]
+		_letter_row(game, body, idx, txt, func():
 			game._close_overlay()
-			game._begin_route(wp, "learn_menu"))
+			game._begin_route(np, "talk"))
+		idx += 1
 
 
 static func help_menu(game: Control, contents: VBoxContainer) -> void:
@@ -514,12 +598,14 @@ static func help_menu(game: Control, contents: VBoxContainer) -> void:
 			"g / , : 拾取周围物品   |   i : 打开随身行囊",
 			"d : 丢弃物品到脚下   |   D : 选择方向丢弃物品",
 			"w : 手持物品 / 换回空手   |   a : 使用物品 (点灯/包扎/火折子)",
-			"A : 直接使用当前手持物品   |   R : 阅读随身书籍",
+			"A : 直接使用当前手持物品   |   R : 分科精读随身典籍/武谱",
+			"& : CCB 手工制作 (烹饪/制药/锻造/抄录)   |   B : 拆解衣物得碎布条",
 			"E : 进食 / 饮水   |   W : 穿戴衣物   |   T / + : 脱下与整理着装",
 		]],
 		["角色与系统", [
-			"J : 江湖技能面板 (武学 / 武道 / 练气 / 仙道)   |   O : 多人联机接口 (Multiplayer)",
-			"@ : 人物状态、肢体健康与着装页   |   M : 委托任务   |   P : 消息日志",
+			"J : 江湖技能面板 (武学/激发/研究)   |   U : 内功盘膝打坐与运功 (dazuo/exert)",
+			"O : 多人联机接口 (Multiplayer)   |   @ : 江湖人物谱 (score) 与着装",
+			"M : 沧灵告示牌委托与全城人物寻路   |   P : 消息日志",
 			"| : 静候一段时间   |   $ : 躺床/坐椅/原地小憩   |   ! : 开关安全模式",
 			"S : 保存游戏   |   Esc : 取消 / 系统菜单   |   K : 调试菜单",
 		]],

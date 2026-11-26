@@ -94,11 +94,43 @@ String npc_dialogue(int idx, int turn) {
             };
             return text(lines[turn % 3]);
         }
-        default: { // 说书先生 (春风茶馆)
+        case 8: { // 说书先生 (春风茶馆)
             static constexpr const char *lines[] = {
                 "说书先生啪地一拍醒木：「诸位听真！烟雨三月沧灵城，翠微湖五亭桥畔曾有两位剑客踏波论剑，那一夜水花飞溅三丈！」",
                 "说书先生摇扇吟道：「昔日沧灵城中，多少名震江湖的大侠，都是从学会一门基本功、在城中工坊攒潜能一步步走出去的！」",
-                "说书先生抿口清茶：「累了便坐下听段评书，既解乏养心，还能悟出几点江湖潜能；老夫亦可指点些许读书写字入门。」",
+                "说书先生抿口清茶：「累了便坐下听段评书，既解乏养心，还能悟出几点江湖潜能；老夫这儿也备着清茶桂花糕。」",
+            };
+            return text(lines[turn % 3]);
+        }
+        case 9: { // 福兴掌柜 (福兴杂货铺)
+            static constexpr const char *lines[] = {
+                "福兴掌柜笑脸相迎：「客官买些什么？江南烟雨多，竹编斗笠与蓑衣披风挡雨最管用，冬天还有厚实夹棉袄袍！」",
+                "福兴掌柜拍拍柜台：「走江湖行囊不可太小，青布行囊能装十四升物事；夜路则离不了桐油手灯与火折子。」",
+                "福兴掌柜笑道：「干挂面、粗盐罐、棉布手巾本店样样齐全，买回去在灶台按 & 自己下厨做阳春面也实惠！」",
+            };
+            return text(lines[turn % 3]);
+        }
+        case 10: { // 钱庄掌柜 (通济钱庄)
+            static constexpr const char *lines[] = {
+                "钱庄掌柜拨动玉算盘：「通济钱庄百年老号，存取铜钱分文不差！少侠可将盈余盘缠存进钱庄，随用随取。」",
+                "钱庄掌柜颔首道：「若已跟顾夫子学过读书写字，钱庄的点银算账台与银库封箱台也随时欢迎少侠来帮工。」",
+                "钱庄掌柜低声道：「身上带太多铜钱出门多有不便，存在老夫这里最稳妥。」",
+            };
+            return text(lines[turn % 3]);
+        }
+        case 11: { // 客栈店小二 (悦来客栈)
+            static constexpr const char *lines[] = {
+                "店小二甩着毛巾吆喝：「客官打尖还是住店？二楼上房只需 5 文铜钱住满一整日，卧榻歇息恢复翻倍还不怕外头风寒雨湿！」",
+                "店小二笑道：「店里也有热腾腾的白面馒头、芝麻炊饼和清茶，赶路前先垫垫肚子再走！」",
+                "店小二指指楼上：「二楼清静无扰，正是盘膝打坐（按 U）炼气吐纳的好去处！」",
+            };
+            return text(lines[turn % 3]);
+        }
+        default: { // 武馆陪练弟子 (扬威武馆演武场)
+            static constexpr const char *lines[] = {
+                "武馆陪练弟子抱拳笑道：「师兄请了！刚入门想试试招式身手？尽管找我切磋喂招，点到为止绝不伤和气！」",
+                "武馆陪练弟子擦汗道：「切磋时按 U 可以先调出招加力，受伤了记得用金创纱布包扎或运功疗伤！」",
+                "武馆陪练弟子指指演武场：「等你基础武学练到 10 级，就能找陈馆主和周教头学扬威吐纳功、青霜剑法这些真功夫并激发上身！」",
             };
             return text(lines[turn % 3]);
         }
@@ -111,6 +143,9 @@ StringName CanglingWorld::site(Vector2i p) {
     if (floor == 0) {
         if (const NpcDef *npc = npc_at_tile(p)) {
             return StringName(npc->id);
+        }
+        if (p == kNoticeBoardTile) {
+            return "notice_board";
         }
     }
     switch (effective_tile(p, floor)) {
@@ -129,11 +164,37 @@ Dictionary CanglingWorld::actions_at(Vector2i p) {
     if (tile == ' ') return out;
 
     if (floor == 0) {
+        if (p == kNoticeBoardTile) {
+            out["bounty_board"] = text("查看沧灵告示牌（接取江湖委托 M）");
+        }
         if (const NpcDef *npc = npc_at_tile(p)) {
             out["talk"] = text("与") + text(npc->name) + text("交谈 (C)");
-            out["learn_menu"] = text("向") + text(npc->name) + text("请教技艺 (消耗潜能)");
+            if (!npc_teach_list(p).is_empty() || !npc_special_teach_list(p).is_empty()) {
+                out["learn_menu"] = text("向") + text(npc->name) + text("请教技艺 (消耗潜能)");
+            }
+            const ShopService svc = shop_service_for_npc(npc->id);
+            if (svc == ShopService::Merchant) {
+                out["shop_menu"] = text("向") + text(npc->name) + text("选购货品 / 交易");
+            } else if (svc == ShopService::Pawn) {
+                out["shop_menu"] = text("在利源当铺典当出售物品");
+            } else if (svc == ShopService::Bank) {
+                out["bank_menu"] = text("通济钱庄：存入 / 取出铜钱");
+            } else if (svc == ShopService::Inn) {
+                out["shop_menu"] = text("悦来客栈：住店开上房(5文) / 买茶点");
+            }
+            if (spar_opponent_for_npc(npc->id) != nullptr) {
+                out["spar"] = text("与") + text(npc->name) + text("演武切磋（点到为止）");
+            }
             if (std::string_view(npc->id) == "storyteller") {
                 out["listen"] = text("坐听江湖评书 (+心境 / +专注 / +潜能)");
+            }
+            // If player has an active bounty that turns in to this NPC, show it right at top!
+            const Dictionary ab = bounty_tracker.active_dict(carried, char_state.spar_total);
+            if (static_cast<bool>(ab.get("active", false))) {
+                const int bidx = static_cast<int>(ab.get("index", -1));
+                if (bidx >= 0 && std::string_view(bounty_catalog()[static_cast<std::size_t>(bidx)].turnin_npc_id) == npc->id) {
+                    out["bounty_turnin"] = text("交付江湖委托【") + String(ab.get("title", String())) + text("】");
+                }
             }
             return out;
         }
@@ -234,6 +295,19 @@ String CanglingWorld::interact(Vector2i p, const String &action) {
             if (action == "learn_menu") {
                 return text("请打开向") + text(npc.name) + text("请教技艺面板。");
             }
+            if (action == "shop_menu" || action == "bank_menu") {
+                return text("请打开") + text(npc.name) + text("商贸钱庄界面。");
+            }
+            if (action == "bounty_turnin") {
+                return turn_in_bounty(p);
+            }
+            if (action == "spar") {
+                const Dictionary sr = start_spar(p);
+                return sr.get("message", String());
+            }
+        }
+        if (p == kNoticeBoardTile && action == "bounty_board") {
+            return text("请打开沧灵告示牌江湖委托界面。");
         }
         if (action == "workstation" && workstation_at_tile(p) != nullptr) {
             return complete_workstation(p);
@@ -246,8 +320,10 @@ String CanglingWorld::interact(Vector2i p, const String &action) {
     if (action == "smash") return smash_at(p);
     if (action == "climb") return climb_at(p);
     if (action == "warm_hearth") {
+        char_state.wetness = std::max(0.0, char_state.wetness - 45.0);
+        char_state.body_temp_c = std::min(37.5, char_state.body_temp_c + 1.0);
         rest_minutes(10, false);
-        return text("你在青砖炉灶旁烤火暖手，寒意与倦乏顿时消散不少。");
+        return text("你在青砖炉灶旁烤火暖手，湿衣渐干，寒意与倦乏顿时消散不少。");
     }
     if (action == "wash") {
         char_state.fatigue = std::max(0.0, char_state.fatigue - 6.0);
@@ -279,7 +355,14 @@ String CanglingWorld::interact(Vector2i p, const String &action) {
     }
     if (action == "rest") {
         const bool sleeping = (tile == 'b');
+        const bool in_inn = (floor == 1 && p.x >= 108 && p.x <= 117 && p.y >= 104 && p.y <= 113 && char_state.inn_room_until_min > minutes);
+        if (in_inn) {
+            char_state.wetness = std::max(0.0, char_state.wetness - 50.0);
+            char_state.body_temp_c = 37.0;
+            char_state.morale = std::min(50, char_state.morale + 6);
+        }
         rest_minutes(sleeping ? 20 : 10, sleeping);
+        if (in_inn) return text("你在悦来客栈二楼上房锦被安卧小憩，暖意融融，气血精力恢复加倍！");
         return sleeping ? text("你躺上床榻盖好锦被，小憩片刻，倦意消散不少。")
                         : text("你坐下歇了一刻钟，气息舒缓不少。");
     }

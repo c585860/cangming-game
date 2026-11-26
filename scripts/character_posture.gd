@@ -67,6 +67,34 @@ func draw_posture(dest: Control, origin: Vector2, cell_f: float, flip: bool,
 	var breath := sin(elapsed * 2.2) * (cell_f * 0.020) * blend
 	var scale_x := -1.0 if flip else 1.0
 
+	if state == &"meditating":
+		# Classic Wuxia MUD cross-legged meditation (盘膝打坐) with rhythmic cyan/gold Dantian qi aura
+		var sink := cell_f * 0.20 * blend + breath * 0.65
+		var seat_pivot := origin + Vector2(cell_f * 0.5, cell_f * 0.80 + sink)
+		var pulse := 0.5 + 0.5 * sin(elapsed * 2.8)
+		var aura_c := origin + Vector2(cell_f * 0.5, cell_f * 0.72)
+		dest.draw_set_transform(aura_c, 0.0, Vector2(1.0, 0.42))
+		dest.draw_circle(Vector2.ZERO, cell_f * (0.44 + 0.06 * pulse), Color(0.24, 0.82, 0.78, 0.14 * blend))
+		dest.draw_arc(Vector2.ZERO, cell_f * (0.36 + 0.05 * pulse), 0.0, TAU, 24, Color(0.45, 0.94, 0.86, 0.58 * blend), 1.4, true)
+		dest.draw_arc(Vector2.ZERO, cell_f * (0.24 + 0.04 * (1.0 - pulse)), 0.0, TAU, 20, Color(0.95, 0.84, 0.46, 0.48 * blend), 1.1, true)
+		dest.draw_set_transform(Vector2.ZERO)
+
+		var squash_y := lerpf(1.0, 0.78, blend)
+		var stretch_x := lerpf(1.0, 1.12, blend) * scale_x
+		dest.draw_set_transform(seat_pivot, 0.0, Vector2(stretch_x, squash_y))
+		var local_origin := -Vector2(cell_f * 0.5, cell_f * 0.80)
+		Pack.draw_at(dest, "player_male", local_origin, cell_f, 0, -1, 0, lit_tint, Vector2.ZERO, false)
+		if not worn_overlays.is_empty():
+			for oid: String in worn_overlays:
+				var ot := outfit_tint if oid in ["overlay_worn_cloak", "overlay_worn_robe"] else lit_tint
+				Pack.draw_at(dest, oid, local_origin, cell_f, 0, -1, 0, ot, Vector2.ZERO, false)
+		else:
+			for id: String in ["overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
+				Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, lit_tint, Vector2.ZERO, false)
+			Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, false)
+		dest.draw_set_transform(Vector2.ZERO)
+		return
+
 	if state == &"sitting":
 		var sink := cell_f * 0.14 * blend + breath * 0.5
 		var seat_pivot := origin + Vector2(cell_f * 0.5, cell_f * 0.78 + sink)

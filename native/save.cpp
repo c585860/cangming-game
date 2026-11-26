@@ -21,7 +21,7 @@ bool entry(const Dictionary &obj, const char *name, int64_t low, int64_t high) {
 
 bool CanglingWorld::save_game(const String &path) const {
     Dictionary data;
-    data["version"] = 8;
+    data["version"] = 9;
     data["generator"] = city.layout;
     data["seed"] = static_cast<int64_t>(seed);
     data["pos"] = Array::make(pos.x, pos.y);
@@ -33,6 +33,7 @@ bool CanglingWorld::save_game(const String &path) const {
     data["jobs_done"] = jobs_done;
     data["player_name"] = player_name;
     data["skills"] = skill_set.save_dict();
+    data["bounties"] = bounty_tracker.save_dict();
     Array picked;
     for (std::size_t i = 0; i < collected.size(); ++i) if (collected[i]) picked.push_back(static_cast<int>(i));
     data["collected"] = picked;
@@ -60,7 +61,7 @@ bool CanglingWorld::load_game(const String &path) {
     const Variant parsed = JSON::parse_string(FileAccess::get_file_as_string(path));
     if (parsed.get_type() != Variant::DICTIONARY) return false;
     const Dictionary data = parsed;
-    if (!entry(data, "version", 1, 8) || !entry(data, "quest", 0, 4) || !entry(data, "minutes", 0, 1000000000) ||
+    if (!entry(data, "version", 1, 9) || !entry(data, "quest", 0, 4) || !entry(data, "minutes", 0, 1000000000) ||
         !entry(data, "herbs", 0, 4) || !entry(data, "coins", 0, 1000000000) || data.get("collected", Variant()).get_type() != Variant::ARRAY) return false;
     const int version = data["version"];
     const Array picked = data["collected"];
@@ -146,6 +147,11 @@ bool CanglingWorld::load_game(const String &path) {
     if (version >= 7 && data.get("skills", Variant()).get_type() == Variant::DICTIONARY) {
         skill_set.load_dict(data["skills"]);
     }
+    bounty_tracker.reset();
+    if (version >= 9 && data.get("bounties", Variant()).get_type() == Variant::DICTIONARY) {
+        bounty_tracker.load_dict(data["bounties"]);
+    }
+    spar_session.reset();
     char_state.sync_with_skills(skill_set);
     if (version >= 7 && data.get("player_name", Variant()).get_type() == Variant::STRING) {
         set_player_name(data["player_name"]);

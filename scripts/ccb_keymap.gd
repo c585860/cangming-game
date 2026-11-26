@@ -20,6 +20,7 @@ const FULLWIDTH_MAP := {
 	"｜": "|",
 	"＠": "@",
 	"＋": "+",
+	"＆": "&",
 }
 
 # Exact CCB DEFAULTMODE bindings from Cataclysm-Cleanwater-Bomb/data/raw/keybindings.json
@@ -67,6 +68,9 @@ const CHAR_ACTIONS := {
 	"S": "save",
 	"Z": "zoom_out",
 	"J": "skills",
+	"U": "exert",
+	"&": "craft",
+	"B": "dismantle",
 	"O": "multiplayer",
 	"K": "debug",
 }
