@@ -799,10 +799,13 @@ godot::Dictionary RenderBaker::bake_point_lights(City &city, const std::unordere
 
     const Rect2i source_region = region.grow(kPointReach).intersection(area);
     const std::uint32_t u_seed = static_cast<std::uint32_t>(seed);
-    const godot::StringName sn_altar("altar");
-    const godot::StringName sn_merchant("merchant");
-    const godot::StringName sn_ferryman("ferryman");
-    const godot::StringName sn_herb("herb");
+    const godot::StringName sn_innkeeper("innkeeper");
+    const godot::StringName sn_blacksmith("blacksmith");
+    const godot::StringName sn_herbalist("herbalist");
+    const godot::StringName sn_martial("martial_master");
+    const godot::StringName sn_pawnbroker("pawnbroker");
+    const godot::StringName sn_boatman("boatman");
+    const godot::StringName sn_storyteller("storyteller");
     const godot::StringName sn_lantern("lantern");
     const godot::StringName sn_street("street_lamp");
     const godot::StringName sn_hearth("hearth");
@@ -820,9 +823,12 @@ godot::Dictionary RenderBaker::bake_point_lights(City &city, const std::unordere
 
             if (sites.has(wp)) {
                 const godot::StringName site = sites[wp];
-                if (site == sn_altar) { found = true; kind = sn_altar; spec = kLampAltar; }
-                else if (site == sn_merchant || site == sn_ferryman) { found = true; kind = sn_lantern; spec = kLampMarket; }
-                else if (site == sn_herb) { found = true; kind = sn_herb; spec = kLampHerb; }
+                if (site == sn_innkeeper || site == sn_blacksmith || site == sn_herbalist ||
+                    site == sn_martial || site == sn_pawnbroker || site == sn_boatman || site == sn_storyteller) {
+                    found = true;
+                    kind = sn_lantern;
+                    spec = kLampMarket;
+                }
             }
             if (!found) {
                 const char t = tiles[ly * w + lx];

@@ -464,17 +464,30 @@ static func messages_menu(game: Control, contents: VBoxContainer) -> void:
 
 
 static func missions_menu(game: Control, contents: VBoxContainer) -> void:
-	game._label(contents, "[ 当前委托与进展 (M) ]", 12, CCB.C_CYAN)
+	game._label(contents, "[ 沧灵城见闻与常驻行当 (M) ]", 12, CCB.C_CYAN)
 	var card := PanelContainer.new()
 	card.add_theme_stylebox_override("panel", CCB.box(CCB.BG_HEADER, CCB.BORDER_CYAN, 10, 8, 1))
 	contents.add_child(card)
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 6)
 	card.add_child(col)
-	game._label(col, "当前目标：%s" % str(game.world.quest_text), 14, CCB.C_YELLOW, true)
-	game._label(col, "修为境界：%s  |  铜钱：%d 文  |  清露草：%d / 3 株" % [
-		"引气一层" if int(game.world.quest) == 4 else "凡俗旅人", int(game.world.coins), int(game.world.herbs)], 13, CCB.C_WHITE)
-	game._label(col, "当前所在：%s (%d, %d)" % [str(game.world.location(game.world.pos)), game.world.pos.x, game.world.pos.y], 12, CCB.C_LTGRAY)
+	game._label(col, "江湖历练：%s" % str(game.world.quest_text), 13, CCB.C_YELLOW, true)
+	game._label(col, "随身铜钱：%d 文  |  潜能：%d / %d  |  江湖阅历：%d  |  工位劳作：%d 次" % [
+		int(game.world.coins), int(game.world.get_potential()), int(game.world.get_potential_cap()),
+		int(game.world.get_combat_exp()), int(game.world.get_jobs_done())], 12, CCB.C_WHITE)
+	game._label(col, "当前所在：%s (%d, %d)  |  流程：先向师傅请教入门 → 再到对应工位设施按 e 劳作" % [str(game.world.location(game.world.pos)), game.world.pos.x, game.world.pos.y], 11, CCB.C_LTGRAY, true)
+	var body := _make_scroll_body(contents, 4)
+	game._label(body, "[ 沧灵城九位传艺师傅 (点击自动寻路前往请教入门) ]", 12, CCB.C_CYAN)
+	var npcs: Array = game.world.npc_list()
+	for i in range(npcs.size()):
+		var n: Dictionary = npcs[i]
+		var wp: Vector2i = n.get("pos", Vector2i.ZERO)
+		var txt := "%s（%s）· %s  (%d,%d)" % [
+			str(n.get("name", "")), str(n.get("place", "")),
+			str(n.get("job", "")), wp.x, wp.y]
+		_letter_row(game, body, i, txt, func():
+			game._close_overlay()
+			game._begin_route(wp, "learn_menu"))
 
 
 static func help_menu(game: Control, contents: VBoxContainer) -> void:
@@ -505,6 +518,7 @@ static func help_menu(game: Control, contents: VBoxContainer) -> void:
 			"E : 进食 / 饮水   |   W : 穿戴衣物   |   T / + : 脱下与整理着装",
 		]],
 		["角色与系统", [
+			"J : 江湖技能面板 (武学 / 武道 / 练气 / 仙道)   |   O : 多人联机接口 (Multiplayer)",
 			"@ : 人物状态、肢体健康与着装页   |   M : 委托任务   |   P : 消息日志",
 			"| : 静候一段时间   |   $ : 躺床/坐椅/原地小憩   |   ! : 开关安全模式",
 			"S : 保存游戏   |   Esc : 取消 / 系统菜单   |   K : 调试菜单",

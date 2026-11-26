@@ -24,17 +24,42 @@ using godot::Rect2i;
 using godot::String;
 using godot::Vector2i;
 
-inline constexpr int city_size = 1500;
+// Compact, 100% handcrafted Cangling City (沧灵城) Jiangnan water-town (240x240 tiles = 4x4 sectors of 60x60)
+inline constexpr int city_size = 240;
 inline constexpr int sector_size = 60;
 inline constexpr int sector_count = city_size / sector_size;
-inline constexpr int east_shore = 1376;
-inline constexpr int generator_version = 3;
-inline constexpr int survey_tile_size = 10;
-inline const Vector2i start_tile{1201, 1384};
-inline const Vector2i market_tile{1217, 1337};
-inline const Vector2i altar_tile{1156, 1364};
-inline const Vector2i dock_tile{1331, 1322};
-inline const std::array<Vector2i, 4> herb_tiles{{{1325,1345},{1328,1353},{1326,1362},{1328,1368}}};
+inline constexpr int east_shore = 234;
+inline constexpr int generator_version = 5;
+inline constexpr int survey_tile_size = 4;
+
+// Player spawns right inside Cangling South Gate (沧灵南门) facing the South Arch Bridge & bustling street
+inline const Vector2i start_tile{120, 209};
+
+// 7 Resident Wuxia Starter-Village NPCs in Cangling City (沧灵城)
+struct NpcDef {
+    const char *id;
+    const char *name;
+    const char *title;
+    Vector2i pos;
+    const char *job_label;
+    int job_pay;
+    int job_minutes;
+    int job_stamina;
+};
+
+inline constexpr std::size_t kNpcCount = 9;
+inline const std::array<NpcDef, kNpcCount> kYangzhouNpcs{{
+    {"innkeeper",      "冼老板",   "醉仙楼掌柜",     {126, 157}, "传授基本厨艺 · 后厨工坊",       0,  15, 0},
+    {"blacksmith",     "王铁匠",   "王记铁匠铺",     {114, 157}, "传授基本锻造/刀棍 · 锻造坊",    0,  20, 0},
+    {"herbalist",      "平大夫",   "回春堂药铺",     {130, 113}, "传授基本药学 · 药坊工位",       0,  15, 0},
+    {"martial_master", "陈馆主",   "扬威武馆馆主",   {100, 126}, "传授内轻招架与空手六艺",        0,  20, 0},
+    {"weapon_coach",   "周教头",   "扬威武馆教头",   {105, 126}, "传授兵刃六艺与基本暗器",        0,  20, 0},
+    {"scholar",        "顾夫子",   "文昌书院山长",   {130, 88},  "传授读书写字 · 抄经工坊",       0,  15, 0},
+    {"pawnbroker",     "唐掌柜",   "利源当铺掌柜",   {114, 130}, "传授账房识字 · 当铺钱庄工位",   0,  15, 0},
+    {"boatman",        "老船夫",   "水埠码头",       {167, 166}, "传授拳脚轻功启蒙 · 漕运工位",   0,  20, 0},
+    {"storyteller",    "说书先生", "春风茶馆",       {178, 126}, "坐听江湖评书 (+心境/+潜能)",    0,  10, 0},
+}};
+
 inline const std::array<Vector2i, 4> steps{{{0,-1},{-1,0},{1,0},{0,1}}};
 
 using Tiles = std::array<char, sector_size * sector_size>;
@@ -70,34 +95,34 @@ inline bool enclosed_at(const Block &block, int z, int i) {
     const auto level = block.extra_levels.find(z);
     return level != block.extra_levels.end() && level->second.enclosed.test(i);
 }
-inline Tiles &level_tiles( Block &block, int z ) {
-    if( z == 0 ) return block.ground;
-    if( z == 1 ) return block.upper;
-    if( z == 2 ) return block.attic;
-    auto [it, inserted] = block.extra_levels.try_emplace( z );
-    if( inserted ) it->second.tiles.fill( ' ' );
+inline Tiles &level_tiles(Block &block, int z) {
+    if (z == 0) return block.ground;
+    if (z == 1) return block.upper;
+    if (z == 2) return block.attic;
+    auto [it, inserted] = block.extra_levels.try_emplace(z);
+    if (inserted) it->second.tiles.fill(' ');
     return it->second.tiles;
 }
-inline const Tiles &level_tiles( const Block &block, int z ) {
-    if( z == 0 ) return block.ground;
-    if( z == 1 ) return block.upper;
-    if( z == 2 ) return block.attic;
-    static const Tiles empty = [] { Tiles value{}; value.fill( ' ' ); return value; }();
-    const auto it = block.extra_levels.find( z );
+inline const Tiles &level_tiles(const Block &block, int z) {
+    if (z == 0) return block.ground;
+    if (z == 1) return block.upper;
+    if (z == 2) return block.attic;
+    static const Tiles empty = [] { Tiles value{}; value.fill(' '); return value; }();
+    const auto it = block.extra_levels.find(z);
     return it == block.extra_levels.end() ? empty : it->second.tiles;
 }
-inline Tiles &level_surfaces( Block &block, int z ) {
-    if( z == 0 ) return block.ground_surface;
-    if( z == 1 ) return block.upper_surface;
-    if( z == 2 ) return block.attic_surface;
+inline Tiles &level_surfaces(Block &block, int z) {
+    if (z == 0) return block.ground_surface;
+    if (z == 1) return block.upper_surface;
+    if (z == 2) return block.attic_surface;
     return block.extra_levels[z].surface;
 }
-inline const Tiles &level_surfaces( const Block &block, int z ) {
-    if( z == 0 ) return block.ground_surface;
-    if( z == 1 ) return block.upper_surface;
-    if( z == 2 ) return block.attic_surface;
+inline const Tiles &level_surfaces(const Block &block, int z) {
+    if (z == 0) return block.ground_surface;
+    if (z == 1) return block.upper_surface;
+    if (z == 2) return block.attic_surface;
     static const Tiles empty{};
-    const auto it = block.extra_levels.find( z );
+    const auto it = block.extra_levels.find(z);
     return it == block.extra_levels.end() ? empty : it->second.surface;
 }
 
@@ -106,10 +131,10 @@ struct CityPlan {
     std::array<std::uint8_t, sector_count * sector_count> roads{};
     std::array<bool, sector_count> bridges{};
     std::array<int, city_size> shores{};
-    Vector2i civic_center;
-    Vector2i trade_center;
-    Vector2i orchard_center;
-    std::array<Vector2i, 3> civic_sites;
+    Vector2i civic_center{2, 1};
+    Vector2i trade_center{2, 2};
+    Vector2i orchard_center{0, 0};
+    std::array<Vector2i, 3> civic_sites{{{1, 1}, {2, 1}, {1, 2}}};
     std::uint32_t seed = 0;
     void generate(std::uint32_t value);
     District district_at(Vector2i s) const;
@@ -118,6 +143,19 @@ struct CityPlan {
     std::vector<Vector2i> road_path(Vector2i from, int direction) const;
     char overview(Vector2i s) const;
 };
+
+// Handcrafted Yangzhou world blueprint (built deterministically once, zero RNG!)
+struct YangzhouWorldData {
+    std::array<std::vector<char>, 3> tiles;
+    std::array<std::vector<char>, 3> surfaces;
+    std::array<std::vector<std::uint8_t>, 3> enclosed;
+    struct Zone { Rect2i bounds; const char *name; };
+    std::vector<Zone> zones;
+};
+const YangzhouWorldData &yangzhou_world_data();
+bool is_npc_tile(Vector2i p);
+const NpcDef *npc_at_tile(Vector2i p);
+
 const char *district_name(District district);
 bool south_gate_column(int x);
 void fill_streets(Block &block, Vector2i sector, const CityPlan &plan);

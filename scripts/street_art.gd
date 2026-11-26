@@ -82,7 +82,7 @@ static func ground(board: Control, cells: Dictionary, p: Vector2i, seed: int, se
 		_:
 			match feature:
 				"=":
-					Pack.draw(board, "t_dock", p, roll, _join(cells, p, ["="], 0), 0, Color("e2d1b6") * tint_override)
+					_draw_stone_arch_deck(board, cells, p, roll, tint_override)
 				"W":
 					Pack.draw(board, "t_water_moving_dp", p, roll, -1, 0, Color("dcecf0") * tint_override)
 				"~":
@@ -161,29 +161,197 @@ static func _draw_lantern_post(board: Control, p: Vector2i, lit_strength: float,
 			board.draw_circle(Vector2(lx, ly), s * 0.36, Color(1.0, 0.72, 0.32, 0.18 * glow))
 
 
-static func _draw_bridge_rails(board: Control, cells: Dictionary, p: Vector2i, emitters: Dictionary, lit_strength: float) -> void:
+static func _bridge_span_info(cells: Dictionary, p: Vector2i) -> Dictionary:
+	# Detect whether this '=' bridge spans E-W (water N/S) or N-S (water E/W) and compute arch crown progress (0..1)
+	var wn: int = 0
+	var ws: int = 0
+	var ww: int = 0
+	var we: int = 0
+	var d_n: int = 0
+	while d_n < 14 and cells.get(p + Vector2i(0, -(d_n + 1)), [" "])[0] == "=":
+		d_n += 1
+	var d_s: int = 0
+	while d_s < 14 and cells.get(p + Vector2i(0, d_s + 1), [" "])[0] == "=":
+		d_s += 1
+	var d_w: int = 0
+	while d_w < 18 and cells.get(p + Vector2i(-(d_w + 1), 0), [" "])[0] == "=":
+		d_w += 1
+	var d_e: int = 0
+	while d_e < 18 and cells.get(p + Vector2i(d_e + 1, 0), [" "])[0] == "=":
+		d_e += 1
+	if cells.get(p + Vector2i(0, -(d_n + 1)), [" "])[0] in ["~", "W"]: wn = 1
+	if cells.get(p + Vector2i(0, d_s + 1), [" "])[0] in ["~", "W"]: ws = 1
+	if cells.get(p + Vector2i(-(d_w + 1), 0), [" "])[0] in ["~", "W"]: ww = 1
+	if cells.get(p + Vector2i(d_e + 1, 0), [" "])[0] in ["~", "W"]: we = 1
+	var is_ew: bool = (wn + ws) > (ww + we) or ((wn + ws) == (ww + we) and (d_w + d_e) >= (d_n + d_s))
+	var span_len: float = float(maxi(1, (d_w + d_e) if is_ew else (d_n + d_s)))
+	var t_pos: float = float(d_w if is_ew else d_n) / span_len
+	var crown: float = sin(clampf(t_pos, 0.0, 1.0) * PI)
+	return {"is_ew": is_ew, "crown": crown, "t": t_pos, "d_n": d_n, "d_s": d_s, "d_w": d_w, "d_e": d_e}
+
+
+static func _draw_stone_arch_deck(board: Control, cells: Dictionary, p: Vector2i, roll: int, tint_override: Color) -> void:
+	# Realistic Weathered Jiangnan Carved Bluestone / Granite Stepped Arch Bridge (青白石块砌台阶拱桥 — Image 1!)
 	var masking := board.has_method("surface_id")
 	var o := _cell_origin(board, p)
 	var s := float(board.cell)
-	var col: Color = board.call("surface_id", p) if masking else Color("6e2d22")
-	var hi: Color = board.call("surface_id", p) if masking else Color("944232")
-	var stone_cap: Color = board.call("surface_id", p) if masking else Color("d6d1c4")
+	if masking:
+		board.draw_rect(Rect2(o, Vector2(s, s)), board.call("surface_id", p))
+		return
+	var info := _bridge_span_info(cells, p)
+	var is_ew: bool = bool(info["is_ew"])
+	var crown: float = float(info["crown"])
+	var near_water: bool = (cells.get(p + Vector2i.UP, [" "])[0] in ["~", "W"]) \
+		or (cells.get(p + Vector2i.DOWN, [" "])[0] in ["~", "W"]) \
+		or (cells.get(p + Vector2i.LEFT, [" "])[0] in ["~", "W"]) \
+		or (cells.get(p + Vector2i.RIGHT, [" "])[0] in ["~", "W"])
+
+	# Rich weathered grey-bluestone tone (NOT flat beige!) — shaded darker at bridge approaches, sunlit at arch crown!
+	var stone_base := Color("696b69").lerp(Color("9d9b91"), 0.22 + crown * 0.62)
+	if near_water:
+		stone_base = stone_base.darkened(0.08)
+	var mortar := Color("3e403f") * tint_override
+	board.draw_rect(Rect2(o, Vector2(s, s)), mortar)
+
+	# Staggered multi-tone carved granite ashlar blocks (3 stepped courses per tile x 2 staggered slabs)
+	var courses := 3
+	var pad := 1.0
+	for k in range(courses):
+		var sub_roll := _hash(Vector2i(p.x * 7 + k, p.y * 11 + k), 0x4b19)
+		var is_step_edge := (k == 0)
+		var split := 0.42 + float(sub_roll % 5) * 0.05 if ((k + (p.x if is_ew else p.y)) % 2 == 0) else 0.56 - float(sub_roll % 4) * 0.05
+		for half in range(2):
+			var h_roll := _hash(Vector2i(p.x * 13 + k * 3 + half, p.y * 17 + half), 0x8831)
+			var delta := (float(h_roll % 11) - 5.0) * 0.015
+			var warm_shift := (float((h_roll >> 4) % 5) - 2.0) * 0.008
+			var bcol := Color(
+				clampf(stone_base.r + delta + warm_shift, 0.0, 1.0),
+				clampf(stone_base.g + delta + warm_shift * 0.5, 0.0, 1.0),
+				clampf(stone_base.b + delta - warm_shift * 0.4, 0.0, 1.0)
+			) * tint_override
+			var rect: Rect2
+			if is_ew:
+				var x0 := o.x + (float(k) / float(courses)) * s
+				var bw := (s / float(courses)) - pad
+				var y0 := o.y + (0.0 if half == 0 else s * split)
+				var bh := (s * split if half == 0 else s * (1.0 - split)) - pad
+				rect = Rect2(x0, y0, maxf(1.5, bw), maxf(1.5, bh))
+			else:
+				var y0 := o.y + (float(k) / float(courses)) * s
+				var bh := (s / float(courses)) - pad
+				var x0 := o.x + (0.0 if half == 0 else s * split)
+				var bw := (s * split if half == 0 else s * (1.0 - split)) - pad
+				rect = Rect2(x0, y0, maxf(1.5, bw), maxf(1.5, bh))
+			board.draw_rect(rect, bcol)
+			# Subtle chiseled sunlit step highlight on the crown-facing lip & weathered shadow on lower edge
+			var hi_col := bcol.lightened(0.18 if is_step_edge else 0.10)
+			var sh_col := bcol.darkened(0.20)
+			if is_ew:
+				board.draw_line(rect.position, Vector2(rect.position.x, rect.end.y), hi_col, 1.0)
+				board.draw_line(Vector2(rect.end.x, rect.position.y), rect.end, sh_col, 1.0)
+			else:
+				board.draw_line(rect.position, Vector2(rect.end.x, rect.position.y), hi_col, 1.0)
+				board.draw_line(Vector2(rect.position.x, rect.end.y), rect.end, sh_col, 1.0)
+
+	# Subtle damp moss weathering in outer stone crevices near the river
+	if near_water and (roll % 5 == 0):
+		board.draw_rect(Rect2(o.x + s * 0.15, o.y + s * 0.15, s * 0.24, s * 0.18),
+			Color(0.24, 0.34, 0.22, 0.26) * tint_override)
+
+
+static func _draw_bridge_rails(board: Control, cells: Dictionary, p: Vector2i, emitters: Dictionary, lit_strength: float) -> void:
+	# Weathered Carved Grey-White Granite Arch Parapets, Relief Panels, Sculpted Pillars (望柱) & Vaulted Stone Arch (石券桥洞)
+	var masking := board.has_method("surface_id")
+	var o := _cell_origin(board, p)
+	var s := float(board.cell)
+	var stone_wall: Color = board.call("surface_id", p) if masking else Color("9e9c92")
+	var stone_top: Color = board.call("surface_id", p) if masking else Color("cbc7ba")
+	var stone_panel: Color = board.call("surface_id", p) if masking else Color("7c7c76")
+	var stone_dark: Color = board.call("surface_id", p) if masking else Color("4a4b48")
 	var north_water: bool = cells.get(p + Vector2i.UP, [" "])[0] in ["~", "W"]
 	var south_water: bool = cells.get(p + Vector2i.DOWN, [" "])[0] in ["~", "W"]
+	var west_water: bool = cells.get(p + Vector2i.LEFT, [" "])[0] in ["~", "W"]
+	var east_water: bool = cells.get(p + Vector2i.RIGHT, [" "])[0] in ["~", "W"]
+	var info := _bridge_span_info(cells, p)
+	var crown: float = float(info["crown"])
+
 	if north_water:
-		board.draw_rect(Rect2(o.x, o.y + s * 0.04, s, maxf(2.0, s * 0.11)), col)
-		board.draw_rect(Rect2(o.x, o.y + s * 0.04, s, maxf(1.0, s * 0.04)), hi)
-		if posmod(p.x, 3) == 0:
-			board.draw_rect(Rect2(o.x + s * 0.42, o.y, maxf(2.4, s * 0.16), maxf(3.5, s * 0.20)), hi)
-			board.draw_circle(Vector2(o.x + s * 0.50, o.y + s * 0.04), maxf(1.5, s * 0.07), stone_cap)
+		var rh := maxf(3.6, s * 0.19)
+		board.draw_rect(Rect2(o.x, o.y, s, rh), stone_wall)
+		board.draw_rect(Rect2(o.x + 2.0, o.y + rh * 0.36, s - 4.0, rh * 0.40), stone_panel)
+		board.draw_rect(Rect2(o.x, o.y, s, maxf(1.4, rh * 0.30)), stone_top)
+		board.draw_line(Vector2(o.x, o.y + rh), Vector2(o.x + s, o.y + rh), stone_dark, 1.2)
+		if posmod(p.x, 2) == 0:
+			var pw := maxf(3.6, s * 0.21)
+			var pr := Rect2(o.x + s * 0.40, o.y - s * 0.05, pw, rh + s * 0.10)
+			board.draw_rect(pr, stone_top)
+			board.draw_rect(pr, stone_dark, false, 1.0)
+			if not masking:
+				board.draw_circle(pr.get_center(), maxf(1.2, pw * 0.26), Color("dedbd0"))
 	if south_water:
 		if not masking:
-			board.draw_rect(Rect2(o.x, o.y + s, s, maxf(3.0, s * 0.18)), Color(0.03, 0.06, 0.08, 0.34))
-		board.draw_rect(Rect2(o.x, o.y + s * 0.85, s, maxf(2.0, s * 0.11)), col)
-		board.draw_rect(Rect2(o.x, o.y + s * 0.85, s, maxf(1.0, s * 0.04)), hi)
-		if posmod(p.x, 3) == 0:
-			board.draw_rect(Rect2(o.x + s * 0.42, o.y + s * 0.78, maxf(2.4, s * 0.16), maxf(3.5, s * 0.20)), hi)
-			board.draw_circle(Vector2(o.x + s * 0.50, o.y + s * 0.82), maxf(1.5, s * 0.07), stone_cap)
+			# Visible Coursed Stone Spandrel Wall + Arched Voussoir Stone Ring + Vaulted Dark Arch Cavity (Image 1!)
+			var spandrel_h := maxf(5.5, s * (0.28 + (1.0 - crown) * 0.14))
+			board.draw_rect(Rect2(o.x, o.y + s, s, spandrel_h), Color("747673"))
+			# Horizontal masonry course lines on bridge side facade
+			board.draw_line(Vector2(o.x, o.y + s + spandrel_h * 0.5), Vector2(o.x + s, o.y + s + spandrel_h * 0.5), Color("4c4e4c"), 1.0)
+			board.draw_line(Vector2(o.x + s * 0.5, o.y + s), Vector2(o.x + s * 0.5, o.y + s + spandrel_h), Color("4c4e4c"), 1.0)
+			# Curved vaulted arch opening (highest & deepest under the center arch crown!)
+			var arch_h := s * (0.14 + crown * 0.36)
+			var arch_top := o.y + s + spandrel_h * (1.0 - crown * 0.65)
+			board.draw_rect(Rect2(o.x, arch_top, s, arch_h), Color(0.03, 0.06, 0.08, 0.52 + 0.24 * crown))
+			if crown > 0.20:
+				# Carved pale-stone arch voussoir trim along the curved arch lip
+				board.draw_line(Vector2(o.x, arch_top), Vector2(o.x + s, arch_top), Color("b8b5aa"), maxf(1.6, s * 0.07))
+			# Warm golden lantern reflection shimmering along arch under-lip at dusk/night (Image 3!)
+			if lit_strength > 0.10:
+				board.draw_rect(Rect2(o.x, arch_top + arch_h * 0.15, s, arch_h * 0.45),
+					Color(1.0, 0.76, 0.34, 0.22 * lit_strength * (0.4 + 0.6 * crown)))
+		var rh := maxf(3.6, s * 0.19)
+		board.draw_rect(Rect2(o.x, o.y + s - rh, s, rh), stone_wall)
+		board.draw_rect(Rect2(o.x + 2.0, o.y + s - rh * 0.72, s - 4.0, rh * 0.40), stone_panel)
+		board.draw_rect(Rect2(o.x, o.y + s - rh, s, maxf(1.4, rh * 0.30)), stone_top)
+		board.draw_line(Vector2(o.x, o.y + s), Vector2(o.x + s, o.y + s), stone_dark, 1.3)
+		if posmod(p.x, 2) == 0:
+			var pw := maxf(3.6, s * 0.21)
+			var pr := Rect2(o.x + s * 0.40, o.y + s - rh - s * 0.05, pw, rh + s * 0.10)
+			board.draw_rect(pr, stone_top)
+			board.draw_rect(pr, stone_dark, false, 1.0)
+			if not masking:
+				board.draw_circle(pr.get_center(), maxf(1.2, pw * 0.26), Color("dedbd0"))
+	if west_water:
+		var rw := maxf(3.6, s * 0.19)
+		board.draw_rect(Rect2(o.x, o.y, rw, s), stone_wall)
+		board.draw_rect(Rect2(o.x + rw * 0.34, o.y + 2.0, rw * 0.40, s - 4.0), stone_panel)
+		board.draw_rect(Rect2(o.x, o.y, maxf(1.4, rw * 0.30), s), stone_top)
+		board.draw_line(Vector2(o.x + rw, o.y), Vector2(o.x + rw, o.y + s), stone_dark, 1.2)
+		if posmod(p.y, 2) == 0:
+			var ph := maxf(3.6, s * 0.21)
+			var pr := Rect2(o.x - s * 0.05, o.y + s * 0.40, rw + s * 0.10, ph)
+			board.draw_rect(pr, stone_top)
+			board.draw_rect(pr, stone_dark, false, 1.0)
+	if east_water:
+		if not masking:
+			var spandrel_w := maxf(4.5, s * (0.22 + (1.0 - crown) * 0.12))
+			board.draw_rect(Rect2(o.x + s, o.y, spandrel_w, s), Color("747673"))
+			var arch_w := s * (0.14 + crown * 0.30)
+			var arch_left := o.x + s + spandrel_w * (1.0 - crown * 0.65)
+			board.draw_rect(Rect2(arch_left, o.y, arch_w, s), Color(0.03, 0.06, 0.08, 0.46 + 0.22 * crown))
+			if crown > 0.20:
+				board.draw_line(Vector2(arch_left, o.y), Vector2(arch_left, o.y + s), Color("b8b5aa"), maxf(1.5, s * 0.065))
+			if lit_strength > 0.10:
+				board.draw_rect(Rect2(arch_left + arch_w * 0.15, o.y, arch_w * 0.45, s),
+					Color(1.0, 0.76, 0.34, 0.20 * lit_strength * (0.4 + 0.6 * crown)))
+		var rw := maxf(3.6, s * 0.19)
+		board.draw_rect(Rect2(o.x + s - rw, o.y, rw, s), stone_wall)
+		board.draw_rect(Rect2(o.x + s - rw * 0.74, o.y + 2.0, rw * 0.40, s - 4.0), stone_panel)
+		board.draw_rect(Rect2(o.x + s - rw, o.y, maxf(1.4, rw * 0.30), s), stone_top)
+		board.draw_line(Vector2(o.x + s, o.y), Vector2(o.x + s, o.y + s), stone_dark, 1.3)
+		if posmod(p.y, 2) == 0:
+			var ph := maxf(3.6, s * 0.21)
+			var pr := Rect2(o.x + s - rw - s * 0.05, o.y + s * 0.40, rw + s * 0.10, ph)
+			board.draw_rect(pr, stone_top)
+			board.draw_rect(pr, stone_dark, false, 1.0)
 	if emitters.get(p) == &"bridge_lamp":
 		_draw_lantern_post(board, p, lit_strength, true)
 
@@ -202,12 +370,12 @@ static func detail(board: Control, world: RefCounted, cells: Dictionary, p: Vect
 		var near_bank := _count_neighbors(cells, p, ["s", ".", "g", "Y", ":"]) > 0
 		var near_bridge := _count_neighbors(cells, p, ["="]) > 0
 		if near_bank and not near_bridge:
-			var flora := roll % 29
+			var flora := roll % 15
 			if flora == 0:
 				Pack.draw(board, "f_cattails", p, roll, -1, 0, Color.WHITE, Vector2.ZERO, false, season)
-			elif flora == 1 or flora == 2:
+			elif flora >= 1 and flora <= 3:
 				Pack.draw(board, "f_lilypad", p, roll, -1, 0, Color.WHITE, Vector2.ZERO, false, season)
-			elif flora == 3 and season in ["spring", "summer"]:
+			elif flora == 4 and season in ["spring", "summer"]:
 				Pack.draw(board, "f_lotus", p, roll, -1, 0, Color.WHITE, Vector2.ZERO, false, season)
 	elif ChineseFurn.draw_fixture(board, world, cells, p, tile, roll, lit_strength):
 		pass
@@ -232,23 +400,16 @@ static func detail(board: Control, world: RefCounted, cells: Dictionary, p: Vect
 				Pack.draw(board, item, p, roll, -1, 0, Color.WHITE, Vector2(0, -3))
 
 
+const YANGZHOU_NPCS := [
+	&"innkeeper", &"blacksmith", &"herbalist", &"martial_master",
+	&"weapon_coach", &"scholar", &"pawnbroker", &"boatman", &"storyteller",
+]
+
+
 static func site_landmark(board: Control, p: Vector2i, site: StringName, lit_strength := 0.0) -> void:
 	var o := _cell_origin(board, p)
 	var s := float(board.cell)
-	var center := o + Vector2.ONE * (s * 0.5)
-	if site == &"altar":
-		Pack.draw(board, "t_stone_masonry_floor", p, 0, 15, 0, Color("cfd9d2"))
-		var aura := 0.45 + 0.45 * lit_strength
-		board.draw_circle(center, s * 0.62, Color(0.28, 0.88, 0.72, 0.14 + 0.14 * lit_strength))
-		board.draw_arc(center, s * 0.56, 0.0, TAU, 32, Color(0.42, 0.94, 0.78, aura), maxf(1.4, s * 0.055), true)
-		board.draw_arc(center, s * 0.39, 0.0, TAU, 24, Color(0.76, 0.99, 0.90, aura * 0.85), maxf(1.0, s * 0.035), true)
-		for dir: Vector2 in [Vector2.UP, Vector2.DOWN, Vector2.LEFT, Vector2.RIGHT]:
-			board.draw_circle(center + dir * (s * 0.56), maxf(1.6, s * 0.065), Color(0.78, 1.0, 0.92, aura))
-		Pack.draw(board, "t_pillar", p, 0, -1, 0, Color("d4ece4"))
-	elif site == &"herb":
-		board.draw_circle(center + Vector2(0, s * 0.08), s * 0.28, Color(0.42, 0.94, 0.74, 0.14 + 0.18 * lit_strength))
-		Pack.draw(board, "mayapple", p)
-	elif site == &"merchant" or site == &"ferryman":
+	if site in YANGZHOU_NPCS:
 		board.draw_circle(o + Vector2(s * 0.82, s * 0.24), maxf(2.0, s * 0.11),
 			Color("c96a42").lerp(Color("ffd67a"), 0.35 + 0.65 * lit_strength))
 		character(board, p, site)
@@ -260,15 +421,48 @@ static func character(board: Control, p: Vector2i, role: StringName, target: Con
 	var tint: Color = dest.call("surface_id", p) if masking else Color.WHITE
 	var outfit := "overlay_worn_cloak"
 	var outfit_tint := tint if masking else Color("c9e3d7")
+	var hat := ""
+	var hat_tint := tint if masking else Color.WHITE
 	match role:
-		&"merchant":
+		&"innkeeper":
 			outfit = "overlay_worn_robe"
-			outfit_tint = tint if masking else Color("e9d29c")
-		&"ferryman":
-			outfit = "overlay_worn_straw_hat"
-			outfit_tint = tint if masking else Color("e4d4b2")
+			outfit_tint = tint if masking else Color("e09662")
+		&"blacksmith":
+			outfit = "overlay_worn_coat_winter"
+			outfit_tint = tint if masking else Color("6f5648")
+			hat = "overlay_worn_bandana"
+			hat_tint = tint if masking else Color("b44838")
+		&"herbalist":
+			outfit = "overlay_worn_robe"
+			outfit_tint = tint if masking else Color("a8cfb8")
+		&"martial_master":
+			outfit = "overlay_worn_cloak"
+			outfit_tint = tint if masking else Color("c85042")
+			hat = "overlay_worn_bandana"
+			hat_tint = tint if masking else Color("e6c878")
+		&"weapon_coach":
+			outfit = "overlay_worn_coat_winter"
+			outfit_tint = tint if masking else Color("546273")
+			hat = "overlay_worn_bandana"
+			hat_tint = tint if masking else Color("c9483b")
+		&"scholar":
+			outfit = "overlay_worn_robe"
+			outfit_tint = tint if masking else Color("7c98b3")
+		&"pawnbroker":
+			outfit = "overlay_worn_robe"
+			outfit_tint = tint if masking else Color("8698bd")
+		&"boatman":
+			outfit = "overlay_worn_cloak"
+			outfit_tint = tint if masking else Color("88a6b4")
+			hat = "overlay_worn_straw_hat"
+			hat_tint = tint if masking else Color("e4d4b2")
+		&"storyteller":
+			outfit = "overlay_worn_robe"
+			outfit_tint = tint if masking else Color("e4d29e")
 	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
 	var origin := Vector2((p - board.view_origin) * board.cell) + cam_offset
 	for id: String in ["player_male", "overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
 		Pack.draw_at(dest, id, origin, float(board.cell), 0, -1, 0, tint)
 	Pack.draw_at(dest, outfit, origin, float(board.cell), 0, -1, 0, outfit_tint)
+	if not hat.is_empty():
+		Pack.draw_at(dest, hat, origin, float(board.cell), 0, -1, 0, hat_tint)

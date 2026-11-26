@@ -8,8 +8,8 @@ extends RefCounted
 # - Smoothly fades out based on continuous distance to the player (6.4 -> 1.6 tiles)
 
 const Lighting = preload("res://scripts/lighting.gd")
-const ROOF_FADE_NEAR := 1.6
-const ROOF_FADE_FAR := 6.4
+const ROOF_FADE_NEAR := 1.4
+const ROOF_FADE_FAR := 4.8
 
 var enabled := true
 var buildings: Dictionary = {} # anchor: Vector2i -> Array[Vector2i]
@@ -18,6 +18,9 @@ var building_bounds: Dictionary = {} # anchor: Vector2i -> Rect2i (largest inscr
 var building_bbox: Dictionary = {} # anchor: Vector2i -> Rect2i (full bounding box for O(1) distance cull)
 var building_stories: Dictionary = {} # anchor: Vector2i -> int (1, 2, or 3)
 var building_style: Dictionary = {} # anchor: Vector2i -> String ("H", "N", "B")
+var building_variant: Dictionary = {} # anchor: Vector2i -> int (0=黛青小青瓦, 1=古窑青灰瓦, 2=琥珀暖陶瓦, 3=翠琉璃官瓦)
+var building_vertical_ridge: Dictionary = {} # anchor: Vector2i -> bool (true = N-S ridge, false = E-W ridge)
+var tile_to_anchor: Dictionary = {} # Vector2i -> anchor: Vector2i (O(1) lookup for plaques/nameplates)
 var building_alpha: Dictionary = {} # anchor: Vector2i -> float
 var building_target: Dictionary = {} # anchor: Vector2i -> float
 var revealed_interior: Dictionary = {} # Vector2i -> bool
@@ -78,6 +81,14 @@ static func _hash(p: Vector2i, seed: int) -> int:
 	return n ^ (n >> 15)
 
 
+static func _style_group(sf: String) -> String:
+	# Partition contiguous wall-to-wall Northern Song row-houses by style (H / B / N)
+	# so neighboring houses sharing a wall get separate pitched roofs & stepped 马头墙!
+	if sf == "H" or sf == "B" or sf == "N":
+		return sf
+	return ""
+
+
 func index_buildings(cells: Dictionary, area: Rect2i) -> void:
 	buildings.clear()
 	building_roof_tiles.clear()
@@ -85,6 +96,9 @@ func index_buildings(cells: Dictionary, area: Rect2i) -> void:
 	building_bbox.clear()
 	building_stories.clear()
 	building_style.clear()
+	building_variant.clear()
+	building_vertical_ridge.clear()
+	tile_to_anchor.clear()
 	_revealed_anchors.clear()
 	_index_version += 1
 	_cache_dirty = true
@@ -94,6 +108,7 @@ func index_buildings(cells: Dictionary, area: Rect2i) -> void:
 			var start := Vector2i(x, y)
 			if visited.has(start) or not cells.has(start) or not Lighting.enclosed(cells[start]):
 				continue
+			var seed_grp := _style_group(String(cells[start][1]))
 			var queue: Array[Vector2i] = [start]
 			var members: Array[Vector2i] = []
 			var anchor := start
@@ -121,8 +136,12 @@ func index_buildings(cells: Dictionary, area: Rect2i) -> void:
 					if visited.has(nxt) or not cells.has(nxt):
 						continue
 					if Lighting.enclosed(cells[nxt]):
-						visited[nxt] = true
-						queue.append(nxt)
+						var ng := _style_group(String(cells[nxt][1]))
+						if seed_grp.is_empty() or ng.is_empty() or ng == seed_grp:
+							if seed_grp.is_empty() and not ng.is_empty():
+								seed_grp = ng
+							visited[nxt] = true
+							queue.append(nxt)
 			var roof_set := {}
 			var min_p := Vector2i(999999, 999999)
 			var max_p := Vector2i(-999999, -999999)
@@ -138,33 +157,65 @@ func index_buildings(cells: Dictionary, area: Rect2i) -> void:
 				max_p.y = maxi(max_p.y, p.y)
 			if roof_set.is_empty():
 				continue
-			# Precompute north_d, south_d, and edge bitmask (1=N, 2=S, 4=W, 8=E) ONCE per tile!
+			var full_box := Rect2i(min_p, max_p - min_p + Vector2i.ONE)
+			var ah := _hash(anchor, 0x71b3)
+			var vertical_ridge := max_stories == 1 and (full_box.size.y > full_box.size.x or (full_box.size.y == full_box.size.x and (ah % 3 == 0)))
+			# Precompute slope distances (north/south for E-W ridge, west/east for N-S ridge) & edge bitmask!
 			var roof_meta := {}
 			for p: Vector2i in roof_set:
-				var nd := 0
-				while nd < 12 and roof_set.has(p + Vector2i(0, -(nd + 1))):
-					nd += 1
-				var sd := 0
-				while sd < 12 and roof_set.has(p + Vector2i(0, sd + 1)):
-					sd += 1
+				var d1 := 0
+				var d2 := 0
+				if vertical_ridge:
+					while d1 < 12 and roof_set.has(p + Vector2i(-(d1 + 1), 0)):
+						d1 += 1
+					while d2 < 12 and roof_set.has(p + Vector2i(d2 + 1, 0)):
+						d2 += 1
+				else:
+					while d1 < 12 and roof_set.has(p + Vector2i(0, -(d1 + 1))):
+						d1 += 1
+					while d2 < 12 and roof_set.has(p + Vector2i(0, d2 + 1)):
+						d2 += 1
 				var em := 0
 				if not roof_set.has(p + Vector2i.UP): em |= 1
 				if not roof_set.has(p + Vector2i.DOWN): em |= 2
 				if not roof_set.has(p + Vector2i.LEFT): em |= 4
 				if not roof_set.has(p + Vector2i.RIGHT): em |= 8
-				roof_meta[p] = Vector3i(nd, sd, em)
+				roof_meta[p] = Vector3i(d1, d2, em)
 			var dom_style := "H"
 			if int(style_counts["N"]) > int(style_counts["H"]) and int(style_counts["N"]) >= int(style_counts["B"]):
 				dom_style = "N"
 			elif int(style_counts["B"]) > int(style_counts["H"]):
 				dom_style = "B"
-			var full_box := Rect2i(min_p, max_p - min_p + Vector2i.ONE)
 			buildings[anchor] = members
 			building_roof_tiles[anchor] = roof_meta
 			building_bbox[anchor] = full_box
 			building_bounds[anchor] = _largest_inscribed_rect(roof_set, full_box)
 			building_stories[anchor] = max_stories
 			building_style[anchor] = dom_style
+			building_vertical_ridge[anchor] = vertical_ridge
+			var roof_var := 0
+			if dom_style == "N":
+				roof_var = 3 if max_stories >= 3 and (ah % 2 == 0) else 2 # 琥珀暖陶瓦 / 翠琉璃官瓦
+			elif dom_style == "B":
+				roof_var = 1 # 古窑青灰瓦
+			else:
+				roof_var = 0 if (ah % 3 != 0) else 1 # 黛青小青瓦 + 古窑青灰瓦交错
+			building_variant[anchor] = roof_var
+			for mp: Vector2i in members:
+				tile_to_anchor[mp] = anchor
+
+
+func has_roof_at(p: Vector2i) -> bool:
+	return tile_to_anchor.has(p)
+
+
+func alpha_at(p: Vector2i) -> float:
+	if not enabled:
+		return 0.0
+	if not tile_to_anchor.has(p):
+		return 1.0
+	var anchor: Vector2i = tile_to_anchor[p]
+	return float(building_alpha.get(anchor, 1.0))
 
 
 static func _largest_inscribed_rect(roof_set: Dictionary, bbox: Rect2i) -> Rect2i:
@@ -309,13 +360,15 @@ func _draw_building(canvas: Control, board: Control, anchor: Vector2i, visible: 
 	var roof_meta: Dictionary = building_roof_tiles[anchor]
 	var stories: int = int(building_stories.get(anchor, 1))
 	var style: String = String(building_style.get(anchor, "H"))
+	var roof_var: int = int(building_variant.get(anchor, 0))
+	var vertical_ridge: bool = bool(building_vertical_ridge.get(anchor, false))
 
 	for p: Vector2i in roof_meta:
 		if visible.has_point(p):
-			_draw_base_tile(canvas, board, roof_meta[p], p, seed, alpha, light_tint, wetness, snow_cover, stories)
+			_draw_base_tile(canvas, board, roof_meta[p], p, seed, alpha, light_tint, wetness, snow_cover, stories, roof_var, night_warmth, vertical_ridge)
 
 	if stories == 1:
-		_draw_corner_finials(canvas, board, b_rect, alpha, light_tint, false)
+		_draw_corner_finials(canvas, board, b_rect, alpha, light_tint, false, vertical_ridge)
 		return
 
 	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
@@ -335,7 +388,7 @@ func _draw_building(canvas: Control, board: Control, anchor: Vector2i, visible: 
 		base_px.size.x - t2_inset_x * 2.0,
 		base_px.size.y - t2_inset_top - t2_inset_bot
 	)
-	_draw_upper_story_tier(canvas, t2_rect, s, 2, stories == 2, style, alpha, light_tint, wetness, snow_cover, night_warmth)
+	_draw_upper_story_tier(canvas, t2_rect, s, 2, stories == 2, style, alpha, light_tint, wetness, snow_cover, night_warmth, roof_var)
 
 	if stories >= 3 and t2_rect.size.x >= s * 5.0 and t2_rect.size.y >= s * 4.2:
 		var t3_inset_x := minf(s * 1.05, t2_rect.size.x * 0.16)
@@ -348,7 +401,7 @@ func _draw_building(canvas: Control, board: Control, anchor: Vector2i, visible: 
 			t2_rect.size.y - t3_inset_top - t3_inset_bot
 		)
 		if t3_rect.size.x >= s * 2.6 and t3_rect.size.y >= s * 2.2:
-			_draw_upper_story_tier(canvas, t3_rect, s, 3, true, style, alpha, light_tint, wetness, snow_cover, night_warmth)
+			_draw_upper_story_tier(canvas, t3_rect, s, 3, true, style, alpha, light_tint, wetness, snow_cover, night_warmth, roof_var)
 
 
 func draw_all(canvas: Control, board: Control, _cells: Dictionary, visible: Rect2i, seed: int,
@@ -409,7 +462,8 @@ func draw_all(canvas: Control, board: Control, _cells: Dictionary, visible: Rect
 
 
 static func _draw_upper_story_tier(canvas: Control, r: Rect2, s: float, story_num: int, is_top: bool,
-		style: String, alpha: float, light_tint: Color, wetness: float, snow_cover: float, night_warmth: float) -> void:
+		style: String, alpha: float, light_tint: Color, wetness: float, snow_cover: float, night_warmth: float,
+		roof_var := 0) -> void:
 	# Drop shadow cast onto the lower roof eaves beneath this upper story!
 	var sh_col := Color(0.03, 0.04, 0.06, 0.44 * alpha)
 	canvas.draw_rect(Rect2(r.position.x + 3.0, r.end.y, r.size.x + 2.0, maxf(5.0, s * 0.26)), sh_col)
@@ -466,9 +520,9 @@ static func _draw_upper_story_tier(canvas: Control, r: Rect2, s: float, story_nu
 	var eave_pad := maxf(3.0, s * 0.16)
 	var roof_draw := Rect2(roof_r.position.x - eave_pad, roof_r.position.y - eave_pad * 0.4,
 		roof_r.size.x + eave_pad * 2.0, roof_r.size.y + eave_pad * 0.7)
-	var dark_shift := 0.04 if story_num == 2 else 0.08
-	var north_base := Color(0.20 - dark_shift * 0.5, 0.26 - dark_shift * 0.4, 0.31 - dark_shift * 0.2)
-	var south_base := Color(0.27 - dark_shift * 0.4, 0.34 - dark_shift * 0.3, 0.40 - dark_shift * 0.2)
+	var dark_shift := 0.03 if story_num == 2 else 0.06
+	var north_base := _roof_palette(roof_var, true, -dark_shift * 0.5)
+	var south_base := _roof_palette(roof_var, false, -dark_shift * 0.4)
 	if wetness > 0.01:
 		north_base = north_base.darkened(0.16 * wetness)
 		south_base = south_base.darkened(0.16 * wetness)
@@ -553,7 +607,7 @@ static func _draw_upper_story_tier(canvas: Control, r: Rect2, s: float, story_nu
 
 
 static func _draw_corner_finials(canvas: Control, board: Control, b_rect: Rect2i,
-		alpha: float, light_tint: Color, with_gold: bool) -> void:
+		alpha: float, light_tint: Color, with_gold: bool, vertical_ridge := false) -> void:
 	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
 	var s := float(board.cell)
 	var px := Rect2(Vector2((b_rect.position - board.view_origin) * board.cell) + cam_offset,
@@ -572,63 +626,107 @@ static func _draw_corner_finials(canvas: Control, board: Control, b_rect: Rect2i
 		var tp: Vector2 = bp + corner[1]
 		canvas.draw_line(bp, tp, ridge_col, maxf(2.0, s * 0.08))
 		canvas.draw_circle(tp, maxf(1.8, s * 0.07), ridge_hi)
-	# Ridge chiwen ends at mid-height of 1-story gable roof
-	var ry := px.position.y + px.size.y * 0.46
-	canvas.draw_circle(Vector2(px.position.x + s * 0.14, ry), maxf(2.4, s * 0.10), ridge_hi)
-	canvas.draw_circle(Vector2(px.end.x - s * 0.14, ry), maxf(2.4, s * 0.10), ridge_hi)
-	if with_gold:
-		canvas.draw_circle(Vector2(px.position.x + px.size.x * 0.5, ry - s * 0.06), maxf(2.6, s * 0.11),
-			Color(0.88 * light_tint.r, 0.74 * light_tint.g, 0.40 * light_tint.b, alpha))
+	# Ridge chiwen ends at gable ends of 1-story roof
+	if vertical_ridge:
+		var rx := px.position.x + px.size.x * 0.46
+		canvas.draw_circle(Vector2(rx, px.position.y + s * 0.14), maxf(2.4, s * 0.10), ridge_hi)
+		canvas.draw_circle(Vector2(rx, px.end.y - s * 0.14), maxf(2.4, s * 0.10), ridge_hi)
+	else:
+		var ry := px.position.y + px.size.y * 0.46
+		canvas.draw_circle(Vector2(px.position.x + s * 0.14, ry), maxf(2.4, s * 0.10), ridge_hi)
+		canvas.draw_circle(Vector2(px.end.x - s * 0.14, ry), maxf(2.4, s * 0.10), ridge_hi)
+		if with_gold:
+			canvas.draw_circle(Vector2(px.position.x + px.size.x * 0.5, ry - s * 0.06), maxf(2.6, s * 0.11),
+				Color(0.88 * light_tint.r, 0.74 * light_tint.g, 0.40 * light_tint.b, alpha))
+
+
+static func _roof_palette(roof_var: int, north_slope: bool, jitter: float) -> Color:
+	# 4 distinct realistic historic Chinese roof materials (never identical flat tiles!)
+	match roof_var:
+		1: # 古窑青灰瓦 (Weathered Ash-Grey Ceramic Tiles)
+			return Color(0.26 + jitter, 0.27 + jitter, 0.28 + jitter) if north_slope \
+				else Color(0.35 + jitter, 0.36 + jitter, 0.36 + jitter)
+		2: # 琥珀暖陶瓦 (Warm Dark-Chestnut Timber Tavern & Inn Tiles)
+			return Color(0.28 + jitter, 0.21 + jitter, 0.18 + jitter) if north_slope \
+				else Color(0.38 + jitter, 0.29 + jitter, 0.24 + jitter)
+		3: # 翠琉璃官瓦 (Deep Muted Jade Glazed Pavilion Tiles)
+			return Color(0.16 + jitter, 0.28 + jitter, 0.26 + jitter) if north_slope \
+				else Color(0.22 + jitter, 0.38 + jitter, 0.34 + jitter)
+		_: # 黛青小青瓦 (Classic Ink-Slate Jiangnan Clay Tiles — Photo 1!)
+			return Color(0.19 + jitter, 0.23 + jitter, 0.27 + jitter) if north_slope \
+				else Color(0.26 + jitter, 0.31 + jitter, 0.36 + jitter)
 
 
 static func _draw_base_tile(canvas: Control, board: Control, meta: Vector3i, p: Vector2i,
-		seed: int, alpha: float, light_tint: Color, wetness: float, snow_cover: float, stories: int) -> void:
+		seed: int, alpha: float, light_tint: Color, wetness: float, snow_cover: float, stories: int,
+		roof_var := 0, night_warmth := 0.0, vertical_ridge := false) -> void:
 	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
 	var o := Vector2((p - board.view_origin) * board.cell) + cam_offset
 	var s := float(board.cell)
-	var north_d := meta.x
-	var south_d := meta.y
+	var d1 := meta.x # north_d (E-W ridge) or west_d (N-S ridge)
+	var d2 := meta.y # south_d (E-W ridge) or east_d (N-S ridge)
 	var edge_mask := meta.z
-	var rel := north_d - south_d
-	var is_ridge := stories == 1 and absi(rel) <= 1 and (north_d + south_d) >= 2
-	var north_slope := rel < -1
+	var rel := d1 - d2
+	var is_ridge := stories == 1 and absi(rel) <= 1 and (d1 + d2) >= 2
+	var shaded_slope := rel < -1
 	var roll := _hash(p, seed ^ 0x29c71)
-	var jitter := (float(roll % 9) - 4.0) * 0.008
+	var jitter := (float(roll % 9) - 4.0) * 0.009
 
-	var base := Color(0.21 + jitter, 0.27 + jitter, 0.31 + jitter) if north_slope else Color(0.28 + jitter, 0.35 + jitter, 0.40 + jitter)
+	var base := _roof_palette(roof_var, shaded_slope, jitter)
 	if stories >= 2:
-		base = base.darkened(0.06)
+		base = base.darkened(0.05)
 	if wetness > 0.01:
 		base = base.darkened(0.18 * wetness)
 	var lit_base := Color(base.r * light_tint.r, base.g * light_tint.g, base.b * light_tint.b, alpha)
 	if wetness > 0.05:
-		var sheen := (0.06 if north_slope else 0.11) * wetness * light_tint.b
+		var sheen := (0.06 if shaded_slope else 0.11) * wetness * light_tint.b
 		lit_base = Color(minf(lit_base.r + sheen * 0.7, 1.0), minf(lit_base.g + sheen * 0.85, 1.0), minf(lit_base.b + sheen, 1.0), alpha)
 
-	var tile_dark := Color(lit_base.r * 0.62, lit_base.g * 0.64, lit_base.b * 0.68, alpha)
-	var tile_hi := Color(minf(lit_base.r * 1.24, 1.0), minf(lit_base.g * 1.24, 1.0), minf(lit_base.b * 1.26, 1.0), alpha * 0.72)
-	var ridge_col := Color(0.46 * light_tint.r, 0.52 * light_tint.g, 0.56 * light_tint.b, alpha)
-	var ridge_hi := Color(minf(0.68 * light_tint.r, 1.0), minf(0.74 * light_tint.g, 1.0), minf(0.78 * light_tint.b, 1.0), alpha)
+	var tile_dark := Color(lit_base.r * 0.58, lit_base.g * 0.60, lit_base.b * 0.64, alpha)
+	var tile_hi := Color(minf(lit_base.r * 1.28, 1.0), minf(lit_base.g * 1.28, 1.0), minf(lit_base.b * 1.30, 1.0), alpha * 0.76)
+	var ridge_col := Color(0.46 * light_tint.r, 0.50 * light_tint.g, 0.54 * light_tint.b, alpha)
+	var ridge_hi := Color(minf(0.72 * light_tint.r, 1.0), minf(0.75 * light_tint.g, 1.0), minf(0.78 * light_tint.b, 1.0), alpha)
 
 	canvas.draw_rect(Rect2(o, Vector2(s, s)), lit_base)
 
-	var cols := 2 if s <= 24.0 else maxi(3, int(round(s / 8.5)))
+	var cols := 2 if s <= 24.0 else maxi(3, int(round(s / 8.0)))
 	var rows := 2 if s <= 24.0 else 4
 	var cw := s / float(cols)
 	var rh := s / float(rows)
-	for r in range(rows):
-		var ry := o.y + float(r) * rh
-		var row_shade := 0.92 + 0.14 * (float(r) / float(rows))
-		if north_slope:
-			row_shade = 1.06 - 0.14 * (float(r) / float(rows))
-		var row_col := Color(lit_base.r * row_shade, lit_base.g * row_shade, lit_base.b * row_shade, alpha)
-		canvas.draw_rect(Rect2(o.x, ry, s, rh * 0.72), row_col)
-		canvas.draw_line(Vector2(o.x, ry + rh - 1.0), Vector2(o.x + s, ry + rh - 1.0), tile_dark, 1.0)
-	for c in range(cols):
-		var tx := o.x + float(c) * cw
-		canvas.draw_line(Vector2(tx, o.y), Vector2(tx, o.y + s), tile_dark, 1.0)
-		if cw >= 7.0:
-			canvas.draw_line(Vector2(tx + cw * 0.45, o.y + 1.0), Vector2(tx + cw * 0.45, o.y + s - 1.0), tile_hi, 1.0)
+	if vertical_ridge:
+		# N-S ridge: clay barrel tiles slope West & East (vertical courses, horizontal ribs!)
+		for c in range(rows):
+			var tx := o.x + float(c) * rh
+			var col_shade := 0.90 + 0.16 * (float(c) / float(rows))
+			if shaded_slope:
+				col_shade = 1.08 - 0.16 * (float(c) / float(rows))
+			var col_c := Color(lit_base.r * col_shade, lit_base.g * col_shade, lit_base.b * col_shade, alpha)
+			canvas.draw_rect(Rect2(tx, o.y, rh * 0.72, s), col_c)
+			canvas.draw_line(Vector2(tx + rh - 1.0, o.y), Vector2(tx + rh - 1.0, o.y + s), tile_dark, 1.0)
+		for r in range(cols):
+			var ty := o.y + float(r) * cw
+			canvas.draw_line(Vector2(o.x, ty), Vector2(o.x + s, ty), tile_dark, 1.0)
+			if cw >= 6.5:
+				canvas.draw_line(Vector2(o.x + 1.0, ty + cw * 0.45), Vector2(o.x + s - 1.0, ty + cw * 0.45), tile_hi, 1.0)
+	else:
+		# E-W ridge: clay barrel tiles slope North & South
+		for r in range(rows):
+			var ry := o.y + float(r) * rh
+			var row_shade := 0.90 + 0.16 * (float(r) / float(rows))
+			if shaded_slope:
+				row_shade = 1.08 - 0.16 * (float(r) / float(rows))
+			var row_col := Color(lit_base.r * row_shade, lit_base.g * row_shade, lit_base.b * row_shade, alpha)
+			canvas.draw_rect(Rect2(o.x, ry, s, rh * 0.72), row_col)
+			canvas.draw_line(Vector2(o.x, ry + rh - 1.0), Vector2(o.x + s, ry + rh - 1.0), tile_dark, 1.0)
+		for c in range(cols):
+			var tx := o.x + float(c) * cw
+			canvas.draw_line(Vector2(tx, o.y), Vector2(tx, o.y + s), tile_dark, 1.0)
+			if cw >= 6.5:
+				canvas.draw_line(Vector2(tx + cw * 0.45, o.y + 1.0), Vector2(tx + cw * 0.45, o.y + s - 1.0), tile_hi, 1.0)
+	# Subtle weathered moss/lichen patina on aged clay roofs
+	if roof_var <= 1 and (roll % 19 == 0) and snow_cover < 0.1:
+		canvas.draw_rect(Rect2(o.x + s * 0.22, o.y + s * 0.30, s * 0.34, s * 0.24),
+			Color(0.24 * light_tint.r, 0.33 * light_tint.g, 0.22 * light_tint.b, 0.26 * alpha))
 
 	if snow_cover > 0.04:
 		var snow_patch := 0.78 + 0.22 * (float(roll % 17) / 16.0)
@@ -637,33 +735,86 @@ static func _draw_base_tile(canvas: Control, board: Control, meta: Vector3i, p: 
 		canvas.draw_rect(Rect2(o.x, o.y, s, s * 0.86), snow_col)
 
 	if is_ridge:
-		var ry := o.y + s * 0.36 if rel <= 0 else o.y + s * 0.12
 		var bh := maxf(3.0, s * 0.22)
-		canvas.draw_rect(Rect2(o.x, ry, s, bh), ridge_col)
-		canvas.draw_rect(Rect2(o.x, ry, s, maxf(1.5, bh * 0.32)), ridge_hi)
-		canvas.draw_rect(Rect2(o.x, ry + bh, s, maxf(2.0, s * 0.08)), Color(0.04, 0.06, 0.08, 0.44 * alpha))
+		if vertical_ridge:
+			var rx := o.x + s * 0.36 if rel <= 0 else o.x + s * 0.12
+			canvas.draw_rect(Rect2(rx, o.y, bh, s), ridge_col)
+			canvas.draw_rect(Rect2(rx, o.y, maxf(1.5, bh * 0.32), s), ridge_hi)
+			canvas.draw_rect(Rect2(rx + bh, o.y, maxf(2.0, s * 0.08), s), Color(0.04, 0.06, 0.08, 0.40 * alpha))
+		else:
+			var ry := o.y + s * 0.36 if rel <= 0 else o.y + s * 0.12
+			canvas.draw_rect(Rect2(o.x, ry, s, bh), ridge_col)
+			canvas.draw_rect(Rect2(o.x, ry, s, maxf(1.5, bh * 0.32)), ridge_hi)
+			canvas.draw_rect(Rect2(o.x, ry + bh, s, maxf(2.0, s * 0.08)), Color(0.04, 0.06, 0.08, 0.44 * alpha))
 
 	var n_edge := (edge_mask & 1) != 0
 	var s_edge := (edge_mask & 2) != 0
 	var w_edge := (edge_mask & 4) != 0
 	var e_edge := (edge_mask & 8) != 0
-	var trim := maxf(2.8, s * 0.13)
-	var gable_light := Color(0.84 * light_tint.r, 0.80 * light_tint.g, 0.72 * light_tint.b, alpha)
-	var gable_dark := Color(0.70 * light_tint.r, 0.67 * light_tint.g, 0.60 * light_tint.b, alpha)
-	if n_edge:
-		canvas.draw_rect(Rect2(o.x, o.y, s, trim), ridge_col)
-		canvas.draw_rect(Rect2(o.x, o.y, s, maxf(1.0, trim * 0.35)), ridge_hi)
-	if s_edge:
-		# Chinese drip-tile eaves trim (滴水瓦当) + eave drop shadow
-		canvas.draw_rect(Rect2(o.x, o.y + s - trim * 0.9, s, trim * 0.9), tile_dark)
-		for c in range(cols):
-			var tx := o.x + (float(c) + 0.5) * cw
-			canvas.draw_circle(Vector2(tx, o.y + s - 1.0), maxf(1.2, cw * 0.22), ridge_hi)
-		canvas.draw_rect(Rect2(o.x, o.y + s, s, maxf(2.8, s * 0.16)), Color(0.03, 0.05, 0.07, 0.46 * alpha))
-	if w_edge:
-		canvas.draw_rect(Rect2(o.x, o.y, trim, s), gable_light)
-		canvas.draw_rect(Rect2(o.x, o.y, maxf(1.2, trim * 0.38), s), ridge_col)
-	if e_edge:
-		canvas.draw_rect(Rect2(o.x + s - trim, o.y, trim, s), gable_dark)
-		canvas.draw_rect(Rect2(o.x + s - maxf(1.2, trim * 0.38), o.y, maxf(1.2, trim * 0.38), s), tile_dark)
-		canvas.draw_rect(Rect2(o.x + s, o.y, maxf(2.0, s * 0.10), s), Color(0.03, 0.05, 0.07, 0.34 * alpha))
+	var trim := maxf(3.2, s * 0.15)
+	var gable_light := Color(0.88 * light_tint.r, 0.85 * light_tint.g, 0.79 * light_tint.b, alpha)
+	var gable_dark := Color(0.72 * light_tint.r, 0.70 * light_tint.g, 0.64 * light_tint.b, alpha)
+
+	if vertical_ridge:
+		# N & S edges = stepped white-plaster horse-head gables (南北马头墙!)
+		if n_edge:
+			canvas.draw_rect(Rect2(o.x, o.y, s, trim * 1.15), gable_light)
+			canvas.draw_rect(Rect2(o.x, o.y, s, maxf(1.5, trim * 0.42)), ridge_col)
+			if (d1 % 2 == 0):
+				canvas.draw_rect(Rect2(o.x, o.y - 1.5, maxf(2.4, s * 0.14), trim * 1.35), tile_dark)
+		if s_edge:
+			canvas.draw_rect(Rect2(o.x, o.y + s - trim * 1.15, s, trim * 1.15), gable_dark)
+			canvas.draw_rect(Rect2(o.x, o.y + s - maxf(1.5, trim * 0.42), s, maxf(1.5, trim * 0.42)), tile_dark)
+			canvas.draw_rect(Rect2(o.x, o.y + s, s, maxf(2.8, s * 0.16)), Color(0.03, 0.05, 0.07, 0.46 * alpha))
+		# W & E edges = drip-tile eaves + hanging crimson lanterns!
+		if w_edge:
+			canvas.draw_rect(Rect2(o.x, o.y, trim * 0.85, s), tile_dark)
+			for r in range(cols):
+				canvas.draw_circle(Vector2(o.x + 1.2, o.y + (float(r) + 0.5) * cw), maxf(1.1, cw * 0.20), ridge_hi)
+		if e_edge:
+			canvas.draw_rect(Rect2(o.x + s - trim * 0.85, o.y, trim * 0.85, s), tile_dark)
+			for r in range(cols):
+				canvas.draw_circle(Vector2(o.x + s - 1.2, o.y + (float(r) + 0.5) * cw), maxf(1.1, cw * 0.20), ridge_hi)
+			canvas.draw_rect(Rect2(o.x + s, o.y, maxf(2.4, s * 0.13), s), Color(0.03, 0.05, 0.07, 0.38 * alpha))
+			if posmod(p.y, 3) == 1 and s >= 20.0:
+				var lx := o.x + s + s * 0.04
+				var ly := o.y + s * 0.50
+				var lr := maxf(2.2, s * 0.11)
+				var l_glow := clampf(night_warmth, 0.0, 1.0)
+				if l_glow > 0.12:
+					canvas.draw_circle(Vector2(lx, ly), lr * 2.8, Color(1.0, 0.42, 0.16, 0.24 * l_glow * alpha))
+				var l_col := Color("b8221a").lerp(Color("ff6e3a"), l_glow * 0.72)
+				l_col = Color(l_col.r * maxf(0.65, light_tint.r), l_col.g * maxf(0.55, light_tint.g), l_col.b * maxf(0.45, light_tint.b), alpha)
+				canvas.draw_rect(Rect2(lx - lr * 0.75, ly - lr * 0.9, lr * 1.5, lr * 1.8), l_col)
+	else:
+		if n_edge:
+			canvas.draw_rect(Rect2(o.x, o.y, s, trim), ridge_col)
+			canvas.draw_rect(Rect2(o.x, o.y, s, maxf(1.0, trim * 0.35)), ridge_hi)
+		if s_edge:
+			canvas.draw_rect(Rect2(o.x, o.y + s - trim * 0.85, s, trim * 0.85), tile_dark)
+			for c in range(cols):
+				var tx := o.x + (float(c) + 0.5) * cw
+				canvas.draw_circle(Vector2(tx, o.y + s - 1.0), maxf(1.2, cw * 0.22), ridge_hi)
+			canvas.draw_rect(Rect2(o.x, o.y + s, s, maxf(2.8, s * 0.16)), Color(0.03, 0.05, 0.07, 0.46 * alpha))
+			if posmod(p.x, 3) == 1 and s >= 20.0:
+				var lx := o.x + s * 0.50
+				var ly := o.y + s + s * 0.04
+				var lr := maxf(2.2, s * 0.11)
+				var l_glow := clampf(night_warmth, 0.0, 1.0)
+				if l_glow > 0.12:
+					canvas.draw_circle(Vector2(lx, ly), lr * 2.8, Color(1.0, 0.42, 0.16, 0.24 * l_glow * alpha))
+				var l_col := Color("b8221a").lerp(Color("ff6e3a"), l_glow * 0.72)
+				l_col = Color(l_col.r * maxf(0.65, light_tint.r), l_col.g * maxf(0.55, light_tint.g), l_col.b * maxf(0.45, light_tint.b), alpha)
+				canvas.draw_rect(Rect2(lx - lr * 0.75, ly - lr * 0.9, lr * 1.5, lr * 1.8), l_col)
+				canvas.draw_line(Vector2(lx, ly + lr * 0.9), Vector2(lx, ly + lr * 1.5), Color("d9a244", alpha), 1.0)
+		if w_edge:
+			canvas.draw_rect(Rect2(o.x, o.y, trim * 1.15, s), gable_light)
+			canvas.draw_rect(Rect2(o.x, o.y, maxf(1.5, trim * 0.42), s), ridge_col)
+			if (d1 % 2 == 0):
+				canvas.draw_rect(Rect2(o.x - 1.5, o.y, trim * 1.35, maxf(2.4, s * 0.14)), tile_dark)
+		if e_edge:
+			canvas.draw_rect(Rect2(o.x + s - trim * 1.15, o.y, trim * 1.15, s), gable_dark)
+			canvas.draw_rect(Rect2(o.x + s - maxf(1.5, trim * 0.42), o.y, maxf(1.5, trim * 0.42), s), tile_dark)
+			if (d1 % 2 == 0):
+				canvas.draw_rect(Rect2(o.x + s - trim * 1.20, o.y, trim * 1.35, maxf(2.4, s * 0.14)), tile_dark)
+			canvas.draw_rect(Rect2(o.x + s, o.y, maxf(2.0, s * 0.10), s), Color(0.03, 0.05, 0.07, 0.34 * alpha))

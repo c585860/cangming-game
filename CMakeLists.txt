@@ -8,11 +8,11 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_
 add_subdirectory("${GODOT_CPP_DIR}" godot-cpp)
 
 add_library(cangling SHARED
-    native/register.cpp native/world.cpp native/city.cpp native/buildings.cpp
-    native/plan.cpp native/terrain.cpp native/streets.cpp native/street_plots.cpp
-    native/navigation.cpp native/interactions.cpp native/props.cpp native/save.cpp
-    native/city_survey.cpp native/building_types.cpp native/items.cpp
-    native/item_catalog.cpp native/character_state.cpp native/furniture_ops.cpp
+    native/register.cpp native/world.cpp native/city.cpp native/yangzhou_city.cpp
+    native/buildings.cpp native/plan.cpp native/terrain.cpp native/streets.cpp
+    native/street_plots.cpp native/navigation.cpp native/interactions.cpp native/props.cpp
+    native/save.cpp native/city_survey.cpp native/building_types.cpp native/items.cpp
+    native/item_catalog.cpp native/character_state.cpp native/skills.cpp native/workstations.cpp native/furniture_ops.cpp
     native/thread_pool.cpp native/memory_manager.cpp native/render_bake.cpp)
 file(WRITE "${CMAKE_BINARY_DIR}/.gdignore" "\n")
 target_compile_features(cangling PRIVATE cxx_std_17)

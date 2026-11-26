@@ -15,8 +15,24 @@ const WeatherFx = preload("res://scripts/weather_fx.gd")
 const FootprintTrail = preload("res://scripts/footprints.gd")
 const CharacterMotion = preload("res://scripts/character_motion.gd")
 const RoofSystem = preload("res://scripts/roof_system.gd")
+const AmbientLife = preload("res://scripts/ambient_life.gd")
 const ZOOMS := [20, 25, 32, 40, 48]
-const SITE_NAMES := {&"merchant": "药商沈青", &"ferryman": "渡夫", &"altar": "吐纳石台", &"herb": "清露草", &"door": "门"}
+const SITE_NAMES := {
+	&"innkeeper": "冼老板 (醉仙楼掌柜)",
+	&"blacksmith": "王铁匠 (王记铁匠铺)",
+	&"herbalist": "平大夫 (回春堂药铺)",
+	&"martial_master": "陈馆主 (扬威武馆)",
+	&"weapon_coach": "周教头 (扬威武馆教头)",
+	&"scholar": "顾夫子 (文昌书院山长)",
+	&"pawnbroker": "唐掌柜 (利源当铺)",
+	&"boatman": "老船夫 (水埠码头)",
+	&"storyteller": "说书先生 (春风茶馆)",
+	&"door": "门",
+}
+const NPC_SITES := [
+	&"innkeeper", &"blacksmith", &"herbalist", &"martial_master",
+	&"weapon_coach", &"scholar", &"pawnbroker", &"boatman", &"storyteller",
+]
 const SEASON_KEYS := {"春": "spring", "夏": "summer", "秋": "autumn", "冬": "winter"}
 const NONE := Vector2i(-1, -1)
 
@@ -44,9 +60,12 @@ var scene_lighting := SceneLighting.new()
 var roof_system := RoofSystem.new()
 var footprints := FootprintTrail.new()
 var motion := CharacterMotion.new()
+var ambient_life := AmbientLife.new()
+var water_life_layer := Control.new()
 var roof_layer := Control.new()
 var player_layer := Control.new()
 var markers := Control.new()
+var sky_life_layer := Control.new()
 var weather_fx := WeatherFx.new()
 
 var lighting_key: Array = []
@@ -70,6 +89,8 @@ var below_cells: Dictionary = {}
 var current_season := "spring"
 var can_read_upper_levels := false
 var visual_time := 0.0
+var work_progress := 0.0 # 0.0..1.0 active 2.5s workstation progress bar
+var work_label := ""
 var _last_player_pos := NONE
 var _camera_initialized := false
 
@@ -109,7 +130,12 @@ func build(model: World, weather_model: Weather = null) -> void:
 	scene_lighting.build(self)
 	scene_lighting.set_world_texture(world_cache.get_texture())
 
-	# Layer order above GPU-lit scene: roofs -> animated player -> footprints/markers -> GPU rain/snow
+	# Layer order above GPU-lit scene: canal boats -> roofs -> animated player -> footprints/markers -> banners/geese/motes -> GPU rain/snow
+	water_life_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(water_life_layer)
+	water_life_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	water_life_layer.draw.connect(_draw_water_life)
+
 	roof_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	roof_layer.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	add_child(roof_layer)
@@ -127,6 +153,11 @@ func build(model: World, weather_model: Weather = null) -> void:
 	markers.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	markers.draw.connect(_draw_markers)
 
+	sky_life_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(sky_life_layer)
+	sky_life_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	sky_life_layer.draw.connect(_draw_sky_life)
+
 	add_child(weather_fx)
 	weather_fx.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_exited.connect(_clear_hover)
@@ -143,10 +174,13 @@ func _process(delta: float) -> void:
 	if world.tick_memory(delta):
 		Tiles.trim_unused_pages()
 
-	# 1. Decoupled FPS weather evolution (dynamic puddles & snow)
+	# 1. Decoupled FPS weather evolution (dynamic puddles & snow) + Jiangnan ambient life (boats/birds/banners/sparks)
 	if weather != null:
 		weather.tick_visual(delta)
 		scene_lighting.update_weather_visual(weather)
+	ambient_life.tick(delta, motion.visual_pos, world)
+	water_life_layer.queue_redraw()
+	sky_life_layer.queue_redraw()
 
 	# 2. Smooth 60 FPS character stride & sub-tile camera tracking
 	var player_moved := motion.tick(delta)
@@ -433,7 +467,7 @@ func _collect_npc_characters(region: Rect2i) -> Array:
 		var sites: Dictionary = world.active_sites_in_rect(region)
 		for p: Vector2i in sites:
 			var site: StringName = sites[p]
-			if site == &"merchant" or site == &"ferryman":
+			if site in NPC_SITES:
 				list.append([Vector2(p), site, false, p, null])
 	return list
 
@@ -599,6 +633,18 @@ func exit_posture() -> void:
 	markers.queue_redraw()
 
 
+func _draw_water_life() -> void:
+	if world == null:
+		return
+	ambient_life.draw_water_layer(water_life_layer, self, scene_lighting.current_daylight, scene_lighting.current_lamp_power)
+
+
+func _draw_sky_life() -> void:
+	if world == null:
+		return
+	ambient_life.draw_sky_layer(sky_life_layer, self, current_season, scene_lighting.current_daylight, scene_lighting.current_lamp_power)
+
+
 func _draw_roofs() -> void:
 	if world == null or world.floor != 0:
 		return
@@ -626,6 +672,27 @@ func _draw_player() -> void:
 		var warm := Color(1.06, 0.80, 0.56) if ls == 1 else (Color(1.08, 0.88, 0.64) if ls == 2 else Color(1.10, 0.95, 0.74))
 		tint = tint.lerp(warm * flicker, 0.58 if ls == 1 else 0.68)
 	motion.draw_character(self, player_layer, &"player", motion.visual_pos, true, world.pos, tint, world.worn_overlays())
+	# Multiplayer Hook: Render synced remote players on the same floor (zero cost in single-player!)
+	if world.remote_player_count() > 0:
+		var remotes: Array = world.remote_players_in_rect(visible.grow(1))
+		var rfont := get_theme_default_font()
+		for rp: Dictionary in remotes:
+			var rpos: Vector2i = rp.get("pos", Vector2i.ZERO)
+			var rname: String = str(rp.get("name", "同道"))
+			var rov: PackedStringArray = rp.get("worn_overlays", PackedStringArray())
+			var rtint := Color(0.88, 0.98, 0.96, 1.0) * scene_lighting.current_roof_light.clamp(Color(0.45, 0.45, 0.50), Color.WHITE)
+			motion.draw_character(self, player_layer, &"remote_player", Vector2(rpos), false, rpos, rtint, rov)
+			var rpx := Vector2((rpos - view_origin) * cell) + cam_px_offset
+			var ring_c := rpx + Vector2(cell * 0.5, cell * 0.86)
+			player_layer.draw_set_transform(ring_c, 0, Vector2(1.0, 0.34))
+			player_layer.draw_arc(Vector2.ZERO, cell * 0.40, 0, TAU, 20, Color("66e0c2", 0.82), 1.4, true)
+			player_layer.draw_set_transform(Vector2.ZERO)
+			if rfont != null and cell >= 20:
+				var tw := rfont.get_string_size(rname, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
+				var tag := Rect2(rpx + Vector2((cell - tw - 8.0) * 0.5, -15.0), Vector2(tw + 8.0, 15.0))
+				player_layer.draw_rect(tag, Color(0.06, 0.14, 0.13, 0.86))
+				player_layer.draw_rect(tag, Color(0.40, 0.85, 0.74, 0.82), false, 1.0)
+				player_layer.draw_string(rfont, tag.position + Vector2(4.0, 12.0), rname, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("b4f5e4"))
 	# Tiny physical flame tip held in character's hand (real wall-occluded light is rendered by GPU atmosphere.gdshader!)
 	if ls > 0 and not motion.is_resting():
 		var f_sway := Vector2(sin(visual_time * 9.5) * 0.7, -absf(cos(visual_time * 15.2)) * 0.8)
@@ -641,6 +708,26 @@ func _draw_player() -> void:
 func _draw_markers() -> void:
 	var visible := Rect2i(view_origin, view_size).intersection(bounds)
 	footprints.draw(markers, self, world, weather, scene_lighting.current_daylight, visible)
+	# Subtle workstation markers when interior/yard is visible (emerald = unlocked, warm amber = learn prereq)
+	if world != null and world.floor == 0 and cell >= 24:
+		var stations: Array = world.workstations_in_rect(visible)
+		for ws: Dictionary in stations:
+			var wp: Vector2i = ws.get("pos", Vector2i.ZERO)
+			if roof_system.has_roof_at(wp) and roof_system.alpha_at(wp) >= 0.55:
+				continue
+			var unlocked: bool = bool(ws.get("unlocked", false))
+			var center := Vector2((wp - view_origin) * cell) + cam_px_offset + Vector2(cell * 0.82, cell * 0.20)
+			var r := maxf(2.6, float(cell) * 0.11)
+			var col := Color("5be2a8", 0.90) if unlocked else Color("e0a94c", 0.72)
+			var poly := PackedVector2Array([
+				center + Vector2(0, -r), center + Vector2(r, 0),
+				center + Vector2(0, r), center + Vector2(-r, 0),
+			])
+			markers.draw_colored_polygon(poly, Color(0.06, 0.09, 0.08, 0.85))
+			markers.draw_colored_polygon(PackedVector2Array([
+				center + Vector2(0, -r * 0.72), center + Vector2(r * 0.72, 0),
+				center + Vector2(0, r * 0.72), center + Vector2(-r * 0.72, 0),
+			]), col)
 	for i in range(route_head, mini(route_head + 150, route.size())):
 		var p: Vector2i = route[i]
 		if visible.has_point(p):
@@ -682,4 +769,20 @@ func _draw_markers() -> void:
 		markers.draw_set_transform(center, 0, Vector2(1.0, 0.34))
 		markers.draw_arc(Vector2.ZERO, cell * 0.40, 0, TAU, 24, ring_col, 1.3, true)
 		markers.draw_set_transform(Vector2.ZERO)
+	# 2.5s Real-Time Workstation Progress Bar right above player!
+	if work_progress > 0.001:
+		var p_top := (motion.visual_pos - Vector2(view_origin)) * float(cell) + cam_px_offset + Vector2(cell * 0.5, -18.0)
+		var bw := 112.0
+		var bh := 10.0
+		var bar_r := Rect2(p_top - Vector2(bw * 0.5, 0.0), Vector2(bw, bh))
+		markers.draw_rect(bar_r.grow(2.0), Color(0.05, 0.08, 0.07, 0.92))
+		markers.draw_rect(bar_r, Color(0.16, 0.20, 0.19, 0.95))
+		markers.draw_rect(Rect2(bar_r.position, Vector2(bw * clampf(work_progress, 0.0, 1.0), bh)), Color("5be2a8"))
+		markers.draw_rect(bar_r.grow(2.0), Color("d9be72"), false, 1.0)
+		var wf := get_theme_default_font()
+		if wf != null:
+			var cap := "%s %d%%" % [work_label, int(round(work_progress * 100.0))]
+			var tw := wf.get_string_size(cap, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
+			markers.draw_rect(Rect2(p_top.x - tw * 0.5 - 4.0, p_top.y - 16.0, tw + 8.0, 14.0), Color(0.05, 0.08, 0.07, 0.88))
+			markers.draw_string(wf, Vector2(p_top.x - tw * 0.5, p_top.y - 5.0), cap, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("f3dca0"))
 	Tiles.finish_frame()

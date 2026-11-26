@@ -56,6 +56,8 @@ static func build_menu(game: Control, contents: VBoxContainer) -> void:
 	], idx)
 
 	idx = _add_section(game, body, "[ 状态与系统 ]", [
+		["江湖技能面板 (武学/武道/练气/仙道)", "skills", "J"],
+		["多人联机接口设置 (Multiplayer)", "multiplayer", "O"],
 		["切换移动姿态 (走/跑/潜/匍)", "move_mode", "\""],
 		["人物属性与着装状态", "character", "@"],
 		["当前委托进展", "missions", "M"],

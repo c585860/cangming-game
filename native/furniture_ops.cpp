@@ -132,13 +132,11 @@ String CanglingWorld::open_at(Vector2i p) {
     if (raw == 'D') {
         doors.insert(k);
         char_state.last_sound = 6;
-        advance_time(1);
         return String::utf8("你打开了门。");
     }
     if (raw == 'w') {
         doors.insert(k);
         char_state.last_sound = 5;
-        advance_time(1);
         return String::utf8("你推开了雕花木窗。");
     }
     if (is_openable_container(raw)) {
@@ -147,7 +145,6 @@ String CanglingWorld::open_at(Vector2i p) {
         }
         open_containers.insert(k);
         char_state.last_sound = 4;
-        advance_time(1);
         const String contents = fixture_contents(p);
         if (contents.is_empty()) {
             return String::utf8("你打开了") + String::utf8(furniture_label(raw)) + String::utf8("，里面空空如也。");
@@ -164,13 +161,11 @@ String CanglingWorld::close_at(Vector2i p) {
     if (cur == 'o' && p != pos) {
         doors.erase(k);
         char_state.last_sound = 8;
-        advance_time(1);
         return String::utf8("你关上了门。");
     }
     if (cur == 'O' && p != pos) {
         doors.erase(k);
         char_state.last_sound = 5;
-        advance_time(1);
         return String::utf8("你关上了窗户。");
     }
     if (is_openable_container(cur)) {
@@ -178,7 +173,6 @@ String CanglingWorld::close_at(Vector2i p) {
             return String::utf8(furniture_label(cur)) + String::utf8("本来就是关着的。");
         }
         char_state.last_sound = 4;
-        advance_time(1);
         return String::utf8("你合上了") + String::utf8(furniture_label(cur)) + String::utf8("。");
     }
     return {};
@@ -197,7 +191,6 @@ String CanglingWorld::smash_at(Vector2i p) {
         if (tile == '#' || tile == 'h' || tile == 'Y' || tile == 'L') {
             char_state.spend_stamina(350);
             char_state.last_sound = 18;
-            advance_time(1);
             return String::utf8("你猛力砸向") + String::utf8(furniture_label(tile)) + String::utf8("，但它过于坚固，纹丝不动。(声响 18)");
         }
         return String::utf8("那个方向没有可以砸碎的物件。");
@@ -211,7 +204,6 @@ String CanglingWorld::smash_at(Vector2i p) {
 
     if (dmg < req) {
         char_state.last_sound = 20;
-        advance_time(1);
         return String::utf8("你用力砸向") + String::utf8(furniture_label(tile)) +
                String::utf8("，木石作响却尚未彻底砸毁（再砸一次，或手持手斧/撬棍更省力）。(声响 20)");
     }
@@ -253,7 +245,6 @@ String CanglingWorld::smash_at(Vector2i p) {
 
     const int snd = is_door ? 34 : (is_win ? 28 : (tile == 'f' ? 24 : 28));
     char_state.last_sound = snd;
-    advance_time(1);
     if (is_win) {
         return String::utf8("你用力砸碎了雕花木窗，木棂崩裂飞溅！(声响 ") + String::num_int64(snd) + String::utf8(")");
     }
@@ -311,7 +302,6 @@ String CanglingWorld::climb_at(Vector2i p) {
     char_state.spend_stamina(240);
     char_state.last_sound = 10;
     pos = landing;
-    advance_time(2);
     if (tile == 'f') return String::utf8("你手脚并用翻过了木篱。");
     if (tile == '%') return String::utf8("你避开尖锐的残木，翻越了破碎的木窗。");
     if (tile == 'O') return String::utf8("你利落地翻过了雕花木窗。");
@@ -377,7 +367,7 @@ bool CanglingWorld::move_grabbed_furniture(Vector2i next_player_pos) {
     const bool pulling_into_player = (furn_to == pos);
     if (!pulling_into_player) {
         if (!in_city(furn_to)) return false;
-        if (floor == 0 && (furn_to == market_tile || furn_to == altar_tile || furn_to == dock_tile)) return false;
+        if (floor == 0 && is_npc_tile(furn_to)) return false;
         const char dest_tile = effective_tile(furn_to, floor);
         if (kFloorForFurniture.find(dest_tile) == std::string_view::npos) {
             return false;
@@ -426,7 +416,6 @@ bool CanglingWorld::move_grabbed_furniture(Vector2i next_player_pos) {
     pos = next_player_pos;
     char_state.spend_stamina(180);
     char_state.last_sound = 12;
-    advance_time(2);
     return true;
 }
 
@@ -471,16 +460,16 @@ Array CanglingWorld::list_nearby(int radius) {
                 }
             }
 
-            // 2. Notable landmarks / interactive furniture / NPCs
-            const StringName s = site(p);
+            // 2. Notable landmarks / interactive furniture / Yangzhou NPCs
             String tname;
-            if (s == StringName("merchant")) tname = String::utf8("药商沈青 [NPC]");
-            else if (s == StringName("ferryman")) tname = String::utf8("渡夫 [NPC]");
-            else if (s == StringName("altar")) tname = String::utf8("吐纳石台");
-            else if (s == StringName("herb")) tname = String::utf8("清露草");
-            else if (tile == '^' || tile == 'v' || tile == 'X' || tile == 'h' || tile == 'a' ||
+            if (floor == 0) {
+                if (const NpcDef *npc = npc_at_tile(p)) {
+                    tname = String::utf8(npc->name) + String::utf8(" · ") + String::utf8(npc->title);
+                }
+            }
+            if (tname.is_empty() && (tile == '^' || tile == 'v' || tile == 'X' || tile == 'h' || tile == 'a' ||
                      tile == 'u' || tile == 'b' || tile == 'F' || tile == 'c' || tile == 'r' ||
-                     tile == 'K' || tile == 'C' || tile == '%') {
+                     tile == 'K' || tile == 'C' || tile == '%')) {
                 tname = String::utf8(furniture_label(tile));
             }
             if (!tname.is_empty()) {
@@ -543,21 +532,24 @@ Array CanglingWorld::compass_summary() {
             if ((tile == 'D' || tile == 'w') && !doors.empty() && doors.count(k)) {
                 tile = (tile == 'D') ? 'o' : 'O';
             }
-            const StringName s = site(p);
             int prio = 0;
             String label;
-            if (s == StringName("merchant")) { prio = 5; label = String::utf8("沈青"); }
-            else if (s == StringName("ferryman")) { prio = 5; label = String::utf8("渡夫"); }
-            else if (s == StringName("altar")) { prio = 4; label = String::utf8("石台"); }
-            else if (s == StringName("herb")) { prio = 4; label = String::utf8("药草"); }
-            else if (tile == '^' || tile == 'v' || tile == 'X') { prio = 3; label = String::utf8("楼梯"); }
-            else if (tile == 'h') { prio = 3; label = String::utf8("土灶"); }
-            else if (tile == 'b') { prio = 2; label = String::utf8("床榻"); }
-            else if (tile == 'F' || tile == 'c' || tile == 'r') { prio = 2; label = String::utf8(furniture_label(tile)); }
-            else if (tile == 'D' || tile == 'o') { prio = 1; label = String::utf8("木门"); }
-            else if (tile == 'a' || tile == 'u') { prio = 2; label = String::utf8(furniture_label(tile)); }
-            else if (tile == 'W' || tile == '~') { prio = 1; label = String::utf8("河水"); }
-            else if (tile == '=') { prio = 2; label = String::utf8("木桥"); }
+            if (floor == 0) {
+                if (const NpcDef *npc = npc_at_tile(p)) {
+                    prio = 5;
+                    label = String::utf8(npc->name);
+                }
+            }
+            if (prio == 0) {
+                if (tile == '^' || tile == 'v' || tile == 'X') { prio = 3; label = String::utf8("楼梯"); }
+                else if (tile == 'h') { prio = 3; label = String::utf8("炉灶"); }
+                else if (tile == 'b') { prio = 2; label = String::utf8("床榻"); }
+                else if (tile == 'F' || tile == 'c' || tile == 'r') { prio = 2; label = String::utf8(furniture_label(tile)); }
+                else if (tile == 'D' || tile == 'o') { prio = 1; label = String::utf8("木门"); }
+                else if (tile == 'a' || tile == 'u') { prio = 2; label = String::utf8(furniture_label(tile)); }
+                else if (tile == 'W' || tile == '~') { prio = 1; label = String::utf8("河水"); }
+                else if (tile == '=') { prio = 2; label = String::utf8("石桥"); }
+            }
 
             if (prio > 0 && (prio > best_prio[oct] || (prio == best_prio[oct] && dist < best_dist[oct]))) {
                 best_prio[oct] = prio;

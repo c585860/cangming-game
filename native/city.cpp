@@ -5,38 +5,13 @@
 
 namespace cangling {
 namespace {
-constexpr std::size_t cache_limit = 72;
-
-constexpr std::array civic_types{"书院", "巡检所", "医馆"};
+constexpr std::size_t cache_limit = 32;
 
 std::size_t block_memory_bytes(const Block &block) {
     std::size_t total = sizeof(Block);
     total += block.extra_levels.size() * (sizeof(int) + sizeof(Block::ExtraLevel) + 32u);
     total += block.plots.capacity() * sizeof(Plot);
     return total;
-}
-
-const char *choose_plot(const CityPlan &plan, Vector2i s, int index, District zone, std::mt19937 &rng) {
-    if (s == Vector2i(20, 22)) return std::array{"街市", "商铺", "药铺", "客栈"}[index];
-    if (s == Vector2i(19, 22)) return std::array{"住宅", "吐纳院", "吐纳庭", "住宅"}[index];
-    if (index == 0) {
-        for (std::size_t i = 0; i < plan.civic_sites.size(); ++i) {
-            if (s == plan.civic_sites[i]) return civic_types[i];
-        }
-    }
-    if (zone == District::farmland || zone == District::east_bank) {
-        return std::array{"果圃", "空地", "果圃", "空地", "住宅"}[random_int(rng, 0, 4)];
-    }
-    if (zone == District::warehouses) {
-        return std::array{"仓房", "仓房", "仓房", "工坊", "工坊", "住宅", "客栈", "公园"}[random_int(rng, 0, 7)];
-    }
-    if (zone == District::central) {
-        return std::array{"住宅", "住宅", "住宅", "书院", "巡检所", "医馆", "公园", "商铺"}[random_int(rng, 0, 7)];
-    }
-    if (zone == District::commerce) {
-        return std::array{"商铺", "商铺", "住宅", "住宅", "客栈", "药铺", "工坊", "广场"}[random_int(rng, 0, 7)];
-    }
-    return std::array{"住宅", "住宅", "住宅", "住宅", "住宅", "果圃", "公园", "商铺"}[random_int(rng, 0, 7)];
 }
 }
 
@@ -51,43 +26,39 @@ void City::reset(std::uint32_t new_seed, int version) {
 
 std::shared_ptr<Block> City::generate_block(Vector2i s) const {
     auto block = std::make_shared<Block>();
-    block->upper.fill(' ');
-    block->attic.fill(' ');
-    fill_streets(*block, s, plan);
-    if (layout >= 2) shape_streets(*block, s, plan);
-    std::mt19937 rng(sector_seed(seed, s));
-    const District zone = plan.district_at(s);
-    if (zone != District::port) {
-        for (int i = 0; i < 4; ++i) {
-            const Vector2i origin(5 + (i % 2) * 27, 5 + (i / 2) * 27);
-            const char *kind = choose_plot(plan, s, i, zone, rng);
-            if (layout == 1) build_plot(*block, origin, kind, rng);
-            else if (layout == 2) build_street_plot(*block, origin, kind, rng);
-            else build_specialty_plot(*block, origin, kind, rng, s == Vector2i(19, 22) || s == Vector2i(20, 22));
-        }
-    }
-    if (layout >= 2 && zone != District::farmland && zone != District::east_bank) {
-        for (int y = 1; y + 1 < sector_size; ++y) {
-            for (int x = 1; x + 1 < sector_size; ++x) {
-                char &tile = tile_ref(block->ground, x, y);
-                if (tile != '.' || tile_ref(block->ground_surface, x, y)) continue;
-                const auto hash = sector_seed(seed, s * sector_size + Vector2i(x, y));
-                const bool roadside = tile_ref(block->ground_surface, x - 1, y) == 'p' || tile_ref(block->ground_surface, x, y - 1) == 'p';
-                if (roadside && hash % 31 == 0) tile = 'L';
-                else if (roadside && hash % 47 == 0) tile = 'Y';
+    const YangzhouWorldData &yz = yangzhou_world_data();
+    const Vector2i base = s * sector_size;
+
+    for (int z = 0; z < 3; ++z) {
+        Tiles &dst_t = level_tiles(*block, z);
+        Tiles &dst_s = level_surfaces(*block, z);
+        for (int ly = 0; ly < sector_size; ++ly) {
+            const int wy = base.y + ly;
+            for (int lx = 0; lx < sector_size; ++lx) {
+                const int wx = base.x + lx;
+                const int li = ly * sector_size + lx;
+                if (wx < 0 || wy < 0 || wx >= city_size || wy >= city_size) {
+                    dst_t[li] = ' ';
+                    dst_s[li] = '\0';
+                    continue;
+                }
+                const int gi = wy * city_size + wx;
+                dst_t[li] = yz.tiles[z][gi];
+                dst_s[li] = yz.surfaces[z][gi];
+                if (yz.enclosed[z][gi]) {
+                    block->enclosed_stories[z].set(li);
+                }
             }
         }
     }
-    // Keep the south wall continuous over the southernmost lots.
-    if (s.y == 22 && s.x >= 1 && s.x < 22) {
-        for (int x = 0; x < sector_size; ++x) {
-            if (!(south_gate_column(s.x) && x <= 3)) {
-                tile_ref(block->ground, x, 56) = '#';
-                tile_ref(block->ground_surface, x, 56) = 'B';
-            }
+
+    const Rect2i sec_rect(base, {sector_size, sector_size});
+    for (const auto &zinfo : yz.zones) {
+        const Rect2i clipped = zinfo.bounds.intersection(sec_rect);
+        if (clipped.size.x > 0 && clipped.size.y > 0) {
+            block->plots.push_back({Rect2i(clipped.position - base, clipped.size), zinfo.name});
         }
     }
-    repair_windows(*block);
     block->plots.shrink_to_fit();
     return block;
 }
@@ -109,7 +80,6 @@ std::shared_ptr<const Block> City::block_at(Vector2i s) {
             return it->second.block;
         }
     }
-    // Generate outside the lock so concurrent threads can generate distinct sectors in parallel.
     std::shared_ptr<const Block> created = generate_block(s);
     std::lock_guard<std::mutex> lock(cache_mutex);
     auto it = cache.find(key);
@@ -248,7 +218,6 @@ int City::lighting_column(Vector2i p, int floor, int layers) {
     const auto block = block_at(s);
     const int i = local.y * sector_size + local.x;
     int result = 0;
-    // Two bits per layer: enclosed floor, then opaque slab or roof above it.
     for (int layer = 0; layer < layers && layer < 4 && floor <= std::numeric_limits<int>::max() - layer; ++layer) {
         const int z = floor + layer;
         const bool enclosed = enclosed_at(*block, z, i);
@@ -273,30 +242,50 @@ char City::surface(Vector2i p, int floor) {
 
 String City::location(Vector2i p) {
     if (!in_city(p)) return String();
-    if (p.x >= 1320 && p.x < 1340 && p.y >= 1320 && p.y <= 1335) return String::utf8("沧菱码头");
-    if (p.x >= 1320 && p.x < 1340 && p.y > 1335 && p.y < 1380) return String::utf8("城东河滩");
-    if (p.y >= 1376 && p.x > 1170 && p.x < 1230) return String::utf8("南门外");
-    const auto s = sector_at(p);
-    const auto local = p - s * sector_size;
-    const auto block = block_at(s);
-    for (const Plot &plot : block->plots) {
-        if (plot.bounds.has_point(local)) return String::utf8(plot.name);
+    const YangzhouWorldData &yz = yangzhou_world_data();
+    // Reverse order so specific buildings/bridges take priority over broad canal/district rects
+    for (auto it = yz.zones.rbegin(); it != yz.zones.rend(); ++it) {
+        if (it->bounds.has_point(p)) {
+            return String::utf8(it->name);
+        }
     }
-    return String::utf8(district_name(plan.district_at(s)));
+    if (p.x >= 117 && p.x <= 122 && p.y > 125 && p.y < 208) return String::utf8("南大街");
+    if (p.x >= 117 && p.x <= 122 && p.y > 28 && p.y < 114) return String::utf8("北大街");
+    if (p.y >= 117 && p.y <= 122 && p.x > 125 && p.x < 212) return String::utf8("东关大街");
+    if (p.y >= 117 && p.y <= 122 && p.x > 28 && p.x < 114) return String::utf8("西市大街");
+    if (p.x >= 25 && p.x <= 214 && p.y >= 25 && p.y <= 214) {
+        if (p.x < 95 && p.y < 78) return String::utf8("翠微湖坊");
+        if (p.x >= 146 && p.y < 118) return String::utf8("仁丰里");
+        if (p.x >= 146 && p.y >= 122) return String::utf8("东关水市坊");
+        if (p.x < 116 && p.y < 146) return String::utf8("西市武坊");
+        if (p.x < 116 && p.y >= 146) return String::utf8("南水烟火坊");
+        if (p.y < 105) return String::utf8("府前文昌坊");
+        return String::utf8("中街市井坊");
+    }
+    return String::utf8("沧灵城郊");
 }
 
 Dictionary City::landmarks() const {
     Dictionary result;
-    result[Vector2i(1201, 1376)] = String::utf8("南门");
-    result[market_tile] = String::utf8("南坊街市");
-    result[altar_tile] = String::utf8("吐纳院");
-    result[dock_tile] = String::utf8("沧菱码头");
-    result[herb_tiles[1]] = String::utf8("采药河滩");
-    for (std::size_t i = 0; i < plan.civic_sites.size(); ++i) {
-        result[plan.civic_sites[i] * sector_size + Vector2i(16, 16)] = String::utf8(civic_types[i]);
-    }
-    result[plan.trade_center * sector_size + Vector2i(16, 16)] = String::utf8("商坊");
-    result[plan.orchard_center * sector_size + Vector2i(16, 16)] = String::utf8("城郊田圃");
+    result[Vector2i(120, 212)] = String::utf8("沧灵南门");
+    result[Vector2i(120, 193)] = String::utf8("南门石拱桥");
+    result[Vector2i(120, 120)] = String::utf8("沧灵中央广场");
+    result[Vector2i(127, 157)] = String::utf8("醉仙楼");
+    result[Vector2i(112, 157)] = String::utf8("王记铁匠铺");
+    result[Vector2i(113, 130)] = String::utf8("利源当铺");
+    result[Vector2i(130, 113)] = String::utf8("回春堂药铺");
+    result[Vector2i(138, 113)] = String::utf8("通济钱庄");
+    result[Vector2i(136, 125)] = String::utf8("福兴杂货铺");
+    result[Vector2i(102, 126)] = String::utf8("扬威武馆");
+    result[Vector2i(101, 112)] = String::utf8("镇远镖局");
+    result[Vector2i(112, 108)] = String::utf8("悦来客栈");
+    result[Vector2i(120, 88)]  = String::utf8("文昌阁");
+    result[Vector2i(130, 89)]  = String::utf8("文昌书院");
+    result[Vector2i(120, 40)]  = String::utf8("沧灵府衙");
+    result[Vector2i(178, 126)] = String::utf8("春风茶馆");
+    result[Vector2i(167, 166)] = String::utf8("水埠码头");
+    result[Vector2i(61,  52)]  = String::utf8("翠微湖·五亭桥");
+    result[Vector2i(155, 157)] = String::utf8("虹桥");
     return result;
 }
 }

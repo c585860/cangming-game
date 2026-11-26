@@ -30,9 +30,46 @@ void CharacterState::reset_defaults() {
     stat_dex = 8;
     stat_int = 8;
     stat_per = 8;
-    part_hp = {kMaxPartHp, kMaxPartHp, kMaxPartHp, kMaxPartHp, kMaxPartHp, kMaxPartHp};
+    max_part_hp = kBaseMaxPartHp;
+    neili = 0;
+    max_neili = 0;
+    cached_force_lv = 0;
+    cached_dodge_lv = 0;
+    cached_unarmed_lv = 0;
+    cached_medicine_lv = 0;
+    cached_cooking_lv = 0;
+    cached_weapon_lv = 0;
+    part_hp = {max_part_hp, max_part_hp, max_part_hp, max_part_hp, max_part_hp, max_part_hp};
     // Authentic civilian Jiangnan starting outfit: tunic, pants, boots, cloak, pouch
     worn = {6, 8, 12, 10, 15};
+}
+
+void CharacterState::sync_with_skills(const SkillSet &skills) {
+    cached_force_lv = skills.level_of("force");
+    cached_dodge_lv = skills.level_of("dodge");
+    cached_unarmed_lv = std::max({skills.level_of("unarmed"), skills.level_of("strike"), skills.level_of("cuff")});
+    cached_medicine_lv = skills.level_of("medicine");
+    cached_cooking_lv = skills.level_of("cooking");
+    cached_weapon_lv = std::max({skills.level_of("sword"), skills.level_of("blade"), skills.level_of("staff"),
+                                 skills.level_of("club"), skills.level_of("spear")});
+    const int parry_lv = skills.level_of("parry");
+    const int old_max = std::max(1, max_part_hp);
+    const int next_max = kBaseMaxPartHp + cached_force_lv * 3 + (cached_unarmed_lv + parry_lv) / 2;
+    if (next_max != max_part_hp) {
+        const int delta = next_max - old_max;
+        max_part_hp = next_max;
+        for (int &hp : part_hp) {
+            if (delta > 0) hp = std::min(max_part_hp, hp + delta);
+            else hp = std::clamp(hp, 1, max_part_hp);
+        }
+    }
+    const int old_neili_max = max_neili;
+    max_neili = cached_force_lv * 25;
+    if (max_neili > old_neili_max) {
+        neili = std::min(max_neili, neili + (max_neili - old_neili_max));
+    } else {
+        neili = std::clamp(neili, 0, max_neili);
+    }
 }
 
 void CharacterState::advance_minutes(int delta_minutes, bool resting, bool sleeping) {
@@ -42,34 +79,53 @@ void CharacterState::advance_minutes(int delta_minutes, bool resting, bool sleep
     const double water_rate = sleeping ? 0.045 : resting ? 0.065 : (move_mode == 1 ? 0.14 : 0.095);
     kcal = std::clamp(kcal - dm * kcal_rate, 0.0, 3600.0);
     hydration = std::clamp(hydration - dm * water_rate, 0.0, 120.0);
+    const int force_regen_bonus = cached_force_lv * 8;
     if (sleeping) {
         fatigue = std::clamp(fatigue - dm * 0.45, 0.0, 100.0);
-        stamina = std::min(10000, stamina + delta_minutes * 450);
+        stamina = std::min(10000, stamina + delta_minutes * (450 + force_regen_bonus));
     } else if (resting) {
         fatigue = std::clamp(fatigue - dm * 0.16, 0.0, 100.0);
-        stamina = std::min(10000, stamina + delta_minutes * 260);
+        stamina = std::min(10000, stamina + delta_minutes * (260 + force_regen_bonus));
     } else {
         fatigue = std::clamp(fatigue + dm * 0.085, 0.0, 100.0);
         if (move_mode != 1) {
-            stamina = std::min(10000, stamina + delta_minutes * 120);
+            stamina = std::min(10000, stamina + delta_minutes * (120 + force_regen_bonus / 2));
         }
     }
-    if (pain > 0) pain = std::max(0, pain - delta_minutes / 4);
+    // Natural HP & Neili recovery when nourished (boosted by 基本内功), or starvation damage when depleted!
+    if (kcal >= 1200.0 && hydration >= 40.0) {
+        const int hp_gain = (delta_minutes * (1 + (resting || sleeping ? 1 : 0) + cached_force_lv / 10)) / 10;
+        if (hp_gain > 0) {
+            for (int &hp : part_hp) hp = std::min(max_part_hp, hp + hp_gain);
+        }
+        if (max_neili > 0) {
+            const int nl_gain = delta_minutes * (1 + (resting || sleeping ? 2 : 0) + cached_force_lv / 6);
+            neili = std::min(max_neili, neili + nl_gain);
+        }
+    } else if (kcal <= 50.0 || hydration <= 5.0) {
+        const int starve_dmg = std::max(1, delta_minutes / 8);
+        for (int i = 1; i < 6; ++i) part_hp[i] = std::max(1, part_hp[i] - starve_dmg);
+    }
+    if (pain > 0) pain = std::max(0, pain - (delta_minutes * (1 + cached_force_lv / 12)) / 4);
     last_sound = std::max(0, last_sound - delta_minutes * 12);
 }
 
 void CharacterState::spend_stamina(int amount) {
-    stamina = std::clamp(stamina - amount, 0, 10000);
+    // 基本轻功 reduces exertion stamina drain up to 40%!
+    const double mult = 1.0 - std::min(0.40, static_cast<double>(cached_dodge_lv) * 0.015);
+    const int eff = std::max(1, static_cast<int>(std::round(static_cast<double>(amount) * mult)));
+    stamina = std::clamp(stamina - eff, 0, 10000);
     if (stamina < 1200 && move_mode == 1) {
         move_mode = 0; // Auto-drop from running when winded (CCB behavior)
     }
 }
 
 int CharacterState::current_speed() const {
-    int spd = 100;
+    int spd = 100 + std::min(35, cached_dodge_lv / 2);
     if (pain > 10) spd -= pain / 3;
     if (fatigue > 75.0) spd -= 10;
     if (stamina < 2500) spd -= 15;
+    if (kcal < 400.0 || hydration < 15.0) spd -= 12;
     if (move_mode == 1) spd += 25;
     else if (move_mode == 2) spd -= 20;
     else if (move_mode == 3) spd -= 45;
@@ -79,7 +135,9 @@ int CharacterState::current_speed() const {
 int CharacterState::bash_power() const {
     int power = stat_str + 2;
     if (wielded >= 0 && wielded < kItemCount) {
-        power += item_catalog()[wielded].bash_dmg;
+        power += item_catalog()[wielded].bash_dmg + cached_weapon_lv / 2;
+    } else {
+        power += cached_unarmed_lv / 2;
     }
     power -= total_encumbrance() / 8;
     return std::max(4, power);
@@ -231,9 +289,10 @@ String CharacterState::consume_item(int item_id, ItemCounts &carried, int &minut
         return String::utf8("这件物品无法食用或饮用。");
     }
     --carried[item_id];
-    kcal = std::clamp(kcal + static_cast<double>(def.kcal), 0.0, 3600.0);
+    const double cook_mult = (def.category == ItemCategory::Food) ? (1.0 + static_cast<double>(cached_cooking_lv) * 0.02) : 1.0;
+    kcal = std::clamp(kcal + static_cast<double>(def.kcal) * cook_mult, 0.0, 3600.0);
     hydration = std::clamp(hydration + static_cast<double>(def.quench), 0.0, 120.0);
-    morale = std::clamp(morale + def.joy, -50, 50);
+    morale = std::clamp(morale + static_cast<int>(std::round(static_cast<double>(def.joy) * cook_mult)), -50, 50);
     if (def.category == ItemCategory::Drink && def.quench >= 40) {
         fatigue = std::clamp(fatigue - 4.0, 0.0, 100.0);
     }
@@ -271,13 +330,14 @@ String CharacterState::apply_item(int item_id, ItemCounts &carried, int &minutes
         }
         return String::utf8("你熄灭了") + String::utf8(def.name) + String::utf8("。");
     }
-    // Bandage (46) or Rag (44): heal limbs & ease pain!
+    // Bandage (46) or Rag (44): heal limbs & ease pain (boosted by 基本药学!)
     if (item_id == 46 || item_id == 44) {
         if (!from_hand) --carried[item_id];
         else wielded = -1;
-        const int heal = (item_id == 46) ? 18 : 8;
-        for (int &hp : part_hp) hp = std::min(kMaxPartHp, hp + heal);
-        pain = std::max(0, pain - (item_id == 46 ? 12 : 4));
+        const double med_mult = 1.0 + static_cast<double>(cached_medicine_lv) * 0.05;
+        const int heal = static_cast<int>(std::round((item_id == 46 ? 18.0 : 8.0) * med_mult));
+        for (int &hp : part_hp) hp = std::min(max_part_hp, hp + heal);
+        pain = std::max(0, pain - static_cast<int>(std::round((item_id == 46 ? 12.0 : 4.0) * med_mult)));
         minutes_out += 3;
         return String::utf8("你用") + String::utf8(def.name) + String::utf8("仔细包扎了伤处，气血舒缓了不少。");
     }
@@ -380,11 +440,16 @@ Dictionary CharacterState::to_dict(const ItemCounts &carried, int bottle_water_m
     Array hp_arr;
     for (int h : part_hp) hp_arr.append(h);
     out["part_hp"] = hp_arr;
-    out["max_part_hp"] = kMaxPartHp;
+    out["max_part_hp"] = max_part_hp;
+    out["neili"] = neili;
+    out["max_neili"] = max_neili;
+    out["well_fed"] = is_well_fed();
+    out["starving_for_training"] = is_starving_for_training();
+    out["severely_injured"] = is_severely_injured();
     out["hunger_text"] = hunger_status();
     out["thirst_text"] = thirst_status();
     out["fatigue_text"] = fatigue_status();
-    out["warmth"] = total_warmth();
+    out["warmth"] = total_warmth() + cached_force_lv / 3;
     out["encumbrance"] = total_encumbrance();
     out["carry_volume_ml"] = carry_volume_ml(carried);
     out["max_carry_volume_ml"] = max_carry_volume_ml();
@@ -405,6 +470,9 @@ Dictionary CharacterState::save_dict() const {
     d["wielded"] = wielded;
     d["lamp_lit"] = lamp_lit;
     d["light_source"] = light_source;
+    d["max_part_hp"] = max_part_hp;
+    d["neili"] = neili;
+    d["max_neili"] = max_neili;
     Array hp;
     for (int h : part_hp) hp.append(h);
     d["part_hp"] = hp;
@@ -433,10 +501,13 @@ bool CharacterState::load_dict(const Dictionary &d) {
         lamp_lit = static_cast<bool>(d["lamp_lit"]);
         light_source = lamp_lit ? 3 : 0;
     }
+    if (d.has("max_part_hp")) max_part_hp = std::clamp(static_cast<int>(d["max_part_hp"]), kBaseMaxPartHp, 9999);
+    if (d.has("max_neili")) max_neili = std::max(0, static_cast<int>(d["max_neili"]));
+    if (d.has("neili")) neili = std::clamp(static_cast<int>(d["neili"]), 0, std::max(max_neili, 99999));
     if (d.get("part_hp", Variant()).get_type() == Variant::ARRAY) {
         const Array hp = d["part_hp"];
         for (int i = 0; i < std::min<int>(hp.size(), 6); ++i) {
-            part_hp[i] = std::clamp(static_cast<int>(hp[i]), 1, kMaxPartHp);
+            part_hp[i] = std::clamp(static_cast<int>(hp[i]), 1, max_part_hp);
         }
     }
     if (d.get("worn", Variant()).get_type() == Variant::ARRAY) {

@@ -66,6 +66,8 @@ const CHAR_ACTIONS := {
 	"P": "messages",
 	"S": "save",
 	"Z": "zoom_out",
+	"J": "skills",
+	"O": "multiplayer",
 	"K": "debug",
 }
 

@@ -4,12 +4,12 @@ signal destination_requested(position: Vector2i)
 signal selection_changed(title: String, details: String)
 
 const Tiles = preload("res://scripts/undead_tiles.gd")
-const STEP := 10
+const STEP := 4
 const NONE := Vector2i(-1, -1)
 const ART := ["field", "road", "dirt_road", "river_center", "bridge", "forest", "river",
 	"house_09", "s_grocery", "s_pharm", "warehouse", "motel_1", "urban_9_2", "park", "farm_3"]
-const LAND := ["空地", "主街", "街巷", "沧菱河", "桥梁", "林地", "河岸", "住宅", "商铺",
-	"药铺或医馆", "仓房或工坊", "客栈", "公共建筑", "广场或园林", "果圃"]
+const LAND := ["城郊绿地", "青石官道", "青石街巷", "沧灵水系", "青白石拱桥", "垂柳绿林", "浅水岸滩", "江南坊院", "商铺茶坊",
+	"药铺医馆", "工坊码头", "酒楼客栈", "府衙阁楼", "广场园林", "城郊菜圃"]
 const DIR := [Vector2i.DOWN, Vector2i.RIGHT, Vector2i.LEFT, Vector2i.UP]
 
 var world: CanglingWorld
@@ -117,12 +117,13 @@ func keyboard(key: Key) -> bool:
 
 func travel() -> void:
 	var base := selected * STEP
-	var target := base + Vector2i(5, 5)
+	var half := STEP >> 1
+	var target := base + Vector2i(half, half)
 	var best := 999
 	for y in STEP:
 		for x in STEP:
 			var p := base + Vector2i(x, y)
-			var distance := absi(x - 5) + absi(y - 5)
+			var distance := absi(x - half) + absi(y - half)
 			if distance < best and world.walkable(p):
 				best = distance
 				target = p
@@ -162,7 +163,8 @@ func _notify() -> void:
 	if not _inside(p) or cells.is_empty():
 		return
 	var base := p * STEP
-	var district := world.location(base + Vector2i(5, 5))
+	var half := STEP >> 1
+	var district := world.location(base + Vector2i(half, half))
 	var kind: int = cells[_cell(p)]
 	var title: String = labels.get(p, district if kind >= 7 else LAND[kind])
 	var details := "%s  ·  %s\n区块  %d，%d\n地格  %d–%d，%d–%d" % [district, LAND[kind],
@@ -203,20 +205,54 @@ func _draw_marks() -> void:
 	if world == null:
 		return
 	var font := get_theme_default_font()
+	var view_rect := Rect2(Vector2.ZERO, size)
+	var placed_tags: Array[Rect2] = []
 	for p: Vector2i in labels:
 		var at := offset + (Vector2(p) + Vector2.ONE * 0.5) * pixels
-		if not Rect2(Vector2.ZERO, size).has_point(at):
+		if not view_rect.has_point(at):
 			continue
 		var r := clampf(pixels * 0.25, 2.5, 4.5)
 		marks.draw_circle(at, r + 1.4, Color(0.08, 0.11, 0.09, 0.85))
 		marks.draw_circle(at, r, Color("ecc76c"))
-		if zoom >= 1:
+		if zoom >= 0:
 			var text: String = labels[p]
-			var width := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-			var tag := Rect2(at + Vector2(7, -17), Vector2(width + 10, 20))
+			var fsize := 11 if zoom == 0 else 13
+			var width := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fsize).x
+			var tag_h := 17.0 if zoom == 0 else 20.0
+			var tag_w := width + 8.0
+			var candidates: Array[Vector2] = [
+				Vector2(6, -tag_h + 2),
+				Vector2(-tag_w - 6, -tag_h + 2),
+				Vector2(6, 4),
+				Vector2(-tag_w - 6, 4),
+				Vector2(-tag_w * 0.5, -tag_h - 6),
+				Vector2(-tag_w * 0.5, 8),
+				Vector2(6, -tag_h * 2.0),
+				Vector2(-tag_w - 6, -tag_h * 2.0),
+				Vector2(6, tag_h + 6),
+				Vector2(-tag_w - 6, tag_h + 6),
+			]
+			var tag := Rect2(at + candidates[0], Vector2(tag_w, tag_h))
+			var chosen_idx := 0
+			for ci in range(candidates.size()):
+				var cand := Rect2(at + candidates[ci], Vector2(tag_w, tag_h))
+				if not view_rect.encloses(cand):
+					continue
+				var overlaps := false
+				for prev_tag: Rect2 in placed_tags:
+					if cand.grow(1.5).intersects(prev_tag):
+						overlaps = true
+						break
+				if not overlaps:
+					tag = cand
+					chosen_idx = ci
+					break
+			placed_tags.append(tag)
+			if chosen_idx >= 4:
+				marks.draw_line(at, tag.get_center(), Color(0.75, 0.64, 0.36, 0.55), 1.0)
 			marks.draw_rect(tag, Color(0.08, 0.12, 0.10, 0.90))
-			marks.draw_rect(tag, Color(0.62, 0.53, 0.31, 0.72), false, 1.0)
-			marks.draw_string(font, at + Vector2(12, -2), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("f3dca0"))
+			marks.draw_rect(tag, Color(0.62, 0.53, 0.31, 0.78), false, 1.0)
+			marks.draw_string(font, tag.position + Vector2(4, tag_h - 4), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fsize, Color("f3dca0"))
 	var pc := offset + (Vector2(_index(world.pos)) + Vector2.ONE * 0.5) * pixels
 	marks.draw_circle(pc, 5.5, Color("0d1410"))
 	marks.draw_circle(pc, 3.6, Color("7ee8c0"))
