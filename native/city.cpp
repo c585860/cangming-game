@@ -2,6 +2,7 @@
 #include "thread_pool.hpp"
 #include <godot_cpp/variant/variant.hpp>
 #include <algorithm>
+#include <cmath>
 
 namespace cangling {
 namespace {
@@ -15,19 +16,54 @@ std::size_t block_memory_bytes(const Block &block) {
 }
 }
 
-void City::reset(std::uint32_t new_seed, int version) {
+void City::reset(std::uint32_t new_seed, int version, CorePackId pack) {
     std::lock_guard<std::mutex> lock(cache_mutex);
     seed = new_seed;
     layout = version;
+    pack_id = pack;
     plan.generate(seed);
     cache.clear();
     recent.clear();
 }
 
+float City::radiation_at(Vector2i p) const {
+    if (pack_id != CorePackId::Cataclysm || !in_city(p)) return 0.0f;
+    const auto cw = cataclysm_world_data(seed);
+    float total = 0.0f;
+    for (const auto &rz : cw->rad_zones) {
+        const float dx = static_cast<float>(p.x - rz.center.x);
+        const float dy = static_cast<float>(p.y - rz.center.y);
+        const float dist = std::sqrt(dx * dx + dy * dy);
+        if (dist <= static_cast<float>(rz.radius)) {
+            const float falloff = 1.0f - (dist / static_cast<float>(std::max(1, rz.radius)));
+            total += rz.peak_rad * falloff;
+        }
+    }
+    return total;
+}
+
 std::shared_ptr<Block> City::generate_block(Vector2i s) const {
     auto block = std::make_shared<Block>();
-    const YangzhouWorldData &yz = yangzhou_world_data();
     const Vector2i base = s * sector_size;
+    std::shared_ptr<const CataclysmWorldData> cw;
+    const std::array<std::vector<char>, 3> *src_tiles = nullptr;
+    const std::array<std::vector<char>, 3> *src_surfaces = nullptr;
+    const std::array<std::vector<std::uint8_t>, 3> *src_enclosed = nullptr;
+    const std::vector<YangzhouWorldData::Zone> *src_zones = nullptr;
+
+    if (pack_id == CorePackId::Cataclysm) {
+        cw = cataclysm_world_data(seed);
+        src_tiles = &cw->tiles;
+        src_surfaces = &cw->surfaces;
+        src_enclosed = &cw->enclosed;
+        src_zones = &cw->zones;
+    } else {
+        const YangzhouWorldData &yz = yangzhou_world_data();
+        src_tiles = &yz.tiles;
+        src_surfaces = &yz.surfaces;
+        src_enclosed = &yz.enclosed;
+        src_zones = &yz.zones;
+    }
 
     for (int z = 0; z < 3; ++z) {
         Tiles &dst_t = level_tiles(*block, z);
@@ -43,9 +79,9 @@ std::shared_ptr<Block> City::generate_block(Vector2i s) const {
                     continue;
                 }
                 const int gi = wy * city_size + wx;
-                dst_t[li] = yz.tiles[z][gi];
-                dst_s[li] = yz.surfaces[z][gi];
-                if (yz.enclosed[z][gi]) {
+                dst_t[li] = (*src_tiles)[z][gi];
+                dst_s[li] = (*src_surfaces)[z][gi];
+                if ((*src_enclosed)[z][gi]) {
                     block->enclosed_stories[z].set(li);
                 }
             }
@@ -53,7 +89,7 @@ std::shared_ptr<Block> City::generate_block(Vector2i s) const {
     }
 
     const Rect2i sec_rect(base, {sector_size, sector_size});
-    for (const auto &zinfo : yz.zones) {
+    for (const auto &zinfo : *src_zones) {
         const Rect2i clipped = zinfo.bounds.intersection(sec_rect);
         if (clipped.size.x > 0 && clipped.size.y > 0) {
             block->plots.push_back({Rect2i(clipped.position - base, clipped.size), zinfo.name});
@@ -242,6 +278,15 @@ char City::surface(Vector2i p, int floor) {
 
 String City::location(Vector2i p) {
     if (!in_city(p)) return String();
+    if (pack_id == CorePackId::Cataclysm) {
+        const auto cw = cataclysm_world_data(seed);
+        for (auto it = cw->zones.rbegin(); it != cw->zones.rend(); ++it) {
+            if (it->bounds.has_point(p)) {
+                return String::utf8(it->name);
+            }
+        }
+        return String::utf8("新英格兰郊区荒野");
+    }
     const YangzhouWorldData &yz = yangzhou_world_data();
     // Reverse order so specific buildings/bridges take priority over broad canal/district rects
     for (auto it = yz.zones.rbegin(); it != yz.zones.rend(); ++it) {
@@ -267,6 +312,21 @@ String City::location(Vector2i p) {
 
 Dictionary City::landmarks() const {
     Dictionary result;
+    if (pack_id == CorePackId::Cataclysm) {
+        result[Vector2i(120, 200)] = String::utf8("应急避难所");
+        result[Vector2i(133, 164)] = String::utf8("城镇超市");
+        result[Vector2i(105, 162)] = String::utf8("社区药房");
+        result[Vector2i(133, 116)] = String::utf8("五金工具店");
+        result[Vector2i(105, 116)] = String::utf8("城镇警局");
+        result[Vector2i(133, 66)]  = String::utf8("市立图书馆");
+        result[Vector2i(105, 66)]  = String::utf8("街区诊所");
+        result[Vector2i(80, 162)]  = String::utf8("加油站便利店");
+        result[Vector2i(80, 126)]  = String::utf8("中央公园");
+        result[Vector2i(182, 128)] = String::utf8("核废料泄漏区(辐射)");
+        result[Vector2i(120, 44)]  = String::utf8("实验室排气口(辐射)");
+        result[Vector2i(120, 28)]  = String::utf8("清溪河公路大桥");
+        return result;
+    }
     result[Vector2i(120, 212)] = String::utf8("沧灵南门");
     result[Vector2i(120, 193)] = String::utf8("南门石拱桥");
     result[Vector2i(120, 120)] = String::utf8("沧灵中央广场");

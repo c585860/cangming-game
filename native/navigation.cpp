@@ -24,6 +24,23 @@ std::vector<Vector2i> CanglingWorld::local_path(Vector2i from, Vector2i to, Rect
     grid->set_default_estimate_heuristic(AStarGrid2D::HEURISTIC_OCTILE);
     grid->set_default_compute_heuristic(AStarGrid2D::HEURISTIC_OCTILE);
     grid->update();
+    if (active_pack == CorePackId::Cataclysm) {
+        const int x0 = region.position.x, y0 = region.position.y;
+        const int x1 = x0 + region.size.x, y1 = y0 + region.size.y;
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                const Vector2i cell(x, y);
+                if (cell != from && cell != to && !walkable_on(cell, z)) {
+                    grid->set_point_solid(cell, true);
+                }
+            }
+        }
+        const auto path = grid->get_id_path(from, to);
+        std::vector<Vector2i> answer;
+        answer.reserve(path.size());
+        for (int i = 0; i < path.size(); ++i) answer.emplace_back(path[i]);
+        return answer;
+    }
     const SectorGridSnapshot snap = city.snapshot_sectors(region);
     const int x0 = region.position.x, y0 = region.position.y;
     const int x1 = x0 + region.size.x, y1 = y0 + region.size.y;
@@ -66,6 +83,14 @@ std::vector<Vector2i> CanglingWorld::sector_path(Vector2i from, Vector2i to) con
 
 std::vector<Vector2i> CanglingWorld::find_path(Vector2i to) {
     if (!walkable(to)) return {};
+    if (active_pack == CorePackId::Cataclysm) {
+        const Vector2i pad(18, 18);
+        const Vector2i lo(std::min(pos.x, to.x), std::min(pos.y, to.y));
+        const Vector2i hi(std::max(pos.x, to.x), std::max(pos.y, to.y));
+        const Rect2i box(lo - pad, hi - lo + pad * 2 + Vector2i(1, 1));
+        if (box.size.x > 120 || box.size.y > 120) return {};
+        return local_path(pos, to, box, floor);
+    }
     if (floor != 0) {
         return local_path(pos, to, nearby_box(pos, to), floor);
     }
@@ -76,7 +101,7 @@ std::vector<Vector2i> CanglingWorld::find_path(Vector2i to) {
 }
 
 Array CanglingWorld::route_to(Vector2i dest, bool interact_with_target) {
-    if (!in_city(dest)) return {};
+    if (!in_bounds(dest)) return {};
     std::vector<Vector2i> result;
     if (interact_with_target) {
         if (near(dest)) result = {pos};

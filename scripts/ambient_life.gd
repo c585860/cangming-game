@@ -438,7 +438,9 @@ func draw_water_layer(layer: Control, board: Control, daylight: float, lamp_powe
 				layer.draw_line(sp - Vector2(rw, 0.0), sp + Vector2(rw, 0.0),
 					Color(1.0, 0.72, 0.28, 0.24 * lamp_power * shimmer), maxf(1.4, s * 0.065))
 
-	# 2. 12 High-Detail Painterly Cruising Boats (Image 1!) — 100% water-locked!
+	# 2. 12 High-Detail Painterly Cruising Boats (Image 1!) — Cangming Jiangnan pack only!
+	if board.world.has_method("is_cataclysm_pack") and board.world.is_cataclysm_pack():
+		return
 	for b: Dictionary in boats:
 		var pos: Vector2 = b["pos"]
 		var ip := Vector2i(roundi(pos.x), roundi(pos.y))
@@ -667,6 +669,10 @@ func draw_sky_layer(layer: Control, board: Control, _season: String, daylight: f
 	var font := board.get_theme_default_font()
 
 	if z == 0:
+		if board.world.has_method("is_cataclysm_pack") and board.world.is_cataclysm_pack():
+			_draw_cataclysm_signs(layer, board, visible, s, daylight, font)
+			_draw_geese_flocks(layer, board, visible, s, daylight)
+			return
 		# 0. Iconic Golden-Glazed Five-Pavilion Bridge Roofs (五亭桥重檐金瓦五亭 — Image 1!)
 		_draw_five_pavilion_bridge_roofs(layer, board, visible, s, daylight, lamp_power)
 		# 1. Swaying Wuxia cloth shop banners (酒旗/幡幌)
@@ -682,6 +688,37 @@ func draw_sky_layer(layer: Control, board: Control, _season: String, daylight: f
 		_draw_egrets(layer, board, visible, s, daylight)
 		# 6. Periodic V-formation wild geese flocks (大雁人字阵)
 		_draw_geese_flocks(layer, board, visible, s, daylight)
+
+
+func _draw_cataclysm_signs(layer: Control, board: Control, visible: Rect2i, s: float, daylight: float, font: Font) -> void:
+	if font == null or s < 18.0:
+		return
+	const CCB_SIGNS := [
+		{"pos": Vector2(120.0, 200.0), "title": "EVAC SHELTER · 应急避难所", "col": Color("57d1d6")},
+		{"pos": Vector2(133.0, 164.0), "title": "GROCERY · 城镇超市", "col": Color("8ef5a8")},
+		{"pos": Vector2(105.0, 162.0), "title": "PHARMACY · 社区药房", "col": Color("7ed4ff")},
+		{"pos": Vector2(133.0, 116.0), "title": "HARDWARE · 五金工具店", "col": Color("f0d86c")},
+		{"pos": Vector2(105.0, 116.0), "title": "POLICE · 城镇警局", "col": Color("6ca4f2")},
+		{"pos": Vector2(133.0, 66.0),  "title": "LIBRARY · 市立图书馆", "col": Color("d384e8")},
+		{"pos": Vector2(105.0, 66.0),  "title": "CLINIC · 街区诊所", "col": Color("8ef5a8")},
+		{"pos": Vector2(182.0, 128.0), "title": "☢ 核废料泄漏区 (高辐射)", "col": Color("ff785c")},
+	]
+	var fsize := clampi(int(s * 0.38), 11, 13)
+	for sg: Dictionary in CCB_SIGNS:
+		var wp: Vector2 = sg["pos"]
+		var ip := Vector2i(int(wp.x), int(wp.y))
+		if not visible.grow(2).has_point(ip):
+			continue
+		if board.roof_system.has_roof_at(ip) and board.roof_system.alpha_at(ip) < 0.35:
+			continue
+		var sp := _world_to_screen(board, wp)
+		var txt: String = sg["title"]
+		var col: Color = sg["col"]
+		var tw := font.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fsize).x
+		var r := Rect2(sp.x - tw * 0.5 - 6.0, sp.y - 10.0, tw + 12.0, 18.0)
+		layer.draw_rect(r, Color(0.03, 0.05, 0.07, 0.86))
+		layer.draw_rect(r, Color(col.r, col.g, col.b, 0.78), false, 1.0)
+		layer.draw_string(font, r.position + Vector2(6.0, 13.0), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fsize, col.lerp(Color.WHITE, 0.25))
 
 
 func _draw_five_pavilion_bridge_roofs(layer: Control, board: Control, visible: Rect2i, s: float, daylight: float, lamp_power: float) -> void:

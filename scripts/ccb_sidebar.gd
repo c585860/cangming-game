@@ -1,28 +1,33 @@
 extends PanelContainer
 
-# Authentic Cataclysm-Cleanwater-Bomb (CCB) Classic Right Sidebar
-# Faithfully mirrors Cataclysm-Cleanwater-Bomb/data/json/ui/sidebar-legacy-classic.json + src/panels.cpp:
-# - Row 1 (3-column): 6 Body Part HP bars | Pain/Hunger/Thirst/Fatigue/Temp/Morale | STR/DEX/INT/PER/Focus/Safe
-# - Row 2: Movement Mode, Speed, Sound, Stamina ||||| bar, Active State Badges (Grab/Haul/Lamp)
-# - Row 3: Location + Z-level + Coords + Framed Overmap Minimap
-# - Row 4: Season/Day/Clock + Weather + Lighting + Silver/Herbs
-# - Row 5: Wielded item + Bottle / Volume / Weight / Warmth / Encumbrance
-# - Row 6: 8-Direction CCB Compass (NW N NE / W @ E / SW S SE)
-# - Row 7: Prompt Bar + Color-Coded CCB Message Log + Bottom Hotkey Reference Strip
+# Modernized Cataclysm-Cleanwater-Bomb (CCB) Right Sidebar
+# Combines authentic CCB ImGui obsidian-slate glass styling with real visual HP/Stamina bars,
+# Core-Pack & Co-op telemetry pills, and automatic mode adaptation:
+#  - Cangming Core Pack: Coins / Potential / Neili / Martial Arts
+#  - Cataclysm Core Pack: Vanilla Radiation (mSv & Badge), Mutagen Catalyst & Mutations,
+#    Wounds (Bleed/Bite/Infection), Kills, and Vanilla Weapon Bash/Cut/Stab!
 
 const CCB = preload("res://scripts/ccb_theme.gd")
 const Survey = preload("res://scripts/survey.gd")
 const CanglingCalendar = preload("res://scripts/cangling_calendar.gd")
 
-const PART_NAMES := ["头  ", "躯  ", "左臂", "右臂", "左腿", "右腿"]
+const PART_NAMES := ["头部", "躯干", "左臂", "右臂", "左腿", "右腿"]
 
 var minimap: Survey
 var status_prompt: Label
 var log_container: VBoxContainer
 var _log_history: Array[Dictionary] = []
 
-# Row 1: Body parts (6), Needs (6), Stats (6)
-var _part_labels: Array[Label] = []
+# Modern Header Pills
+var _pack_badge: PanelContainer
+var _pack_badge_lbl: Label
+var _coop_badge: PanelContainer
+var _coop_badge_lbl: Label
+var _fps_lbl: Label
+
+# Row 1: 6 Visual Body Part Bars + Needs + Stats
+var _part_bars: Array[ProgressBar] = []
+var _part_vals: Array[Label] = []
 var _pain_lbl: Label
 var _hunger_lbl: Label
 var _thirst_lbl: Label
@@ -36,18 +41,25 @@ var _per_lbl: Label
 var _focus_lbl: Label
 var _safe_lbl: Label
 
-# Row 2: Move mode, speed, sound, stamina, flags
+# Row 2: Move mode, speed, sound, visual stamina bar, badges
 var _move_lbl: Label
 var _speed_lbl: Label
 var _sound_lbl: Label
-var _stam_lbl: Label
+var _stam_bar: ProgressBar
+var _stam_val_lbl: Label
 var _flags_lbl: Label
+
+# Cataclysm Vanilla Bio-Hazard Strip (Rad / Mutagen / Wounds) — auto-shown in cataclysm pack
+var _ccb_bio_card: PanelContainer
+var _rad_lbl: Label
+var _mut_lbl: Label
+var _wound_lbl: Label
 
 # Row 3: Location, Z, Coords
 var _loc_lbl: Label
 var _z_lbl: Label
 
-# Row 4: Time, Weather, Light, Quest
+# Row 4: Time, Weather, Light, Economy/Kills
 var _time_lbl: Label
 var _weather_lbl: Label
 var _light_lbl: Label
@@ -59,10 +71,11 @@ var _carry_lbl: Label
 
 # Row 6: 8-direction Compass cells (0..8 where 4 is '@')
 var _compass_cells: Array[Label] = []
+var _key_bar: Label
 
 
 func build(world: RefCounted) -> void:
-	custom_minimum_size.x = 326
+	custom_minimum_size.x = 338
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = CCB.BG_PANEL
@@ -71,10 +84,10 @@ func build(world: RefCounted) -> void:
 	sb.border_width_top = 0
 	sb.border_width_right = 0
 	sb.border_width_bottom = 0
-	sb.content_margin_left = 8
-	sb.content_margin_right = 8
-	sb.content_margin_top = 5
-	sb.content_margin_bottom = 4
+	sb.content_margin_left = 9
+	sb.content_margin_right = 9
+	sb.content_margin_top = 6
+	sb.content_margin_bottom = 5
 	add_theme_stylebox_override("panel", sb)
 
 	var root := VBoxContainer.new()
@@ -84,105 +97,143 @@ func build(world: RefCounted) -> void:
 	root.clip_contents = true
 	add_child(root)
 
-	# --- ROW 1: 3-Column CCB Classic Core Panel (Body HP | Needs | Core Stats) ---
+	# --- TOP TELEMETRY STRIP: Core-Pack Pill + Co-op Pill + FPS ---
+	var top_bar := HBoxContainer.new()
+	top_bar.add_theme_constant_override("separation", 6)
+	root.add_child(top_bar)
+	_pack_badge = CCB.create_badge("沧溟修真", CCB.BORDER_CYAN)
+	_pack_badge_lbl = _pack_badge.get_child(0) as Label
+	top_bar.add_child(_pack_badge)
+	_coop_badge = CCB.create_badge("单机", CCB.BORDER)
+	_coop_badge_lbl = _coop_badge.get_child(0) as Label
+	top_bar.add_child(_coop_badge)
+	_fps_lbl = _mk_lbl(top_bar, "60 FPS", 11, CCB.C_DKGRAY)
+	_fps_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_fps_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+
+	# --- ROW 1: Modern Glass Card (Visual 6-Part HP Bars | Needs | Core Stats) ---
+	var vitals_card := PanelContainer.new()
+	vitals_card.add_theme_stylebox_override("panel", CCB.box(CCB.BG_CARD, CCB.BORDER, 7, 5, 1, 5))
+	root.add_child(vitals_card)
 	var row1 := HBoxContainer.new()
-	row1.add_theme_constant_override("separation", 6)
-	root.add_child(row1)
+	row1.add_theme_constant_override("separation", 7)
+	vitals_card.add_child(row1)
 
 	var col_hp := VBoxContainer.new()
-	col_hp.add_theme_constant_override("separation", 1)
-	col_hp.custom_minimum_size.x = 104
+	col_hp.add_theme_constant_override("separation", 2)
+	col_hp.custom_minimum_size.x = 112
 	row1.add_child(col_hp)
-	_part_labels.clear()
+	_part_bars.clear()
+	_part_vals.clear()
 	for i in range(6):
-		_part_labels.append(_mk_lbl(col_hp, "%s |||||" % PART_NAMES[i], 12, CCB.C_LTGREEN))
+		var hb := HBoxContainer.new()
+		hb.add_theme_constant_override("separation", 4)
+		col_hp.add_child(hb)
+		var pl := _mk_lbl(hb, PART_NAMES[i], 11, CCB.C_LTGRAY)
+		pl.custom_minimum_size.x = 26
+		var bar := CCB.create_bar(7.0, CCB.C_LTGREEN)
+		hb.add_child(bar)
+		var vl := _mk_lbl(hb, "84", 10, CCB.C_LTGREEN)
+		vl.custom_minimum_size.x = 20
+		vl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		_part_bars.append(bar)
+		_part_vals.append(vl)
 
 	var col_needs := VBoxContainer.new()
 	col_needs.add_theme_constant_override("separation", 1)
 	col_needs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row1.add_child(col_needs)
-	_pain_lbl = _mk_lbl(col_needs, "无痛", 12, CCB.C_GREEN)
-	_hunger_lbl = _mk_lbl(col_needs, "饱足", 12, CCB.C_GREEN)
-	_thirst_lbl = _mk_lbl(col_needs, "不渴", 12, CCB.C_GREEN)
-	_fatigue_lbl = _mk_lbl(col_needs, "精力尚可", 12, CCB.C_LTGRAY)
-	_temp_lbl = _mk_lbl(col_needs, "体温: 舒适", 12, CCB.C_LTGRAY)
-	_morale_lbl = _mk_lbl(col_needs, "心境: :)", 12, CCB.C_LTGREEN)
+	_pain_lbl = _mk_lbl(col_needs, "无痛", 11, CCB.C_GREEN)
+	_hunger_lbl = _mk_lbl(col_needs, "饱足", 11, CCB.C_GREEN)
+	_thirst_lbl = _mk_lbl(col_needs, "不渴", 11, CCB.C_GREEN)
+	_fatigue_lbl = _mk_lbl(col_needs, "精力尚可", 11, CCB.C_LTGRAY)
+	_temp_lbl = _mk_lbl(col_needs, "体温:舒适", 11, CCB.C_LTGRAY)
+	_morale_lbl = _mk_lbl(col_needs, "心境 :)", 11, CCB.C_LTGREEN)
 
 	var col_stats := VBoxContainer.new()
 	col_stats.add_theme_constant_override("separation", 1)
-	col_stats.custom_minimum_size.x = 76
+	col_stats.custom_minimum_size.x = 70
 	row1.add_child(col_stats)
-	_str_lbl = _mk_lbl(col_stats, "力量  8", 12, CCB.C_WHITE)
-	_dex_lbl = _mk_lbl(col_stats, "敏捷  8", 12, CCB.C_WHITE)
-	_int_lbl = _mk_lbl(col_stats, "智力  8", 12, CCB.C_WHITE)
-	_per_lbl = _mk_lbl(col_stats, "感知  8", 12, CCB.C_WHITE)
-	_focus_lbl = _mk_lbl(col_stats, "专注 100", 12, CCB.C_CYAN)
-	_safe_lbl = _mk_lbl(col_stats, "安全  开", 12, CCB.C_LTGREEN)
+	_str_lbl = _mk_lbl(col_stats, "力量  8", 11, CCB.C_WHITE)
+	_dex_lbl = _mk_lbl(col_stats, "敏捷  8", 11, CCB.C_WHITE)
+	_int_lbl = _mk_lbl(col_stats, "智力  8", 11, CCB.C_WHITE)
+	_per_lbl = _mk_lbl(col_stats, "感知  8", 11, CCB.C_WHITE)
+	_focus_lbl = _mk_lbl(col_stats, "专注 100", 11, CCB.C_CYAN)
+	_safe_lbl = _mk_lbl(col_stats, "安全 开", 11, CCB.C_LTGREEN)
 
-	root.add_child(CCB.divider())
-
-	# --- ROW 2: Movement Mode, Speed, Sound, Stamina Bar & Active Flags ---
+	# --- ROW 2: Move Mode, Speed, Sound, Visual Stamina Bar & Active Flags ---
 	var row2a := HBoxContainer.new()
 	row2a.add_theme_constant_override("separation", 8)
 	root.add_child(row2a)
-	_move_lbl = _mk_lbl(row2a, "姿态: 行走", 12, CCB.C_WHITE)
-	_speed_lbl = _mk_lbl(row2a, "速度 100", 12, CCB.C_LTGRAY)
-	_sound_lbl = _mk_lbl(row2a, "声响 0", 12, CCB.C_DKGRAY)
+	_move_lbl = _mk_lbl(row2a, "姿态:[行走]", 11, CCB.C_WHITE)
+	_speed_lbl = _mk_lbl(row2a, "速度 100", 11, CCB.C_LTGRAY)
+	_sound_lbl = _mk_lbl(row2a, "声响 0", 11, CCB.C_DKGRAY)
 	_sound_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_sound_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 
 	var row2b := HBoxContainer.new()
 	row2b.add_theme_constant_override("separation", 6)
 	root.add_child(row2b)
-	_stam_lbl = _mk_lbl(row2b, "耐力 ||||| 100%", 12, CCB.C_CYAN)
-	_flags_lbl = _mk_lbl(row2b, "", 12, CCB.C_YELLOW)
-	_flags_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_flags_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_mk_lbl(row2b, "耐力", 11, CCB.C_CYAN)
+	_stam_bar = CCB.create_bar(8.0, CCB.C_CYAN)
+	row2b.add_child(_stam_bar)
+	_stam_val_lbl = _mk_lbl(row2b, "100%", 11, CCB.C_CYAN)
+	_flags_lbl = _mk_lbl(row2b, "", 11, CCB.C_YELLOW)
 
-	root.add_child(CCB.divider())
+	# --- CATACLYSM BIO-HAZARD STRIP (Radiation / Mutagen / Wounds) ---
+	_ccb_bio_card = PanelContainer.new()
+	_ccb_bio_card.add_theme_stylebox_override("panel", CCB.box(Color(0.08, 0.05, 0.05, 0.90), CCB.BORDER_EMBER, 7, 4, 1, 5))
+	_ccb_bio_card.visible = false
+	root.add_child(_ccb_bio_card)
+	var bio_col := VBoxContainer.new()
+	bio_col.add_theme_constant_override("separation", 2)
+	_ccb_bio_card.add_child(bio_col)
+	var bio_r1 := HBoxContainer.new()
+	bio_r1.add_theme_constant_override("separation", 6)
+	bio_col.add_child(bio_r1)
+	_rad_lbl = _mk_lbl(bio_r1, "辐射: 0 mSv (绿)", 11, CCB.C_LTGREEN)
+	_rad_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mut_lbl = _mk_lbl(bio_r1, "诱变:0 | 变异:0", 11, CCB.C_MAGENTA)
+	_wound_lbl = _mk_lbl(bio_col, "状态: 无流血/感染", 10, CCB.C_LTGRAY)
 
-	# --- ROW 3: Location + Z-level + Black-Framed Minimap ---
+	# --- ROW 3: Location + Z-level + Framed Minimap ---
 	var row3 := HBoxContainer.new()
 	row3.add_theme_constant_override("separation", 6)
 	root.add_child(row3)
 	_loc_lbl = _mk_lbl(row3, "沧灵城", 13, CCB.C_LTCYAN)
 	_loc_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_z_lbl = _mk_lbl(row3, "Z:0 (地面)", 12, CCB.C_LTGRAY)
+	_z_lbl = _mk_lbl(row3, "Z:0 (地面)", 11, CCB.C_LTGRAY)
 
 	var map_frame := PanelContainer.new()
-	map_frame.add_theme_stylebox_override("panel", CCB.box(Color("050505"), CCB.BORDER, 1, 1, 1))
+	map_frame.add_theme_stylebox_override("panel", CCB.box(Color("05080b"), CCB.BORDER, 2, 2, 1, 4))
 	root.add_child(map_frame)
 	minimap = Survey.new()
-	minimap.custom_minimum_size.y = 112
+	minimap.custom_minimum_size.y = 104
 	minimap.build(world)
 	map_frame.add_child(minimap)
 
-	root.add_child(CCB.divider())
-
-	# --- ROW 4: Date, Clock, Weather, Lighting & Active Mission ---
+	# --- ROW 4: Date, Clock, Weather, Lighting & Economy/Kills ---
 	var row4a := HBoxContainer.new()
 	row4a.add_theme_constant_override("separation", 6)
 	root.add_child(row4a)
-	_time_lbl = _mk_lbl(row4a, "", 12, CCB.C_YELLOW)
+	_time_lbl = _mk_lbl(row4a, "", 11, CCB.C_YELLOW)
 	_time_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_weather_lbl = _mk_lbl(row4a, "", 12, CCB.C_WHITE)
+	_weather_lbl = _mk_lbl(row4a, "", 11, CCB.C_WHITE)
 
 	var row4b := HBoxContainer.new()
 	row4b.add_theme_constant_override("separation", 6)
 	root.add_child(row4b)
-	_light_lbl = _mk_lbl(row4b, "光线: 明亮", 12, CCB.C_LTGRAY)
+	_light_lbl = _mk_lbl(row4b, "照明: 明亮", 11, CCB.C_LTGRAY)
 	_light_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_quest_lbl = _mk_lbl(row4b, "铜钱 10文 | 帮工 0次", 12, CCB.C_BROWN)
-
-	root.add_child(CCB.divider())
+	_quest_lbl = _mk_lbl(row4b, "", 11, CCB.C_BROWN)
 
 	# --- ROW 5: Wielded Item & Carry Capacity ---
-	_wield_lbl = _mk_lbl(root, "手持: 空手", 12, CCB.C_WHITE)
-	_carry_lbl = _mk_lbl(root, "水壶 500/750ml | 容积 0.0/2.5L | 重 0.0kg", 11, CCB.C_LTGRAY)
+	_wield_lbl = _mk_lbl(root, "手持: 空手", 11, CCB.C_WHITE)
+	_carry_lbl = _mk_lbl(root, "水壶 500/750ml", 10, CCB.C_LTGRAY)
 
 	root.add_child(CCB.divider())
 
-	# --- ROW 6: Authentic CCB 8-Direction Compass ---
+	# --- ROW 6: 8-Direction CCB Compass ---
 	var comp_grid := GridContainer.new()
 	comp_grid.columns = 3
 	comp_grid.add_theme_constant_override("h_separation", 4)
@@ -190,7 +241,7 @@ func build(world: RefCounted) -> void:
 	root.add_child(comp_grid)
 	_compass_cells.clear()
 	for i in range(9):
-		var lbl := _mk_lbl(comp_grid, "@" if i == 4 else ".", 11, CCB.C_LTCYAN if i == 4 else CCB.C_DKGRAY)
+		var lbl := _mk_lbl(comp_grid, "@" if i == 4 else ".", 10, CCB.C_LTCYAN if i == 4 else CCB.C_DKGRAY)
 		lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		if i == 4:
 			lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -200,8 +251,8 @@ func build(world: RefCounted) -> void:
 
 	root.add_child(CCB.divider())
 
-	# --- ROW 7: Active Direction/Action Prompt + CCB Message Log ---
-	status_prompt = _mk_lbl(root, "", 12, CCB.C_YELLOW, true)
+	# --- ROW 7: Prompt Bar + Color-Coded CCB Message Log ---
+	status_prompt = _mk_lbl(root, "", 11, CCB.C_YELLOW, true)
 	status_prompt.visible = false
 
 	var log_scroll := ScrollContainer.new()
@@ -215,9 +266,8 @@ func build(world: RefCounted) -> void:
 
 	root.add_child(CCB.divider())
 
-	# --- ROW 8: Compact CCB Key Strip ---
-	var key_bar := _mk_lbl(root, "Enter动作 J技能 U运功 &制作 M委托 m全图 i囊 E吃 ?键", 10, CCB.C_DKGRAY, true)
-	key_bar.clip_text = false
+	# --- ROW 8: Compact Key Strip ---
+	_key_bar = _mk_lbl(root, "Enter动作 J技能 U运功 &制作 M委托 m全图 i囊 O联机 Esc菜单", 10, CCB.C_DKGRAY, true)
 
 
 func _mk_lbl(parent: Node, text: String, font_size: int, color: Color, wrap := false) -> Label:
@@ -240,20 +290,24 @@ func add_message(text: String, clock_text: String) -> void:
 	if text.is_empty():
 		return
 	var col := CCB.C_WHITE
-	if "砸" in text or "碎" in text or "受阻" in text or "不足" in text or "无法" in text or "没有" in text or "已空" in text:
+	if "辐射" in text or "流血" in text or "咬伤" in text or "感染" in text or "安全模式" in text or "暴击" in text or "击中你的" in text:
+		col = CCB.C_LTRED
+	elif "诱变" in text or "变异" in text or "跨越阈值" in text or "净化" in text:
+		col = CCB.C_MAGENTA
+	elif "砸" in text or "碎" in text or "受阻" in text or "不足" in text or "无法" in text or "没有" in text or "已空" in text:
 		col = CCB.C_YELLOW if ("没有" in text or "受阻" in text or "无法" in text or "不足" in text or "已空" in text) else CCB.C_LTRED
-	elif "拿起" in text or "拾取" in text or "穿上" in text or "吃" in text or "饮" in text or "喝" in text or "包扎" in text or "点亮" in text or "研读" in text or "工钱" in text or "铜钱" in text:
+	elif "击毙" in text or "拿起" in text or "拾取" in text or "穿戴" in text or "穿上" in text or "吃" in text or "饮" in text or "喝" in text or "包扎" in text or "点亮" in text or "铜钱" in text:
 		col = CCB.C_LTGREEN
-	elif "翻越" in text or "翻过" in text or "跃过" in text or "打开" in text or "推开" in text or "拖拽" in text or "拖运" in text:
+	elif "翻越" in text or "打开" in text or "推开" in text or "拖拽" in text or "联机" in text or "房主" in text:
 		col = CCB.C_LTCYAN
-	elif "存档" in text or "调试" in text or "姿态" in text or "安全模式" in text:
+	elif "存档" in text or "姿态" in text or "盖革" in text:
 		col = CCB.C_YELLOW
 
 	_log_history.push_front({"clock": clock_text, "text": text, "color": col})
 	if _log_history.size() > 80:
 		_log_history.resize(80)
 
-	var entry := _mk_lbl(log_container, "[%s] %s" % [clock_text, text], 12, col, true)
+	var entry := _mk_lbl(log_container, "[%s] %s" % [clock_text, text], 11, col, true)
 	log_container.move_child(entry, 0)
 	if log_container.get_child_count() > 16:
 		var old := log_container.get_child(16)
@@ -264,9 +318,16 @@ func add_message(text: String, clock_text: String) -> void:
 		if i == 0:
 			lbl.add_theme_color_override("font_color", col)
 		elif i <= 2:
-			lbl.add_theme_color_override("font_color", col.lerp(CCB.C_LTGRAY, 0.35))
+			lbl.add_theme_color_override("font_color", col.lerp(CCB.C_LTGRAY, 0.32))
 		else:
 			lbl.add_theme_color_override("font_color", CCB.C_DKGRAY)
+
+
+func set_style(style_name: String) -> void:
+	if style_name == "thick":
+		custom_minimum_size.x = 366
+	else:
+		custom_minimum_size.x = 338
 
 
 func clear_messages() -> void:
@@ -280,131 +341,183 @@ func get_history() -> Array[Dictionary]:
 	return _log_history
 
 
-func refresh(world: RefCounted, weather: RefCounted, board: Control) -> void:
+func refresh(world: RefCounted, weather: RefCounted, board: Control, net_session: RefCounted = null) -> void:
 	var st: Dictionary = world.character_status()
+	var is_ccb: bool = world.is_cataclysm_pack()
+
+	# Top telemetry pills
+	if is_ccb:
+		_pack_badge_lbl.text = "大灾变 · CCB"
+		_pack_badge.add_theme_stylebox_override("panel", CCB.box(Color(0.18, 0.08, 0.06, 0.92), CCB.BORDER_EMBER, 7, 2, 1, 4))
+		_pack_badge_lbl.add_theme_color_override("font_color", Color("ffb59e"))
+		_key_bar.text = "撞击近战 i原版背包/图鉴 @辐射与诱变 m全图 O联机 Esc主菜单"
+	else:
+		_pack_badge_lbl.text = "沧溟修真 · 沧灵城"
+		_pack_badge.add_theme_stylebox_override("panel", CCB.box(Color(0.06, 0.16, 0.19, 0.92), CCB.BORDER_CYAN, 7, 2, 1, 4))
+		_pack_badge_lbl.add_theme_color_override("font_color", CCB.C_LTCYAN)
+		_key_bar.text = "Enter动作 J技能 U运功 &制作 M委托 m全图 i囊 O联机 Esc主菜单"
+
+	var remote_n: int = int(world.remote_player_count())
+	if net_session != null and net_session.is_online():
+		var mtxt := "HOST %d人" % (remote_n + 1) if net_session.mode == 1 else "CLIENT %d人" % (remote_n + 1)
+		_coop_badge_lbl.text = mtxt
+		_coop_badge.add_theme_stylebox_override("panel", CCB.box(Color(0.07, 0.22, 0.18, 0.92), CCB.C_LTGREEN, 7, 2, 1, 4))
+		_coop_badge_lbl.add_theme_color_override("font_color", CCB.C_LTGREEN)
+	else:
+		_coop_badge_lbl.text = "单机"
+		_coop_badge.add_theme_stylebox_override("panel", CCB.box(Color(0.05, 0.08, 0.11, 0.90), CCB.BORDER, 7, 2, 1, 4))
+		_coop_badge_lbl.add_theme_color_override("font_color", CCB.C_LTGRAY)
+	_fps_lbl.text = "%d FPS" % Engine.get_frames_per_second()
+
+	# Visual 6-Limb HP Bars
 	var hp_arr: Array = st.get("part_hp", [84, 84, 84, 84, 84, 84])
 	var max_hp: int = int(st.get("max_part_hp", 84))
 	for i in range(mini(6, hp_arr.size())):
 		var hp: int = int(hp_arr[i])
-		_part_labels[i].text = "%s %s" % [PART_NAMES[i], CCB.hp_bar_text(hp, max_hp)]
-		_part_labels[i].add_theme_color_override("font_color", CCB.hp_bar_color(hp, max_hp))
+		var col := CCB.hp_bar_color(hp, max_hp)
+		_part_bars[i].max_value = float(maxi(1, max_hp))
+		_part_bars[i].value = float(hp)
+		CCB.set_bar_color(_part_bars[i], col)
+		_part_vals[i].text = str(hp)
+		_part_vals[i].add_theme_color_override("font_color", col)
 
 	# Needs
 	var pain: int = int(st.get("pain", 0))
 	_pain_lbl.text = str(st.get("pain_text", "无痛"))
 	_pain_lbl.add_theme_color_override("font_color", CCB.C_GREEN if pain <= 0 else (CCB.C_YELLOW if pain < 25 else CCB.C_RED))
-
 	var kcal: int = int(st.get("kcal", 2400))
 	_hunger_lbl.text = "饱食:%s" % str(st.get("hunger_text", "正常"))
 	_hunger_lbl.add_theme_color_override("font_color", CCB.C_GREEN if kcal >= 1700 else (CCB.C_YELLOW if kcal >= 1000 else CCB.C_RED))
-
 	var hyd: int = int(st.get("hydration", 100))
 	_thirst_lbl.text = "口渴:%s" % str(st.get("thirst_text", "正常"))
 	_thirst_lbl.add_theme_color_override("font_color", CCB.C_GREEN if hyd >= 65 else (CCB.C_YELLOW if hyd >= 35 else CCB.C_RED))
-
 	var fat: int = int(st.get("fatigue", 0))
 	_fatigue_lbl.text = "精力:%s" % str(st.get("fatigue_text", "尚可"))
 	_fatigue_lbl.add_theme_color_override("font_color", CCB.C_LTGREEN if fat < 30 else (CCB.C_YELLOW if fat < 65 else CCB.C_RED))
-
 	var temp_str: String = str(st.get("temp_text", "舒适"))
-	var body_c: float = float(st.get("body_temp_c", 37.0))
-	var wet_i: int = int(st.get("wetness", 0))
 	_temp_lbl.text = "体温:%s" % temp_str
-	var tcol := CCB.C_LTGRAY
-	if body_c < 35.6:
-		tcol = CCB.C_LTCYAN
-	elif body_c < 36.4 or wet_i >= 35:
-		tcol = CCB.C_CYAN
-	elif body_c > 37.9:
-		tcol = CCB.C_YELLOW
-	_temp_lbl.add_theme_color_override("font_color", tcol)
-
 	var morale: int = int(st.get("morale", 10))
 	var face := ":D" if morale >= 20 else (":)" if morale >= 5 else (":|" if morale >= -10 else ":("))
-	_morale_lbl.text = "心境: %s" % face
+	_morale_lbl.text = "心境 %s" % face
 	_morale_lbl.add_theme_color_override("font_color", CCB.C_LTGREEN if morale >= 5 else (CCB.C_YELLOW if morale >= -10 else CCB.C_RED))
 
 	# Stats
-	_str_lbl.text = "力量  %d" % int(st.get("str", 8))
-	_dex_lbl.text = "敏捷  %d" % int(st.get("dex", 8))
-	_int_lbl.text = "智力  %d" % int(st.get("int", 8))
-	_per_lbl.text = "感知  %d" % int(st.get("per", 8))
+	_str_lbl.text = "力量 %2d" % int(st.get("str", 8))
+	_dex_lbl.text = "敏捷 %2d" % int(st.get("dex", 8))
+	_int_lbl.text = "智力 %2d" % int(st.get("int", 8))
+	_per_lbl.text = "感知 %2d" % int(st.get("per", 8))
 	_focus_lbl.text = "专注 %d" % int(st.get("focus", 100))
 	var safe: bool = bool(st.get("safe_mode", true))
-	_safe_lbl.text = "安全  %s" % ("开" if safe else "关")
+	_safe_lbl.text = "安全 %s" % ("开" if safe else "关")
 	_safe_lbl.add_theme_color_override("font_color", CCB.C_LTGREEN if safe else CCB.C_RED)
 
-	# Row 2: Move mode / speed / sound / stamina / badges
+	# Row 2: Move mode / speed / sound / stamina bar / flags
 	var mmode: int = int(st.get("move_mode", 0))
-	var mlabel: String = str(st.get("move_mode_text", "行走"))
-	_move_lbl.text = "姿态:[%s]" % mlabel
-	var mcol := CCB.C_WHITE if mmode == 0 else (CCB.C_YELLOW if mmode == 1 else (CCB.C_CYAN if mmode == 2 else CCB.C_DKGRAY))
-	_move_lbl.add_theme_color_override("font_color", mcol)
+	_move_lbl.text = "姿态:[%s]" % str(st.get("move_mode_text", "行走"))
+	_move_lbl.add_theme_color_override("font_color", CCB.C_WHITE if mmode == 0 else (CCB.C_YELLOW if mmode == 1 else CCB.C_CYAN))
 	_speed_lbl.text = "速度 %d" % int(st.get("speed", 100))
 	var snd: int = int(st.get("last_sound", 0))
 	_sound_lbl.text = "声响 %d" % snd
-	_sound_lbl.add_theme_color_override("font_color", CCB.C_RED if snd >= 24 else (CCB.C_YELLOW if snd >= 10 else CCB.C_DKGRAY))
+	_sound_lbl.add_theme_color_override("font_color", CCB.C_RED if snd >= 20 else (CCB.C_YELLOW if snd >= 10 else CCB.C_DKGRAY))
 
 	var stam: int = int(st.get("stamina", 10000))
 	var stam_pct := int(round(float(stam) / 100.0))
-	_stam_lbl.text = "耐力 %s %d%%" % [CCB.hp_bar_text(stam, 10000), stam_pct]
-	_stam_lbl.add_theme_color_override("font_color", CCB.C_CYAN if stam >= 5000 else (CCB.C_YELLOW if stam >= 2500 else CCB.C_RED))
+	var scol := CCB.C_CYAN if stam >= 5000 else (CCB.C_YELLOW if stam >= 2500 else CCB.C_RED)
+	_stam_bar.value = float(stam_pct)
+	CCB.set_bar_color(_stam_bar, scol)
+	_stam_val_lbl.text = "%d%%" % stam_pct
+	_stam_val_lbl.add_theme_color_override("font_color", scol)
 
 	var badges: PackedStringArray = PackedStringArray()
-	if world.is_grabbing():
-		badges.append("[拖家具]")
-	if bool(st.get("hauling", false)):
-		badges.append("[拖运]")
-	if bool(st.get("lamp_lit", false)):
-		var lname: String = str(st.get("light_name", "照明"))
-		badges.append("[%s]" % (lname if not lname.is_empty() else "点灯"))
-	if bool(st.get("exert_warmth", false)):
-		badges.append("[御寒]")
-	var jiali_v: int = int(st.get("jiali", 0))
-	if jiali_v > 0:
-		badges.append("[加力%d]" % jiali_v)
-	var spar_st: Dictionary = world.spar_status()
-	if bool(spar_st.get("active", false)):
-		badges.append("[切磋中]")
+	if world.is_grabbing(): badges.append("[拖家具]")
+	if bool(st.get("hauling", false)): badges.append("[拖运]")
+	if bool(st.get("lamp_lit", false)): badges.append("[手灯]")
+	if not is_ccb:
+		if bool(st.get("exert_warmth", false)): badges.append("[御寒]")
+		var jiali_v: int = int(st.get("jiali", 0))
+		if jiali_v > 0: badges.append("[加力%d]" % jiali_v)
+	elif bool(st.get("changing", false)):
+		badges.append("[异变中]")
 	_flags_lbl.text = " ".join(badges)
+
+	# Cataclysm Bio-Hazard Card (Radiation, Mutagen & Wounds)
+	_ccb_bio_card.visible = is_ccb
+	if is_ccb:
+		var rad_v: int = int(st.get("rad", 0))
+		var trad: float = float(st.get("tile_rad", 0.0))
+		var bcol: String = str(st.get("rad_badge_color", "绿色"))
+		_rad_lbl.text = "辐射:%dmSv %s%s" % [rad_v, bcol.left(2), (" (区%.0f!)" % trad) if trad > 0.1 else ""]
+		_rad_lbl.add_theme_color_override("font_color", CCB.C_LTGREEN if rad_v < 30 and trad <= 0.1 else (CCB.C_YELLOW if rad_v < 120 else CCB.C_LTRED))
+		var muts: Array = st.get("mutations", [])
+		var cat_v: int = int(st.get("mutagen_catalyst", 0))
+		_mut_lbl.text = "催化:%d | 变异:%d" % [cat_v, muts.size()]
+		var wounds: Array = st.get("wounds", [])
+		if wounds.is_empty():
+			_wound_lbl.text = "伤情: 无流血/咬伤/感染  |  累赘:%d" % int(st.get("encumbrance", 0))
+			_wound_lbl.add_theme_color_override("font_color", CCB.C_LTGRAY)
+		else:
+			var ws := PackedStringArray()
+			for w: Dictionary in wounds:
+				var tags := ""
+				if int(w.get("bleed", 0)) > 0: tags += "流血"
+				if bool(w.get("bite", false)): tags += "咬伤!"
+				if bool(w.get("infected", false)): tags += "感染!"
+				ws.append("%s:%s" % [str(w.get("part", "")), tags])
+			_wound_lbl.text = "伤情: " + " ".join(ws)
+			_wound_lbl.add_theme_color_override("font_color", CCB.C_LTRED)
 
 	# Row 3: Location + Z + Coords
 	var pos: Vector2i = world.pos
 	var z: int = int(world.floor)
-	var z_name := "地面" if z == 0 else ("二层" if z == 1 else "三层")
 	_loc_lbl.text = str(world.location(pos))
-	_z_lbl.text = "Z:%d %s (%d,%d)" % [z, z_name, pos.x, pos.y]
+	_z_lbl.text = "Z:%d (%d,%d)" % [z, pos.x, pos.y]
 
-	# Row 4: Calendar + Weather + Light + Quest
+	# Row 4: Calendar + Weather + Light + Economy/Kills
 	var sky := CanglingCalendar.at_minute(world.minutes)
 	var phase := CCB.phase_label_color(sky)
-	_time_lbl.text = "%s · %s" % [CanglingCalendar.time_label(world.minutes), phase[0]]
+	if is_ccb and world.has_method("get_ccb_turn_seconds"):
+		var secs: int = int(world.get_ccb_turn_seconds())
+		_time_lbl.text = "%s:%02d · %s (回合制)" % [CanglingCalendar.time_label(world.minutes), secs, phase[0]]
+	else:
+		_time_lbl.text = "%s · %s" % [CanglingCalendar.time_label(world.minutes), phase[0]]
 	_time_lbl.add_theme_color_override("font_color", phase[1])
 	_weather_lbl.text = weather.label()
 	var indoors := false
 	if board != null and board.cells.has(pos):
 		indoors = (int(board.cells[pos][3]) & 1) != 0
-	var lname_lit: String = str(st.get("light_name", ""))
-	var light_desc := "%s照明" % lname_lit if bool(st.get("lamp_lit", false)) and not lname_lit.is_empty() else ("室内微光" if indoors else ("日光充足" if float(sky.get("daylight", 1.0)) > 0.45 else "夜色朦胧"))
+	var light_desc := "手持照明" if bool(st.get("lamp_lit", false)) else ("室内微光" if indoors else ("日光充足" if float(sky.get("daylight", 1.0)) > 0.45 else "夜色朦胧"))
 	_light_lbl.text = "照明: %s" % light_desc
-	var pot: int = int(world.get_potential())
-	var nl: int = int(st.get("neili", 0))
-	var nl_max: int = int(st.get("max_neili", 0))
-	_quest_lbl.text = "铜钱 %d文 | 潜能 %d%s" % [int(world.coins), pot, (" | 内力 %d/%d" % [nl, nl_max]) if nl_max > 0 else ""]
 
-	# Row 5: Wielded & Carry
-	var wield_txt: String = str(st.get("wielded_text", "空手"))
-	var bash_pw: int = int(st.get("bash_power", 12))
-	_wield_lbl.text = "手持: %s  (破拆:%d | 防雨:%d%%)" % [wield_txt, bash_pw, int(st.get("rain_resist", 0))]
-	_wield_lbl.add_theme_color_override("font_color", CCB.C_YELLOW if int(st.get("wielded_id", -1)) >= 0 else CCB.C_WHITE)
+	if is_ccb:
+		_quest_lbl.text = "击杀 %d | 城镇丧尸 %d" % [int(world.get_kills()), int(world.alive_monster_count())]
+		_quest_lbl.add_theme_color_override("font_color", CCB.C_EMBER)
+		var ccb_d: Dictionary = st.get("ccb", {})
+		_wield_lbl.text = "手持: %s (钝%d/斩%d/刺%d)" % [
+			str(ccb_d.get("wielded_name", "空手")),
+			int(ccb_d.get("wielded_bash", 0)),
+			int(ccb_d.get("wielded_cut", 0)),
+			int(ccb_d.get("wielded_stab", 0)),
+		]
+		var sk: Dictionary = ccb_d.get("skills", {})
+		_carry_lbl.text = "近战%d 钝%d 斩%d 刺%d 闪避%d 急救%d" % [
+			int(sk.get("melee", 0)), int(sk.get("bashing", 0)), int(sk.get("cutting", 0)),
+			int(sk.get("stabbing", 0)), int(sk.get("dodge", 0)), int(sk.get("firstaid", 0)),
+		]
+	else:
+		var pot: int = int(world.get_potential())
+		var nl: int = int(st.get("neili", 0))
+		var nl_max: int = int(st.get("max_neili", 0))
+		_quest_lbl.text = "铜钱 %d文 | 潜能 %d%s" % [int(world.coins), pot, (" | 内力 %d/%d" % [nl, nl_max]) if nl_max > 0 else ""]
+		_quest_lbl.add_theme_color_override("font_color", CCB.C_BROWN)
+		var wield_txt: String = str(st.get("wielded_text", "空手"))
+		_wield_lbl.text = "手持: %s (破拆:%d | 防雨:%d%%)" % [wield_txt, int(st.get("bash_power", 12)), int(st.get("rain_resist", 0))]
+		var vol_l := float(st.get("carry_volume_ml", 0)) / 1000.0
+		var max_l := float(st.get("max_carry_volume_ml", 2500)) / 1000.0
+		var wt_kg := float(st.get("carry_weight_g", 0)) / 1000.0
+		_carry_lbl.text = "水壶 %d/%dml | 容积 %.1f/%.1fL | 重 %.1fkg" % [
+			int(world.bottle_water()), int(world.bottle_capacity()), vol_l, max_l, wt_kg]
 
-	var vol_l := float(st.get("carry_volume_ml", 0)) / 1000.0
-	var max_l := float(st.get("max_carry_volume_ml", 2500)) / 1000.0
-	var wt_kg := float(st.get("carry_weight_g", 0)) / 1000.0
-	_carry_lbl.text = "水壶 %d/%dml | 容积 %.1f/%.1fL | 重 %.1fkg" % [
-		int(world.bottle_water()), int(world.bottle_capacity()), vol_l, max_l, wt_kg]
-
-	# Row 6: 8-Direction CCB Compass (slots: 0=NW, 1=N, 2=NE, 3=W, 4=@, 5=E, 6=SW, 7=S, 8=SE)
+	# Row 6: 8-Direction Compass
 	var comp: Array = world.compass_summary()
 	const MAP_IDX := [0, 1, 2, 3, -1, 4, 5, 6, 7]
 	for slot in range(9):
@@ -423,7 +536,6 @@ func refresh(world: RefCounted, weather: RefCounted, board: Control) -> void:
 				_compass_cells[slot].add_theme_color_override("font_color", CCB.C_DKGRAY)
 			else:
 				_compass_cells[slot].text = "%s:%s(%d)" % [dname, lbl_txt, dist]
-				var ccol := CCB.C_YELLOW if ("冼老板" in lbl_txt or "王铁匠" in lbl_txt or "平大夫" in lbl_txt or "陈馆主" in lbl_txt or "周教头" in lbl_txt or "顾夫子" in lbl_txt or "唐掌柜" in lbl_txt or "老船夫" in lbl_txt or "说书先生" in lbl_txt) else CCB.C_LTGRAY
-				_compass_cells[slot].add_theme_color_override("font_color", ccol)
+				_compass_cells[slot].add_theme_color_override("font_color", CCB.C_LTGRAY)
 
 	minimap.queue_redraw()

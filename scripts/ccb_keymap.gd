@@ -21,6 +21,8 @@ const FULLWIDTH_MAP := {
 	"＠": "@",
 	"＋": "+",
 	"＆": "&",
+	"／": "/",
+	"｝": "}",
 }
 
 # Exact CCB DEFAULTMODE bindings from Cataclysm-Cleanwater-Bomb/data/raw/keybindings.json
@@ -43,7 +45,9 @@ const CHAR_ACTIONS := {
 	"\\": "haul",
 	"\"": "move_mode",
 	"@": "character",
-	"+": "take_off",
+	"+": "armor_layers",
+	"/": "advanced_inv",
+	"}": "sidebar_mgr",
 	"|": "wait",
 	"$": "sleep",
 	"<": "stairs_up",
@@ -64,6 +68,7 @@ const CHAR_ACTIONS := {
 	"C": "chat",
 	"A": "apply_wielded",
 	"M": "missions",
+	"N": "toggle_pixel_minimap",
 	"P": "messages",
 	"S": "save",
 	"Z": "zoom_out",

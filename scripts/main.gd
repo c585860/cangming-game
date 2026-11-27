@@ -23,6 +23,11 @@ const SkillUI = preload("res://scripts/skill_ui.gd")
 const ShopUI = preload("res://scripts/shop_ui.gd")
 const CraftUI = preload("res://scripts/craft_ui.gd")
 const AudioAmbience = preload("res://scripts/audio_ambience.gd")
+const MainMenu = preload("res://scripts/main_menu.gd")
+const CCBVanillaUI = preload("res://scripts/ccb_vanilla_ui.gd")
+const CCBVTheme = preload("res://scripts/ccb_vanilla_theme.gd")
+const CCBVSidebar = preload("res://scripts/ccb_vanilla_sidebar.gd")
+const CcbNativeHost = preload("res://scripts/ccb_native/ccb_native_host.gd")
 const NONE := Vector2i(-1, -1)
 const REALTIME_MIN_PER_SEC := 1.0 / 1.5 # Real-time clock: 1 game minute every 1.5 real seconds (~36 min/day)
 
@@ -46,9 +51,32 @@ var work_elapsed := 0.0
 var work_duration := 2.5
 var work_label := ""
 var spar_accum := 0.0
+var monster_tick_accum := 0.0
 var realtime_clock_accum := 0.0
+var main_menu: Control
+var ccb_native_host: CcbNativeHost
+var in_main_menu := true
+var ccb_inv_tab := "bag"
+var ccb_inv_sel := 0
+var ccb_pickup_sel: Dictionary = {}
+var ccb_search_query := ""
+var ccb_search_type := "ALL"
+var ccb_craft_cat := "CC_WEAPON"
+var ccb_craft_query := ""
+var ccb_craft_sel := 0
+var ccb_armor_sel := 0
+var ccb_action_cat := "look"
+var ccb_om_cursor := Vector2i.ZERO
+var ccb_om_cursor_init := false
+var ccb_om_search := ""
+var ccb_adv_left := "I"
+var ccb_adv_right := "5"
+var ccb_adv_side := 0
 var board: Board
 var sidebar: CCBSidebar
+var ccb_sidebar: CCBVSidebar
+var ccb_look_panel: PanelContainer
+var ccb_look_lbl: Label
 var pending_dir_action := ""
 var action_menu: PopupMenu
 var action_cell := NONE
@@ -91,10 +119,258 @@ func _ready() -> void:
 	theme.default_font = ui_font
 	theme.default_font_size = 14
 	_build_ui()
+	_wire_net_session()
 	audio_ambience = AudioAmbience.new()
 	add_child(audio_ambience)
-	_note("烟雨画桥，青瓦红灯。你踏入沧灵南门（随身潜能 30 点、铜钱 10 文）。按 M 查告示牌委托与全城师傅商铺，按 J 看技能，按 U 打坐运功，按 & 手工制作！")
+	_build_main_menu()
+	_build_ccb_native_host(ui_font)
 	_refresh()
+	if _should_auto_launch_ccb_native():
+		call_deferred("launch_ccb_native")
+
+
+func _should_auto_launch_ccb_native() -> bool:
+	if OS.get_cmdline_user_args().has("--no-auto-ccb") or OS.get_cmdline_args().has("--no-auto-ccb"):
+		return false
+	if not ClassDB.class_exists(&"CcbEngine"):
+		return false
+	var dll_path := ProjectSettings.globalize_path("res://bin/ccb_bridge.dll").simplify_path()
+	return FileAccess.file_exists(dll_path)
+
+
+func _build_ccb_native_host(ui_font: Font) -> void:
+	ccb_native_host = CcbNativeHost.new()
+	ccb_native_host.theme = theme
+	add_child(ccb_native_host)
+	ccb_native_host.build(ui_font)
+	ccb_native_host.return_to_launcher_requested.connect(_on_ccb_native_returned_to_launcher)
+
+
+func launch_ccb_native() -> bool:
+	if ccb_native_host == null:
+		return false
+	_stop()
+	_close_overlay()
+	_cancel_workstation(false)
+	in_main_menu = true
+	if main_menu != null:
+		main_menu.visible = false
+	if ccb_native_host.activate():
+		return true
+	if main_menu != null:
+		main_menu.visible = true
+	return false
+
+
+func _on_ccb_native_returned_to_launcher() -> void:
+	if main_menu != null:
+		in_main_menu = true
+		main_menu.visible = true
+		main_menu.refresh_status()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		if ccb_native_host != null:
+			ccb_native_host.shutdown_engine()
+
+
+func _build_main_menu() -> void:
+	main_menu = MainMenu.new()
+	main_menu.theme = theme
+	add_child(main_menu)
+	main_menu.build(world)
+	main_menu.start_ccb_game_requested.connect(func(wcfg: Dictionary, ccfg: Dictionary):
+		enter_ccb_game(wcfg, ccfg))
+	main_menu.launch_ccb_native_requested.connect(func():
+		launch_ccb_native())
+	main_menu.start_pack_requested.connect(func(pack_id: String, seed_val: int, scen_id: String, pname: String):
+		enter_pack(pack_id, seed_val, scen_id, pname))
+	main_menu.tileset_changed_requested.connect(func(ts_name: String):
+		_switch_tileset(ts_name))
+	main_menu.sidebar_style_changed_requested.connect(func(style_name: String):
+		if ccb_sidebar != null:
+			ccb_sidebar.set_layout_style(style_name)
+		if sidebar != null and sidebar.has_method("set_style"):
+			sidebar.set_style(style_name))
+	main_menu.load_save_requested.connect(func(path: String):
+		load_save_path(path))
+	main_menu.host_coop_requested.connect(func(pack_id: String, port_val: int, pname: String):
+		enter_pack(pack_id, randi(), "evacuee", pname)
+		_note(net_session.host_from_ui(world, port_val))
+		_refresh())
+	main_menu.join_coop_requested.connect(func(addr: String, port_val: int, pname: String):
+		enter_pack(main_menu.selected_pack, randi(), "evacuee", pname)
+		_note(net_session.join_from_ui(world, addr, port_val))
+		_refresh())
+	main_menu.toggle_roofs_requested.connect(func():
+		_debug_toggle_roofs())
+	main_menu.toggle_audio_requested.connect(func():
+		if audio_ambience != null and audio_ambience.has_method("toggle_mute"):
+			audio_ambience.toggle_mute())
+	main_menu.quit_requested.connect(func():
+		get_tree().quit())
+	in_main_menu = true
+	main_menu.visible = true
+
+
+func _switch_tileset(ts_name: String) -> void:
+	Board.Tiles.set_tileset_name(ts_name)
+	if board != null:
+		board.invalidate_lightmap()
+	_note("原版材质包已切换为：%s。" % ts_name)
+
+
+func _return_to_main_menu() -> void:
+	open_main_menu()
+
+
+func _sync_active_sidebar() -> void:
+	var is_ccb: bool = world.is_cataclysm_pack()
+	if sidebar != null:
+		sidebar.visible = not is_ccb
+	if ccb_sidebar != null:
+		ccb_sidebar.visible = is_ccb
+	if ccb_look_panel != null and not is_ccb:
+		ccb_look_panel.visible = false
+
+
+func open_main_menu() -> void:
+	_stop()
+	_close_overlay()
+	_cancel_workstation(false)
+	if main_menu != null:
+		in_main_menu = true
+		main_menu.visible = true
+		main_menu.selected_pack = str(world.get_pack_id())
+		main_menu.refresh_status()
+
+
+func enter_ccb_game(world_cfg: Dictionary, char_cfg: Dictionary) -> void:
+	_stop()
+	_close_overlay()
+	_cancel_workstation(false)
+	world.setup_ccb_world(world_cfg, char_cfg)
+	weather.set_override(-1, CanglingCalendar.at_minute(world.minutes), world.seed, true)
+	board.clear_footprints()
+	board.invalidate_lightmap()
+	atlas_cells.clear()
+	ccb_om_cursor_init = false
+	ccb_pickup_sel.clear()
+	look_at = NONE
+	peek_return = false
+	_sync_active_sidebar()
+	if ccb_sidebar != null:
+		ccb_sidebar.clear_messages()
+	if sidebar != null:
+		sidebar.clear_messages()
+	if main_menu != null:
+		main_menu.visible = false
+	in_main_menu = false
+	var db: Dictionary = world.ccb_db_stats()
+	_note("【大灾变：净水炸弹】世界已生成（%d 物品 / %d 怪物 / %d 掉落组 / %d 解剖表 / %d 配方）。严格回合制，按 ? 看按键，按 } 自定义侧边栏！" % [
+		int(db.get("items", 0)), int(db.get("monsters", 0)), int(db.get("monsterdrop_groups", 0)),
+		int(db.get("harvests", 0)), int(db.get("recipes", 0))
+	])
+	_refresh()
+	board.snap_visuals()
+
+
+func enter_pack(pack_id: String, seed_val: int, scenario_id := "evacuee", pname := "") -> void:
+	_stop()
+	_close_overlay()
+	_cancel_workstation(false)
+	world.setup_with_pack(pack_id, seed_val, scenario_id)
+	if not pname.is_empty():
+		world.set_player_name(pname)
+	weather.set_override(-1, CanglingCalendar.at_minute(world.minutes), world.seed, true)
+	board.clear_footprints()
+	board.invalidate_lightmap()
+	atlas_cells.clear()
+	ccb_om_cursor_init = false
+	ccb_pickup_sel.clear()
+	look_at = NONE
+	peek_return = false
+	_sync_active_sidebar()
+	if ccb_sidebar != null:
+		ccb_sidebar.clear_messages()
+	if sidebar != null:
+		sidebar.clear_messages()
+	if main_menu != null:
+		main_menu.visible = false
+	in_main_menu = false
+	if world.is_cataclysm_pack():
+		var db: Dictionary = world.ccb_db_stats()
+		_note("【大灾变 · CCB 本体】你在应急避难所中醒来（已挂载 %d 原版物品 / %d 变异 / %d 怪物）。直接撞击丧尸战斗，按 i 打开原版行囊与全物品图鉴，按 @ 查看辐射与诱变！" % [
+			int(db.get("items", 0)), int(db.get("mutations", 0)), int(db.get("monsters", 0))
+		])
+	else:
+		_note("烟雨画桥，青瓦红灯。你踏入沧灵南门（随身潜能 30 点、铜钱 10 文）。按 M 查告示牌委托与全城师傅商铺，按 J 看技能，按 U 打坐运功，按 & 手工制作！")
+	_refresh()
+	board.snap_visuals()
+
+
+func load_save_path(path: String) -> bool:
+	_stop()
+	_close_overlay()
+	if world.load_game(path):
+		weather.set_override(-1, CanglingCalendar.at_minute(world.minutes), world.seed, true)
+		board.clear_footprints()
+		board.invalidate_lightmap()
+		atlas_cells.clear()
+		look_at = NONE
+		peek_return = false
+		if main_menu != null:
+			main_menu.visible = false
+		in_main_menu = false
+		_sync_active_sidebar()
+		if ccb_sidebar != null:
+			ccb_sidebar.clear_messages()
+		if sidebar != null:
+			sidebar.clear_messages()
+		_note("已读取「%s」存档（%s）。" % [str(world.get_pack_name()), path.get_file()])
+		_refresh()
+		board.snap_visuals()
+		return true
+	_note("未能读取存档：%s" % path.get_file())
+	return false
+
+
+func _save_path_for_pack() -> String:
+	return "user://save_cataclysm.json" if world.is_cataclysm_pack() else "user://save_cangming.json"
+
+
+func _drain_ccb_messages() -> void:
+	if not world.has_method("pop_ccb_messages"):
+		return
+	var msgs: Array = world.pop_ccb_messages()
+	for m in msgs:
+		_note(str(m))
+
+
+func _wire_net_session() -> void:
+	net_session.set_weather_getter(func() -> int: return int(weather.override_kind))
+	net_session.status_message.connect(func(txt: String): _note(txt))
+	net_session.chat_received.connect(func(_pid: int, sender: String, txt: String):
+		_note("[联机聊天] %s: %s" % [sender, txt]))
+	net_session.remote_snapshot_applied.connect(func(_pid: int):
+		if board != null:
+			board.player_layer.queue_redraw()
+		if sidebar != null:
+			sidebar.refresh(world, weather, board, net_session))
+	net_session.world_mutation_applied.connect(func(_mut: Dictionary):
+		if board != null:
+			board.invalidate_lightmap()
+			board.player_layer.queue_redraw())
+	net_session.welcome_received.connect(func(pack_id: String, seed_val: int, mins_val: int, wkind: int, host_name: String):
+		var cur_name: String = str(world.get_player_name())
+		enter_pack(pack_id, seed_val, "evacuee", cur_name)
+		if mins_val > int(world.minutes):
+			world.advance_time(mins_val - int(world.minutes))
+		if wkind >= 0:
+			weather.set_override(wkind, CanglingCalendar.at_minute(world.minutes), world.seed, true)
+		_note("已同步房主「%s」的世界：核心包「%s」，种子 %d！" % [host_name, str(world.get_pack_name()), seed_val])
+		_refresh())
 
 
 func _build_ui() -> void:
@@ -122,6 +398,22 @@ func _build_ui() -> void:
 	sidebar.build(world)
 	split.add_child(sidebar)
 
+	ccb_sidebar = CCBVSidebar.new()
+	ccb_sidebar.build(world)
+	ccb_sidebar.visible = false
+	split.add_child(ccb_sidebar)
+
+	# Floating pure-vanilla CCB Look-Around Inspector Box ('x' / ';')
+	ccb_look_panel = PanelContainer.new()
+	ccb_look_panel.add_theme_stylebox_override("panel", CCBVTheme.box(CCBVTheme.BG_BLACK, CCBVTheme.BORDER_BRIGHT, 10, 8, 1))
+	ccb_look_panel.position = Vector2(12, 12)
+	ccb_look_panel.custom_minimum_size = Vector2(360, 0)
+	ccb_look_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ccb_look_panel.visible = false
+	add_child(ccb_look_panel)
+	ccb_look_lbl = CCBVTheme.mk_lbl(ccb_look_panel, "", 12, CCBVTheme.C_WHITE, true)
+	ccb_look_lbl.custom_minimum_size.x = 340
+
 	action_menu = PopupMenu.new()
 	action_menu.theme = theme
 	CCB.style_popup(action_menu)
@@ -147,18 +439,23 @@ func _build_ui() -> void:
 
 
 func _process(delta: float) -> void:
-	# Real-time clock progression (independent of player actions; only pauses in system/debug/help menus)
-	if opened not in ["pause", "new", "help", "debug"] and (wait_timer == null or wait_timer.time_left <= 0.0):
-		realtime_clock_accum += delta * REALTIME_MIN_PER_SEC
-		if realtime_clock_accum >= 1.0:
-			var whole_mins := int(realtime_clock_accum)
-			realtime_clock_accum -= float(whole_mins)
-			_sync_env_and_audio()
-			world.advance_time(whole_mins)
-			_refresh()
-	# Multiplayer hook tick (0 overhead when offline; syncs local snapshot when host/client)
+	if ccb_native_host != null and ccb_native_host.active:
+		return
+	# Always poll ENet multiplayer session so packets flow even while menus are open
 	net_session.tick(delta, world, board.motion.facing_x if board != null else 1,
 		str(board.motion.posture) if board != null and board.motion.is_resting() else "")
+	if in_main_menu:
+		return
+	# Real-time clock progression — STRICTLY DISABLED in Cataclysm (100% pure vanilla turn-based!)
+	if not world.is_cataclysm_pack():
+		if opened not in ["pause", "new", "help", "debug"] and (wait_timer == null or wait_timer.time_left <= 0.0):
+			realtime_clock_accum += delta * REALTIME_MIN_PER_SEC
+			if realtime_clock_accum >= 1.0:
+				var whole_mins := int(realtime_clock_accum)
+				realtime_clock_accum -= float(whole_mins)
+				_sync_env_and_audio()
+				world.advance_time(whole_mins)
+				_refresh()
 	# Active Real-Time Sparring Loop (classic Wuxia MUD 1.3s/round exchanges!)
 	var sp_st: Dictionary = world.spar_status()
 	if bool(sp_st.get("active", false)):
@@ -201,7 +498,10 @@ func _process(delta: float) -> void:
 
 
 func _set_prompt(text: String) -> void:
-	if sidebar != null:
+	if world.is_cataclysm_pack():
+		if ccb_sidebar != null:
+			ccb_sidebar.set_prompt(text)
+	elif sidebar != null:
 		sidebar.set_prompt(text)
 
 
@@ -232,7 +532,10 @@ func _apply_directional_step(direction: Vector2i) -> void:
 			_set_prompt("")
 		_move_one(world.pos + direction)
 	else:
-		look_at = (look_at + direction).clamp(Vector2i.ZERO, world.city_size - Vector2i.ONE)
+		if world.is_cataclysm_pack():
+			look_at = look_at + direction
+		else:
+			look_at = (look_at + direction).clamp(Vector2i.ZERO, world.city_size - Vector2i.ONE)
 		_set_prompt("环视: %s (%d,%d) — 按 Esc 返回" % [world.location(look_at), look_at.x, look_at.y])
 	_refresh()
 
@@ -322,14 +625,31 @@ func _refresh() -> void:
 	weather.sync(sky, world.seed, false)
 	_sync_env_and_audio()
 	board.follow(world.pos if look_at == NONE else look_at)
-	if sidebar != null:
-		sidebar.refresh(world, weather, board)
+	if world.is_cataclysm_pack():
+		if ccb_sidebar != null:
+			ccb_sidebar.refresh(world, weather, board, net_session)
+		if ccb_look_panel != null:
+			if look_at != NONE and opened.is_empty():
+				ccb_look_lbl.text = CCBVanillaUI.build_look_inspector_text(world, look_at)
+				ccb_look_panel.visible = true
+				ccb_look_panel.reset_size()
+			else:
+				ccb_look_panel.visible = false
+	else:
+		if sidebar != null:
+			sidebar.refresh(world, weather, board, net_session)
+		if ccb_look_panel != null:
+			ccb_look_panel.visible = false
 
 
 func _note(text: String) -> void:
-	if text.is_empty() or sidebar == null:
+	if text.is_empty():
 		return
-	sidebar.add_message(text, _clock_str())
+	if world.is_cataclysm_pack():
+		if ccb_sidebar != null:
+			ccb_sidebar.add_message(_clock_str(), text)
+	elif sidebar != null:
+		sidebar.add_message(text, _clock_str())
 
 
 func _stop() -> void:
@@ -423,10 +743,12 @@ func _move_one(next: Vector2i) -> bool:
 		return false
 	if opens_door:
 		_play_sfx("door")
+		net_session.broadcast_world_mutation({"kind": "door_open", "pos": next, "floor": int(world.floor)})
 	elif weather != null and float(weather.wetness) > 0.35 and not bool(world.character_status().get("is_indoors", false)):
 		_play_sfx("step_puddle")
 	else:
 		_play_sfx("step_stone")
+	_drain_ccb_messages()
 	if opens_door or was_grabbing:
 		board.invalidate_lightmap()
 	elif was_hauling:
@@ -457,44 +779,36 @@ func _new_game(field: LineEdit, error_label: Label) -> void:
 	if not text.is_empty() and (not text.is_valid_int() or text.to_int() < 0 or text.to_int() > 4294967295):
 		error_label.text = "种子须为 0 至 4294967295 的整数。"
 		return
-	world.setup(randi() if text.is_empty() else text.to_int())
-	weather.set_override(-1, CanglingCalendar.at_minute(world.minutes), world.seed, true)
-	board.clear_footprints()
-	board.invalidate_lightmap()
-	atlas_cells.clear()
-	look_at = NONE
-	peek_return = false
-	_stop()
-	_close_overlay()
-	sidebar.clear_messages()
-	_note("烟雨画桥，青瓦红灯。你再次踏入沧灵南门。(种子 %d)" % world.seed)
-	_refresh()
+	enter_pack(str(world.get_pack_id()), randi() if text.is_empty() else text.to_int(), "evacuee", str(world.get_player_name()))
 
 
 func _save() -> void:
 	_stop()
-	_note("游戏进度已存档。" if world.save_game(World.SAVE_PATH) else "存档写入失败。")
+	var spath := _save_path_for_pack()
+	_note(("游戏进度已存档（%s）。" % spath.get_file()) if world.save_game(spath) else "存档写入失败。")
 	_refresh()
 
 
 func _load() -> void:
-	_stop()
-	if world.load_game(World.SAVE_PATH):
-		board.clear_footprints()
-		board.invalidate_lightmap()
-		atlas_cells.clear()
-		look_at = NONE
-		peek_return = false
-		sidebar.clear_messages()
-		_note("已读取上次保存的进度。")
-	else:
-		_note("没有可读取的存档。")
-	_refresh()
+	var spath := _save_path_for_pack()
+	if not FileAccess.file_exists(spath) and FileAccess.file_exists(World.SAVE_PATH):
+		spath = World.SAVE_PATH
+	load_save_path(spath)
 
 
 func _start_wait(minutes: int) -> void:
 	_close_overlay()
 	_stop()
+	if world.is_cataclysm_pack():
+		var wres: Dictionary = world.ccb_wait_minutes(minutes)
+		_drain_ccb_messages()
+		var done: int = int(wres.get("completed_min", 0))
+		if bool(wres.get("interrupted", false)):
+			_note("等待在第 %d 分钟被危险中断！" % done)
+		else:
+			_note("你静候了 %d 分钟。" % done)
+		_refresh()
+		return
 	wait_remaining = minutes
 	_set_prompt("静候中 (%02d:%02d)... 按 Esc 中止" % [wait_remaining / 60, wait_remaining % 60])
 	wait_timer.start()
@@ -603,6 +917,7 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 	overlay = PanelContainer.new()
 	add_child(overlay)
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var is_ccb: bool = world.is_cataclysm_pack()
 	if kind == "map":
 		overlay.offset_left = 10
 		overlay.offset_right = -10
@@ -610,11 +925,11 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		overlay.offset_bottom = -10
 	elif kind in ["debug", "action_menu", "eat", "wear", "take_off", "pickup", "character", "inventory",
 			"wield", "apply", "read", "list_nearby", "messages", "help", "skills", "learn_npc", "multiplayer",
-			"shop", "craft", "exert", "dismantle", "missions"]:
-		overlay.anchor_left = 0.14
-		overlay.anchor_right = 0.86
-		overlay.anchor_top = 0.07
-		overlay.anchor_bottom = 0.93
+			"shop", "craft", "exert", "dismantle", "missions", "armor_layers", "advanced_inv", "sidebar_mgr", "tileset_opts"]:
+		overlay.anchor_left = 0.09 if is_ccb else 0.14
+		overlay.anchor_right = 0.91 if is_ccb else 0.86
+		overlay.anchor_top = 0.05 if is_ccb else 0.07
+		overlay.anchor_bottom = 0.95 if is_ccb else 0.93
 		overlay.offset_left = 0
 		overlay.offset_right = 0
 		overlay.offset_top = 0
@@ -629,114 +944,176 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 		overlay.offset_top = 0
 		overlay.offset_bottom = 0
 
-	overlay.add_theme_stylebox_override("panel", CCB.box(CCB.BG_PANEL, CCB.BORDER_BRIGHT, 12, 10, 1))
-	var contents := _column(overlay, 8)
+	if is_ccb:
+		overlay.add_theme_stylebox_override("panel", CCBVTheme.box(CCBVTheme.BG_BLACK, CCBVTheme.BORDER_BRIGHT, 10, 8, 1))
+	else:
+		overlay.add_theme_stylebox_override("panel", CCB.box(CCB.BG_PANEL, CCB.BORDER_BRIGHT, 12, 10, 1))
+	var contents := _column(overlay, 6 if is_ccb else 8)
 	var heading := HBoxContainer.new()
 	heading.add_theme_constant_override("separation", 8)
 	contents.add_child(heading)
 
 	var titles := {
-		"map": "沧灵城全图 [m]",
-		"inventory": "随身行囊 [i]",
-		"character": "人物属性与着装 [@]",
+		"map": "大地图 Overmap [m]" if is_ccb else "沧灵城全图 [m]",
+		"inventory": "物品栏 Inventory [i]" if is_ccb else "随身行囊 [i]",
+		"character": "角色状态 Character [@]" if is_ccb else "人物属性与着装 [@]",
 		"pause": "系统菜单 [Esc]",
 		"wait": "静候等待 [|]",
-		"new": "重置沧灵城",
-		"debug": "调试菜单 [K]",
-		"action_menu": "动作菜单 [Enter]",
-		"eat": "进食 / 饮水 [E]",
-		"wear": "穿戴衣物 [W]",
-		"take_off": "脱下与整理着装 [T / +]",
-		"pickup": "拾取与查看物品 [g / ,]",
-		"wield": "手持物品 [w]",
+		"new": "重置世界",
+		"debug": "调试菜单 Debug [K]" if is_ccb else "调试菜单 [K]",
+		"action_menu": "动作菜单 Action Menu [Enter]" if is_ccb else "动作菜单 [Enter]",
+		"eat": "进食 / 饮水 / 服药 [E]",
+		"wear": "穿戴装备 [W]",
+		"take_off": "脱下装备 [T]",
+		"armor_layers": "衣物分层与护甲整理 [+]",
+		"advanced_inv": "高级物品管理器 Advanced Inventory [/]",
+		"sidebar_mgr": "侧边栏面板管理 Sidebar Options [}]",
+		"tileset_opts": "原版材质包选择",
+		"pickup": "多选拾取 Pickup [g / ,]" if is_ccb else "拾取与查看物品 [g / ,]",
+		"wield": "手持武器/物品 [w]",
 		"apply": "使用 / 激活物品 [a]",
 		"read": "阅读书籍 [R]",
-		"list_nearby": "周边物品与设施 [V]",
+		"list_nearby": "附近物品、尸体与怪物 [V]" if is_ccb else "周边物品与设施 [V]",
 		"move_mode": "移动姿态 [\"]",
 		"messages": "历史消息日志 [P]",
-		"missions": "沧灵城见闻与帮工 [M]",
-		"skills": "江湖技能面板 · 武学 / 激发 / 研究 [J]",
+		"missions": "任务列表 Missions [M]" if is_ccb else "沧灵城见闻与帮工 [M]",
+		"skills": "角色状态与 28 技能 [@]" if is_ccb else "江湖技能面板 · 武学 / 激发 / 研究 [J]",
 		"learn_npc": "向师傅请教技艺 (消耗潜能)",
 		"shop": "市井商贸 · 钱庄 · 典当 · 客栈",
-		"craft": "CCB 手工制作 · 烹饪 / 制药 / 锻造 / 抄录 [&]",
+		"craft": "合成制造 Crafting [&]" if is_ccb else "CCB 手工制作 · 烹饪 / 制药 / 锻造 / 抄录 [&]",
 		"exert": "内功盘膝打坐与运功法门 [U]",
-		"dismantle": "拆解衣物 / 床品得碎布条 [B]",
-		"multiplayer": "多人联机接口 (Multiplayer) [O]",
-		"help": "CCB 键位帮助 [? / 0]",
+		"dismantle": "解剖 / 捣烂尸体 [B]" if is_ccb else "拆解衣物 / 床品得碎布条 [B]",
+		"multiplayer": "多人联机合作 (Multiplayer) [O]",
+		"help": "大灾变 CCB 原版按键帮助 [?]" if is_ccb else "CCB 键位帮助 [? / 0]",
 	}
-	var title := _label(heading, titles.get(kind, kind), 16, CCB.C_YELLOW)
+	var title := _label(heading, titles.get(kind, kind), 15 if is_ccb else 16, CCBVTheme.C_YELLOW if is_ccb else CCB.C_YELLOW)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	var close := _button(heading, "[Esc] 关闭", _close_overlay)
+	if is_ccb:
+		CCBVTheme.style_button(close)
 	close.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	close.custom_minimum_size = Vector2(88, 26)
-	contents.add_child(CCB.divider())
+	close.custom_minimum_size = Vector2(88, 24 if is_ccb else 26)
+	contents.add_child(CCBVTheme.divider() if is_ccb else CCB.divider())
 
 	match kind:
 		"map":
-			_build_atlas(contents)
+			if is_ccb:
+				CCBVanillaUI.overmap_panel(self, contents)
+			else:
+				_build_atlas(contents)
 		"action_menu":
-			ActionMenu.build_menu(self, contents)
+			if is_ccb:
+				CCBVanillaUI.action_menu_panel(self, contents)
+			else:
+				ActionMenu.build_menu(self, contents)
+		"armor_layers":
+			if is_ccb:
+				CCBVanillaUI.armor_layers_panel(self, contents)
+			else:
+				CCBUI.take_off_menu(self, contents)
+		"advanced_inv":
+			CCBVanillaUI.advanced_inv_panel(self, contents)
+		"sidebar_mgr":
+			CCBVanillaUI.sidebar_manager_panel(self, contents)
+		"tileset_opts":
+			CCBVanillaUI.tileset_options_panel(self, contents)
 		"eat":
-			CCBUI.eat_menu(self, contents)
+			if is_ccb: CCBVanillaUI.eat_menu(self, contents)
+			else: CCBUI.eat_menu(self, contents)
 		"wear":
-			CCBUI.wear_menu(self, contents)
+			if is_ccb: CCBVanillaUI.wear_menu(self, contents)
+			else: CCBUI.wear_menu(self, contents)
 		"take_off":
-			CCBUI.take_off_menu(self, contents)
+			if is_ccb: CCBVanillaUI.take_off_menu(self, contents)
+			else: CCBUI.take_off_menu(self, contents)
 		"pickup":
-			CCBUI.pickup_menu(self, contents, item_target)
+			if is_ccb: CCBVanillaUI.pickup_menu(self, contents, item_target)
+			else: CCBUI.pickup_menu(self, contents, item_target)
 		"wield":
-			CCBUI.wield_menu(self, contents)
+			if is_ccb: CCBVanillaUI.wield_menu(self, contents)
+			else: CCBUI.wield_menu(self, contents)
 		"apply":
-			CCBUI.apply_menu(self, contents)
+			if is_ccb: CCBVanillaUI.apply_menu(self, contents)
+			else: CCBUI.apply_menu(self, contents)
 		"read":
-			CCBUI.read_menu(self, contents)
+			if is_ccb: CCBVanillaUI.read_menu(self, contents)
+			else: CCBUI.read_menu(self, contents)
 		"list_nearby":
-			CCBUI.list_nearby_menu(self, contents)
+			if is_ccb: CCBVanillaUI.list_nearby_menu(self, contents)
+			else: CCBUI.list_nearby_menu(self, contents)
 		"move_mode":
 			CCBUI.move_mode_menu(self, contents)
 		"messages":
-			CCBUI.messages_menu(self, contents)
+			if is_ccb and ccb_sidebar != null:
+				var msc := ScrollContainer.new(); msc.size_flags_vertical = Control.SIZE_EXPAND_FILL; contents.add_child(msc)
+				var mbox := VBoxContainer.new(); mbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL; mbox.add_theme_constant_override("separation", 2); msc.add_child(mbox)
+				for entry: Dictionary in ccb_sidebar.get_log_history():
+					CCBVTheme.mk_lbl(mbox, "[%s] %s" % [str(entry.get("time", "")), str(entry.get("text", ""))], 12, entry.get("color", CCBVTheme.C_LTGRAY), true)
+			else:
+				CCBUI.messages_menu(self, contents)
 		"missions":
-			CCBUI.missions_menu(self, contents)
+			if is_ccb: CCBVanillaUI.missions_panel(self, contents)
+			else: CCBUI.missions_menu(self, contents)
 		"skills":
-			SkillUI.skill_panel(self, contents)
+			if is_ccb:
+				CCBVanillaUI.bio_mutation_panel(self, contents)
+			else:
+				SkillUI.skill_panel(self, contents)
 		"learn_npc":
 			SkillUI.learn_panel(self, contents, item_target)
 		"shop":
 			ShopUI.open_panel(self, contents, item_target)
 		"craft":
-			CraftUI.open_panel(self, contents)
+			if is_ccb:
+				CCBVanillaUI.craft_panel(self, contents)
+			else:
+				CraftUI.open_panel(self, contents)
 		"exert":
-			SkillUI.exert_panel(self, contents)
+			if not is_ccb:
+				SkillUI.exert_panel(self, contents)
 		"dismantle":
-			CCBUI.dismantle_menu(self, contents)
+			if is_ccb:
+				CCBVanillaUI.butcher_menu(self, contents)
+			else:
+				CCBUI.dismantle_menu(self, contents)
 		"multiplayer":
 			SkillUI.multiplayer_panel(self, contents)
 		"help":
-			CCBUI.help_menu(self, contents)
+			if is_ccb: CCBVanillaUI.help_panel(self, contents)
+			else: CCBUI.help_menu(self, contents)
 		"inventory":
-			Items.inventory(self, contents, item_target)
+			if is_ccb:
+				CCBVanillaUI.inventory_panel(self, contents)
+			else:
+				Items.inventory(self, contents, item_target)
 		"character":
-			CCBUI.character_sheet(self, contents)
+			if is_ccb:
+				CCBVanillaUI.bio_mutation_panel(self, contents)
+			else:
+				CCBUI.character_sheet(self, contents)
 		"pause":
-			var entries := [
-				["继续游戏", func(): _close_overlay(), true],
-				["江湖技能面板 [J]", func(): _show_overlay("skills"), false],
-				["多人联机接口 [O]", func(): _show_overlay("multiplayer"), false],
-				["键位帮助 [?]", func(): _show_overlay("help"), false],
-				["静候等待 [|]", func(): _show_overlay("wait"), false],
-				["调试菜单 [K]", func(): _show_overlay("debug"), false],
-				["保存进度 [S]", func(): _close_overlay(); _save(), false],
-				["读取存档", func(): _close_overlay(); _load(), false],
-				["新建城市（指定种子）", func(): _show_overlay("new"), false],
-			]
-			for i in range(entries.size()):
-				var letter := CCB.letter_key(i)
-				var cb: Callable = entries[i][1]
-				var b := _button(contents, "%s - %s" % [letter, entries[i][0]], cb, entries[i][2])
-				b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-				register_overlay_hotkey(letter, cb)
+			if is_ccb:
+				CCBVanillaUI.pause_menu_panel(self, contents)
+			else:
+				var entries := [
+					["继续游戏", func(): _close_overlay(), true],
+					["返回主菜单（切换核心包 / 载入存档）", func(): open_main_menu(), false],
+					["江湖技能面板 [J]", func(): _show_overlay("skills"), false],
+					["ENet 多人联机与聊天 [O]", func(): _show_overlay("multiplayer"), false],
+					["键位帮助 [?]", func(): _show_overlay("help"), false],
+					["静候等待 [|]", func(): _show_overlay("wait"), false],
+					["调试与性能面板 [K]", func(): _show_overlay("debug"), false],
+					["保存当前核心包进度 [S]", func(): _close_overlay(); _save(), false],
+					["读取当前核心包存档", func(): _close_overlay(); _load(), false],
+					["新建世界（指定种子）", func(): _show_overlay("new"), false],
+				]
+				for i in range(entries.size()):
+					var letter := CCB.letter_key(i)
+					var cb: Callable = entries[i][1]
+					var b := _button(contents, "%s - %s" % [letter, entries[i][0]], cb, entries[i][2])
+					b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+					register_overlay_hotkey(letter, cb)
 		"wait":
 			_label(contents, "选择静候时长 (按字母立即开始，随时按 Esc 中止)：", 12, CCB.C_LTGRAY, true)
 			var durs := [["5 分钟", 5], ["15 分钟", 15], ["30 分钟", 30], ["1 小时", 60], ["3 小时", 180], ["6 小时", 360], ["12 小时", 720]]
@@ -759,7 +1136,10 @@ func _show_overlay(kind: String, item_target := NONE) -> void:
 			field.text_submitted.connect(func(_text: String): _new_game(field, error_label))
 			field.grab_focus()
 		"debug":
-			_build_debug_menu(contents)
+			if is_ccb:
+				CCBVanillaUI.debug_menu_panel(self, contents)
+			else:
+				_build_debug_menu(contents)
 
 
 func _build_debug_menu(contents: VBoxContainer) -> void:
@@ -1088,7 +1468,7 @@ func _candidates_for_dir_action(act: String) -> Array[Vector2i]:
 	var pos: Vector2i = world.pos
 	for dy in range(-1, 2):
 		for dx in range(-1, 2):
-			if dx == 0 and dy == 0 and act != "examine":
+			if dx == 0 and dy == 0 and act != "examine" and not (act == "smash" and world.is_cataclysm_pack()):
 				continue
 			var p := pos + Vector2i(dx, dy)
 			var t: String = world.terrain_at(p)
@@ -1100,7 +1480,8 @@ func _candidates_for_dir_action(act: String) -> Array[Vector2i]:
 					if t in ["o", "O"] or (t in ["c", "C", "F", "K", "r"] and world.is_container_open(p)):
 						found.append(p)
 				"smash":
-					if t in ["w", "O", "D", "o", "f", "b", "q", "S", "t", "l", "k", "K", "c", "F", "r", "C", "a", "u", "P", "g"]:
+					if (world.is_cataclysm_pack() and not world.ccb_corpses_at(p).is_empty()) \
+							or t in ["w", "O", "D", "o", "f", "b", "q", "S", "t", "l", "k", "K", "c", "F", "r", "C", "a", "u", "P", "g"]:
 						found.append(p)
 				"grab":
 					if t in ["q", "S", "t", "l", "C", "c", "a", "u", "b", "k", "K", "r", "P"]:
@@ -1244,8 +1625,21 @@ func _run_ccb_action(act_id: String) -> void:
 			_refresh()
 		"map", "inventory", "eat", "wear", "take_off", "pickup", "character", "wait", "debug", \
 				"wield", "apply", "read", "list_nearby", "move_mode", "messages", "missions", "skills", \
-				"multiplayer", "craft", "exert", "dismantle", "help":
+				"multiplayer", "craft", "exert", "dismantle", "help", "armor_layers", "advanced_inv", "sidebar_mgr", "tileset_opts":
+			if world.is_cataclysm_pack() and act_id == "exert":
+				return
+			if world.is_cataclysm_pack() and act_id == "skills":
+				_show_overlay("character")
+				return
+			if act_id == "pickup":
+				ccb_pickup_sel.clear()
+			if act_id == "map":
+				ccb_om_cursor_init = false
 			_show_overlay(act_id)
+		"toggle_pixel_minimap":
+			if world.is_cataclysm_pack() and ccb_sidebar != null:
+				var on: bool = ccb_sidebar.toggle_pixel_minimap()
+				_note("像素小地图已%s。" % ("开启" if on else "关闭"))
 		"toggle_audio":
 			if audio_ambience != null and audio_ambience.has_method("toggle_mute"):
 				var is_m: bool = audio_ambience.toggle_mute()
@@ -1285,6 +1679,12 @@ func _run_ccb_action(act_id: String) -> void:
 			_note("你起身整了整衣衫。")
 			_refresh()
 		"sleep":
+			if world.is_cataclysm_pack():
+				var sres: Dictionary = world.ccb_sleep_minutes(240)
+				_drain_ccb_messages()
+				_note("你睡了 %d 分钟%s。" % [int(sres.get("completed_min", 0)), "（被危险惊醒！）" if bool(sres.get("interrupted", false)) else ""])
+				_refresh()
+				return
 			var pos: Vector2i = world.pos
 			var bed := NONE
 			var seat := NONE
@@ -1320,6 +1720,8 @@ func _travel_from_overview(destination: Vector2i) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if ccb_native_host != null and ccb_native_host.active:
+		return
 	if event is InputEventKey and not event.pressed:
 		move_input.handle_key_release(event)
 		if period_timer != null and (event.keycode == KEY_PERIOD or event.keycode == KEY_KP_5 or (period_key != KEY_NONE and event.physical_keycode == period_key)):
@@ -1327,7 +1729,12 @@ func _input(event: InputEvent) -> void:
 
 
 func _period_tick() -> void:
-	# Real-time clock mode: idling recovers a breath of stamina without altering game time
+	if world.is_cataclysm_pack():
+		world.ccb_wait_turn()
+		_drain_ccb_messages()
+		_refresh()
+		return
+	# Cangming real-time clock mode: idling recovers a breath of stamina without altering game time
 	world.rest_minutes(1, false)
 	_refresh()
 
@@ -1341,6 +1748,8 @@ func _repeat_period() -> void:
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
+	if in_main_menu or (ccb_native_host != null and ccb_native_host.active):
+		return
 	if not event is InputEventKey or not event.pressed:
 		return
 	var key: Key = event.physical_keycode
@@ -1380,10 +1789,35 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 
-	# Active CCB Overlay: dispatch lettered shortcuts ('a'..'z', 'A'..'Z', ',') directly via event.unicode!
+	# Active CCB Overlay: dispatch arrow keys (Overmap), Enter (Pickup), Tab (AdvInv), and lettered shortcuts!
 	if not opened.is_empty():
 		if atlas != null and atlas.keyboard(key):
 			get_viewport().set_input_as_handled()
+			return
+		if world.is_cataclysm_pack() and opened == "map":
+			var om_d := Vector2i.ZERO
+			if key == KEY_LEFT: om_d = Vector2i(-1, 0)
+			elif key == KEY_RIGHT: om_d = Vector2i(1, 0)
+			elif key == KEY_UP: om_d = Vector2i(0, -1)
+			elif key == KEY_DOWN: om_d = Vector2i(0, 1)
+			if om_d != Vector2i.ZERO:
+				ccb_om_cursor += om_d
+				_reopen_overlay("map")
+				get_viewport().set_input_as_handled()
+				return
+		if world.is_cataclysm_pack() and opened == "pickup" and (key == KEY_ENTER or key == KEY_KP_ENTER):
+			if overlay_hotkeys.has("\n"):
+				overlay_hotkeys["\n"].call()
+				get_viewport().set_input_as_handled()
+				return
+		if world.is_cataclysm_pack() and opened == "advanced_inv" and key == KEY_TAB:
+			ccb_adv_side = 1 - ccb_adv_side
+			_reopen_overlay("advanced_inv")
+			get_viewport().set_input_as_handled()
+			return
+		# Ignore character shortcuts while a LineEdit has keyboard focus!
+		var foc := get_viewport().gui_get_focus_owner()
+		if foc is LineEdit:
 			return
 		if opened not in ["new", "multiplayer"] and not event.echo and not (event.ctrl_pressed or event.alt_pressed or event.meta_pressed):
 			var ch := Keymap.event_char(event)

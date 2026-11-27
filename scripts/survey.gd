@@ -125,6 +125,9 @@ func _draw_roads(curves: Array[PackedVector2Array], color: Color) -> void:
 
 
 func _draw_local() -> void:
+	if world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack():
+		_draw_ccb_overmap_mini()
+		return
 	var block := floorf(minf((size.x - 8.0) / 25.0, (size.y - 8.0) / 15.0))
 	if block < 1.0:
 		return
@@ -151,3 +154,36 @@ func _draw_local() -> void:
 	draw_rect(badge_rect, Color(0.07, 0.10, 0.09, 0.85))
 	draw_rect(badge_rect, Color(0.62, 0.53, 0.31, 0.65), false, 1.0)
 	draw_string(font, Vector2(size.x * 0.5 - 6.0, 14.0), "北", HORIZONTAL_ALIGNMENT_CENTER, 12.0, 11, Color("e7c878"))
+
+
+func _draw_ccb_overmap_mini() -> void:
+	var omt: Vector2i = world.ccb_world_to_omt(world.pos)
+	var radius := 5
+	var data: Dictionary = world.ccb_overmap_slice(omt, radius)
+	var om_rows: Array = data.get("rows", [])
+	var om_cols: Array = data.get("colors", [])
+	var side := radius * 2 + 1
+	if om_rows.is_empty():
+		return
+	var cell_w := floorf((size.x - 16.0) / float(side))
+	var cell_h := floorf((size.y - 12.0) / float(side))
+	var step := maxf(6.0, minf(cell_w, cell_h))
+	var ox := (size.x - step * float(side)) * 0.5
+	var oy := (size.y - step * float(side)) * 0.5
+	var font := get_theme_default_font()
+	var fsz := maxi(8, int(step * 0.88))
+	for y in range(mini(side, om_rows.size())):
+		var rstr: String = str(om_rows[y])
+		var crow: Array = om_cols[y]
+		for x in range(mini(side, rstr.length())):
+			var px := ox + float(x) * step
+			var py := oy + float(y) * step
+			var col := Color(str(crow[x]))
+			draw_rect(Rect2(px, py, step - 1.0, step - 1.0), col.darkened(0.65))
+			if x == radius and y == radius:
+				draw_rect(Rect2(px, py, step - 1.0, step - 1.0), Color("f0e068"), false, 1.4)
+				if font != null:
+					draw_string(font, Vector2(px + 1.0, py + step - 2.0), "@", HORIZONTAL_ALIGNMENT_CENTER, step - 1.0, fsz, Color("fff078"))
+			elif font != null:
+				draw_string(font, Vector2(px + 1.0, py + step - 2.0), rstr.substr(x, 1), HORIZONTAL_ALIGNMENT_CENTER, step - 1.0, fsz, col.lightened(0.25))
+	draw_rect(Rect2(ox - 2.0, oy - 2.0, step * float(side) + 3.0, step * float(side) + 3.0), Color(0.45, 0.55, 0.50, 0.55), false, 1.0)

@@ -7,6 +7,7 @@ extends RefCounted
 #   then swaps atomically in 0.01 ms — eliminating 100+ ms single-frame hitches at wide FOV!
 
 const Art = preload("res://scripts/street_art.gd")
+const Tiles = preload("res://scripts/undead_tiles.gd")
 const CACHE_MARGIN := 8
 const WIDE_FOV_MARGIN := 12
 const SLICE_ROWS := 6
@@ -50,6 +51,8 @@ class WorldCanvas extends Control:
 	var emitters: Dictionary = {}
 	var props_map: Dictionary = {}
 	var sites_map: Dictionary = {}
+	var is_ccb := false
+	var ccb_render: Dictionary = {}
 
 	# Row-slice mode: mode -1 = full synchronous draw; 0 = ground rows; 1 = props rows + sites
 	var slice_mode := -1
@@ -62,8 +65,77 @@ class WorldCanvas extends Control:
 		texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
 
+	func _draw_ccb_vanilla() -> void:
+		if ccb_render.is_empty():
+			return
+		var orig: Vector2i = ccb_render.get("origin", draw_rect_tiles.position)
+		var sz: Vector2i = ccb_render.get("size", draw_rect_tiles.size)
+		var w := sz.x
+		var h := sz.y
+		if w <= 0 or h <= 0:
+			return
+		var tpal: PackedStringArray = ccb_render["ter_palette"]
+		var fpal: PackedStringArray = ccb_render["furn_palette"]
+		var tidx: PackedInt32Array = ccb_render["ter_idx"]
+		var fidx: PackedInt32Array = ccb_render["furn_idx"]
+		if slice_mode == -1 or (slice_mode == 0 and slice_is_first):
+			draw_rect(Rect2(Vector2.ZERO, size), Color("0a0c0a"))
+
+		var y_start := 0 if slice_mode == -1 else clampi(slice_y0 - orig.y, 0, h)
+		var y_end := h if slice_mode == -1 else clampi(slice_y1 - orig.y, 0, h)
+
+		if slice_mode == -1 or slice_mode == 0:
+			for ly in range(y_start, y_end):
+				var wy := orig.y + ly
+				var row_off := ly * w
+				for lx in range(w):
+					var wx := orig.x + lx
+					var tid: String = tpal[tidx[row_off + lx]]
+					var o := Vector2((wx - view_origin.x) * cell, (wy - view_origin.y) * cell)
+					var mask := -1
+					if tid.contains("wall") or tid.contains("fence") or tid.contains("pavement"):
+						mask = 0
+						var is_wall := tid.contains("wall")
+						if ly > 0:
+							var nt: String = tpal[tidx[(ly - 1) * w + lx]]
+							if nt == tid or (is_wall and (nt.contains("wall") or nt.contains("door") or nt.contains("window"))):
+								mask |= 1
+						if lx + 1 < w:
+							var et: String = tpal[tidx[row_off + lx + 1]]
+							if et == tid or (is_wall and (et.contains("wall") or et.contains("door") or et.contains("window"))):
+								mask |= 2
+						if ly + 1 < h:
+							var st: String = tpal[tidx[(ly + 1) * w + lx]]
+							if st == tid or (is_wall and (st.contains("wall") or st.contains("door") or st.contains("window"))):
+								mask |= 4
+						if lx > 0:
+							var wt: String = tpal[tidx[row_off + lx - 1]]
+							if wt == tid or (is_wall and (wt.contains("wall") or wt.contains("door") or wt.contains("window"))):
+								mask |= 8
+					var roll := absi((wx * 73856093) ^ (wy * 19349663))
+					Tiles.draw_at(self, tid, o, float(cell), roll, mask, 0, Color.WHITE, Vector2.ZERO, false, current_season)
+
+		if slice_mode == -1 or slice_mode == 1:
+			for ly in range(y_start, y_end):
+				var wy := orig.y + ly
+				var row_off := ly * w
+				for lx in range(w):
+					var fi := fidx[row_off + lx]
+					if fi <= 0:
+						continue
+					var fid: String = fpal[fi]
+					if fid.is_empty():
+						continue
+					var wx := orig.x + lx
+					var o := Vector2((wx - view_origin.x) * cell, (wy - view_origin.y) * cell)
+					var roll := absi((wx * 83492791) ^ (wy * 297121507))
+					Tiles.draw_at(self, fid, o, float(cell), roll, -1, 0, Color.WHITE, Vector2.ZERO, false, current_season)
+
 	func _draw() -> void:
 		if world == null or not draw_rect_tiles.has_area():
+			return
+		if is_ccb:
+			_draw_ccb_vanilla()
 			return
 		if slice_mode == -1 or (slice_mode == 0 and slice_is_first):
 			draw_rect(Rect2(Vector2.ZERO, size), Color("090d0b"))
@@ -144,7 +216,8 @@ func get_texture() -> ViewportTexture:
 
 func _make_key(world: Object, cell: int, season: String, lit_strength: float, _emitters: Dictionary) -> Array:
 	var lit_bucket := int(round(lit_strength * 2.0))
-	return [world.seed, world.floor, cell, season, lit_bucket, world.herbs]
+	var pack_id: String = world.get_pack_id() if world.has_method("get_pack_id") else "cangming"
+	return [world.seed, world.floor, cell, season, lit_bucket, world.herbs, pack_id, Tiles.get_active_tileset_name()]
 
 
 func _configure_canvas(vp: SubViewport, cv: WorldCanvas, world: Object, cells: Dictionary,
@@ -171,8 +244,15 @@ func _configure_canvas(vp: SubViewport, cv: WorldCanvas, world: Object, cells: D
 	cv.floor_z = world.floor
 	cv.lit_strength = lit_strength
 	cv.emitters = emitters
-	cv.props_map = world.props_in_rect(props)
-	cv.sites_map = world.active_sites_in_rect(rect) if world.floor == 0 else {}
+	cv.is_ccb = world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack()
+	if cv.is_ccb:
+		cv.ccb_render = world.ccb_render_rect(rect, world.floor)
+		cv.props_map = {}
+		cv.sites_map = {}
+	else:
+		cv.ccb_render = {}
+		cv.props_map = world.props_in_rect(props)
+		cv.sites_map = world.active_sites_in_rect(rect) if world.floor == 0 else {}
 
 
 func ensure_updated(world: Object, cells: Dictionary, below_cells: Dictionary, visible: Rect2i,

@@ -1,7 +1,8 @@
 #include "world.hpp"
-#include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/variant/variant.hpp>
 #include <limits>
 #include <string_view>
 
@@ -19,9 +20,42 @@ bool entry(const Dictionary &obj, const char *name, int64_t low, int64_t high) {
 }
 }
 
+Dictionary CanglingWorld::inspect_save_meta(const String &path) const {
+    Dictionary out;
+    out["exists"] = false;
+    if (!FileAccess::file_exists(path)) return out;
+    const Variant parsed = JSON::parse_string(FileAccess::get_file_as_string(path));
+    if (parsed.get_type() != Variant::DICTIONARY) return out;
+    const Dictionary data = parsed;
+    const String pslug = data.get("pack_id", String("cangming"));
+    const CorePackId pid = parse_core_pack_id(pslug.utf8().get_data());
+    out["exists"] = true;
+    out["path"] = path;
+    out["version"] = data.get("version", 1);
+    out["pack_id"] = String::utf8(core_pack_slug(pid));
+    out["pack_name"] = String::utf8(core_pack_info(pid).name.c_str());
+    out["player_name"] = data.get("player_name", pid == CorePackId::Cataclysm ? String::utf8("末日幸存者") : String::utf8("江湖少侠"));
+    out["seed"] = data.get("seed", 0);
+    out["minutes"] = data.get("minutes", 440);
+    out["coins"] = data.get("coins", 0);
+    out["kills"] = data.get("kills", 0);
+    if (data.get("ccb_state", Variant()).get_type() == Variant::DICTIONARY) {
+        const Dictionary cs = data["ccb_state"];
+        out["rad"] = cs.get("rad", 0);
+        const Variant mv = cs.get("mutations", Variant());
+        out["mutations_count"] = (mv.get_type() == Variant::ARRAY) ? Array(mv).size() : 0;
+    } else {
+        out["rad"] = 0;
+        out["mutations_count"] = 0;
+    }
+    return out;
+}
+
 bool CanglingWorld::save_game(const String &path) const {
     Dictionary data;
-    data["version"] = 9;
+    data["version"] = 10;
+    data["pack_id"] = String::utf8(core_pack_slug(active_pack));
+    data["scenario"] = String::utf8(active_scenario.c_str());
     data["generator"] = city.layout;
     data["seed"] = static_cast<int64_t>(seed);
     data["pos"] = Array::make(pos.x, pos.y);
@@ -31,9 +65,14 @@ bool CanglingWorld::save_game(const String &path) const {
     data["herbs"] = herbs;
     data["coins"] = coins;
     data["jobs_done"] = jobs_done;
+    data["kills"] = kills;
     data["player_name"] = player_name;
     data["skills"] = skill_set.save_dict();
     data["bounties"] = bounty_tracker.save_dict();
+    if (active_pack == CorePackId::Cataclysm) {
+        data["monsters"] = monsters.save_array();
+        data["ccb_state"] = ccb_state.save_dict();
+    }
     Array picked;
     for (std::size_t i = 0; i < collected.size(); ++i) if (collected[i]) picked.push_back(static_cast<int>(i));
     data["collected"] = picked;
@@ -61,9 +100,15 @@ bool CanglingWorld::load_game(const String &path) {
     const Variant parsed = JSON::parse_string(FileAccess::get_file_as_string(path));
     if (parsed.get_type() != Variant::DICTIONARY) return false;
     const Dictionary data = parsed;
-    if (!entry(data, "version", 1, 9) || !entry(data, "quest", 0, 4) || !entry(data, "minutes", 0, 1000000000) ||
+    if (!entry(data, "version", 1, 10) || !entry(data, "quest", 0, 4) || !entry(data, "minutes", 0, 1000000000) ||
         !entry(data, "herbs", 0, 4) || !entry(data, "coins", 0, 1000000000) || data.get("collected", Variant()).get_type() != Variant::ARRAY) return false;
     const int version = data["version"];
+    const String pack_slug = (version >= 10 && data.get("pack_id", Variant()).get_type() == Variant::STRING)
+        ? String(data["pack_id"]) : String("cangming");
+    const CorePackId next_pack = parse_core_pack_id(pack_slug.utf8().get_data());
+    const String next_scen = (version >= 10 && data.get("scenario", Variant()).get_type() == Variant::STRING)
+        ? String(data["scenario"]) : String("evacuee");
+
     const Array picked = data["collected"];
     std::array<bool, 4> next_collected{};
     std::unordered_set<int64_t> next_doors;
@@ -82,7 +127,9 @@ bool CanglingWorld::load_game(const String &path) {
         next_seed = static_cast<int64_t>(data["seed"]);
         next_floor = data["floor"];
         const Array coords = data["pos"];
-        if (coords.size() != 2 || !integer(coords[0], 0, city_size - 1) || !integer(coords[1], 0, city_size - 1)) return false;
+        const int64_t cmin = (next_pack == CorePackId::Cataclysm) ? -8000000LL : 0LL;
+        const int64_t cmax = (next_pack == CorePackId::Cataclysm) ? 8000000LL : static_cast<int64_t>(city_size - 1);
+        if (coords.size() != 2 || !integer(coords[0], cmin, cmax) || !integer(coords[1], cmin, cmax)) return false;
         next_pos = Vector2i(coords[0], coords[1]);
         for (int i = 0; i < picked.size(); ++i) {
             if (!integer(picked[i], 0, 3)) return false;
@@ -90,11 +137,10 @@ bool CanglingWorld::load_game(const String &path) {
         }
         const Array saved_doors = data["doors"];
         City restored;
-        restored.reset(next_seed, next_layout);
+        restored.reset(next_seed, next_layout, next_pack);
         for (int i = 0; i < saved_doors.size(); ++i) {
             if (saved_doors[i].get_type() != Variant::INT && saved_doors[i].get_type() != Variant::FLOAT) return false;
-            const int64_t k = static_cast<int64_t>(saved_doors[i]);
-            next_doors.insert(k);
+            next_doors.insert(static_cast<int64_t>(saved_doors[i]));
         }
         if (version >= 6 && data.get("tile_overrides", Variant()).get_type() == Variant::ARRAY) {
             const Array ov = data["tile_overrides"];
@@ -123,7 +169,9 @@ bool CanglingWorld::load_game(const String &path) {
         }
     }
     if (version < 4) clear_items();
-    city.reset(next_seed, next_layout);
+    active_pack = next_pack;
+    active_scenario = next_scen.utf8().get_data();
+    city.reset(next_seed, next_layout, active_pack);
     seed = next_seed;
     pos = next_pos;
     floor = next_floor;
@@ -138,6 +186,7 @@ bool CanglingWorld::load_game(const String &path) {
     herbs = data["herbs"];
     coins = data["coins"];
     jobs_done = entry(data, "jobs_done", 0, 1000000000) ? static_cast<int>(data["jobs_done"]) : 0;
+    kills = entry(data, "kills", 0, 1000000000) ? static_cast<int>(data["kills"]) : 0;
     npc_talk_count.fill(0);
     char_state.reset_defaults();
     if (version >= 6 && data.get("character", Variant()).get_type() == Variant::DICTIONARY) {
@@ -150,6 +199,22 @@ bool CanglingWorld::load_game(const String &path) {
     bounty_tracker.reset();
     if (version >= 9 && data.get("bounties", Variant()).get_type() == Variant::DICTIONARY) {
         bounty_tracker.load_dict(data["bounties"]);
+    }
+    monsters.clear();
+    ccb_spawned_omts.clear();
+    ccb_turn_moves = 0;
+    ccb_turn_seconds = 0;
+    pending_ccb_messages.clear();
+    if (active_pack == CorePackId::Cataclysm) {
+        ccb_overmap.reset(seed, world_city_size, world_city_spacing, world_monster_rate);
+        ccb_state.reset(seed, active_scenario);
+        if (version >= 10 && data.get("ccb_state", Variant()).get_type() == Variant::DICTIONARY) {
+            ccb_state.load_dict(data["ccb_state"]);
+        }
+        if (version >= 10 && data.get("monsters", Variant()).get_type() == Variant::ARRAY) {
+            monsters.load_array(data["monsters"]);
+        }
+        ensure_ccb_omt_populated(pos);
     }
     spar_session.reset();
     char_state.sync_with_skills(skill_set);

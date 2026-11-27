@@ -10,6 +10,8 @@ const NEIGHBORS := [Vector2i.DOWN, Vector2i.RIGHT, Vector2i.LEFT, Vector2i.UP]
 const TREES := ["t_tree_willow", "t_tree_maple", "t_tree_pine"]
 const SHRUBS := ["t_shrub", "t_shrub_lilac", "t_shrub_blackberry"]
 
+static var cataclysm_mode := false
+
 const SEASON_GRASS_TINT := {
 	"spring": Color("eef6e8"),
 	"summer": Color("e2f0db"),
@@ -60,6 +62,9 @@ static func ground(board: Control, cells: Dictionary, p: Vector2i, seed: int, se
 	if feature == " ":
 		return
 	var roll := _hash(p, seed)
+	if cataclysm_mode:
+		_ground_cataclysm(board, cells, p, feature, surface, roll, season, tint_override)
+		return
 	var stone_tint: Color = SEASON_STONE_TINT.get(season, Color("e5ded0")) * tint_override
 	var grass_tint: Color = SEASON_GRASS_TINT.get(season, Color("eef6e8")) * tint_override
 	match surface:
@@ -119,9 +124,75 @@ static func ground(board: Control, cells: Dictionary, p: Vector2i, seed: int, se
 	RoadBlend.blend_tile(board, cells, p, seed, season, tint_override)
 
 
+static func _ground_cataclysm(board: Control, cells: Dictionary, p: Vector2i, feature: String, surface: String,
+		roll: int, season: String, tint_override: Color) -> void:
+	var grass_tint: Color = SEASON_GRASS_TINT.get(season, Color("d8e6d0")) * Color(0.90, 0.92, 0.88) * tint_override
+	match surface:
+		"m":
+			Pack.draw(board, "t_pavement", p, roll, _join(cells, p, ["m"], 1), 0, Color("cfd4d8") * tint_override)
+			if not board.has_method("surface_id"):
+				var o := _cell_origin(board, p)
+				var s := float(board.cell)
+				# Subtle yellow asphalt center road markings on main avenues
+				if (p.x == 119 or p.x == 66 or p.x == 172) and (p.y % 4 == 0 or p.y % 4 == 1):
+					board.draw_rect(Rect2(o.x + s * 0.88, o.y + s * 0.10, maxf(2.0, s * 0.12), s * 0.80), Color("c9a83c", 0.72) * tint_override)
+				elif (p.y == 53 or p.y == 101 or p.y == 149 or p.y == 191) and (p.x % 4 == 0 or p.x % 4 == 1):
+					board.draw_rect(Rect2(o.x + s * 0.10, o.y + s * 0.88, s * 0.80, maxf(2.0, s * 0.12)), Color("c9a83c", 0.72) * tint_override)
+		"p", "G":
+			Pack.draw(board, "t_sidewalk", p, roll, _join(cells, p, ["p", "G"], 1), 0, Color("d4d6d8") * tint_override)
+		"i", "H", "B", "N", "R":
+			Pack.draw(board, "t_concrete", p, roll, _join(cells, p, ["i", "H", "B", "N", "R"], 1), 0, Color("cfd3d6") * tint_override)
+		_:
+			match feature:
+				"=":
+					Pack.draw(board, "t_pavement", p, roll, -1, 0, Color("b8bec4") * tint_override)
+				"W":
+					Pack.draw(board, "t_water_moving_dp", p, roll, -1, 0, Color("c4d9e0") * tint_override)
+				"~":
+					Pack.draw(board, "t_water_moving_sh", p, roll, _join(cells, p, ["~", "W"], 0), 0, Color("a8c6ce") * tint_override)
+				"+":
+					Pack.draw(board, "t_pavement", p, roll, -1, 0, Color("cfd4d8") * tint_override)
+				":":
+					Pack.draw(board, "t_sidewalk", p, roll, -1, 0, Color("d4d6d8") * tint_override)
+				".", "g", "Y", "L", "f":
+					var grass := "t_grass_long" if (roll % 100) < 28 else "t_grass"
+					Pack.draw(board, grass, p, roll, _join(cells, p, [".", "g", "Y", "L", "f"], 0), 0, grass_tint, Vector2.ZERO, false, season)
+				_:
+					Pack.draw(board, "t_concrete", p, roll, 15, 0, Color("cfd3d6") * tint_override)
+
+
+static func _draw_modern_streetlight(board: Control, p: Vector2i, lit_strength: float) -> void:
+	var masking := board.has_method("surface_id")
+	var o := _cell_origin(board, p)
+	var s := float(board.cell)
+	var mc: Color = board.call("surface_id", p) if masking else Color.WHITE
+	var pole := mc if masking else Color("58626b")
+	var head := mc if masking else Color("3b444d")
+	board.draw_rect(Rect2(o.x + s * 0.44, o.y + s * 0.14, maxf(2.4, s * 0.11), s * 0.78), pole)
+	board.draw_rect(Rect2(o.x + s * 0.42, o.y + s * 0.12, s * 0.36, maxf(2.4, s * 0.10)), head)
+	if not masking:
+		var glow := clampf(lit_strength, 0.0, 1.0)
+		var bulb := Color("a8b8c4").lerp(Color("ffe8a8"), 0.25 + 0.75 * glow)
+		board.draw_circle(o + Vector2(s * 0.74, s * 0.20), maxf(2.2, s * 0.09), bulb)
+		if glow > 0.12:
+			board.draw_circle(o + Vector2(s * 0.74, s * 0.24), s * 0.42, Color(1.0, 0.88, 0.56, 0.20 * glow))
+
+
 static func walls(board: Control, cells: Dictionary, p: Vector2i, seed: int, _season := "spring",
 		night_warmth := 0.0) -> void:
 	var tile: String = cells[p][0]
+	if cataclysm_mode:
+		var roll := _hash(p, seed)
+		var mask := _join(cells, p, ["#", "w", "O", "%", "D", "o"], 0)
+		match tile:
+			"#": Pack.draw(board, "t_brick_wall", p, roll, mask)
+			"D": Pack.draw(board, "t_door_c", p, roll, mask)
+			"o": Pack.draw(board, "t_door_o", p, roll, mask)
+			"w": Pack.draw(board, "t_window", p, roll, mask)
+			"O": Pack.draw(board, "t_window_open", p, roll, mask)
+			"%": Pack.draw(board, "t_window_frame", p, roll, mask)
+			"f": Pack.draw(board, "t_chainfence", p, roll, _join(cells, p, ["f", "#"], 0))
+		return
 	if tile in ["#", "w", "O", "%", "D", "o", "f"]:
 		ChineseArch.draw_wall_segment(board, cells, p, seed, night_warmth)
 
@@ -362,6 +433,23 @@ static func detail(board: Control, world: RefCounted, cells: Dictionary, p: Vect
 	var tile: String = cells[p][0]
 	var roll := _hash(p, seed)
 	var masking := board.has_method("surface_id")
+	if cataclysm_mode:
+		if tile == "L":
+			_draw_modern_streetlight(board, p, lit_strength)
+		elif tile == "Y":
+			Pack.draw(board, TREES[roll % TREES.size()], p, roll, -1, 0, Color.WHITE, Vector2.ZERO, false, season)
+		elif tile == "g":
+			Pack.draw(board, SHRUBS[roll % SHRUBS.size()], p, roll, -1, 0, Color.WHITE, Vector2.ZERO, false, season)
+		else:
+			const CCB_FURN := {
+				"b": "f_bed", "t": "f_table", "c": "f_locker", "F": "f_locker",
+				"C": "f_crate_c", "k": "f_counter", "K": "f_rack", "r": "f_bookcase",
+				"l": "f_table", "h": "f_oven", "u": "f_sink", "q": "f_chair",
+				"S": "f_sofa", "a": "f_trashcan",
+			}
+			if CCB_FURN.has(tile):
+				Pack.draw(board, CCB_FURN[tile], p, roll, -1, 0, Color.WHITE)
+		return
 	if tile == "L":
 		_draw_lantern_post(board, p, lit_strength, false)
 	elif tile == "=":

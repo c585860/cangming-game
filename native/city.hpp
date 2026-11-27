@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core_packs.hpp"
+#include "monsters.hpp"
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/string.hpp>
@@ -157,6 +159,25 @@ struct YangzhouWorldData {
     std::vector<Zone> zones;
 };
 const YangzhouWorldData &yangzhou_world_data();
+
+struct RadZone {
+    Vector2i center{0, 0};
+    int radius = 10;
+    float peak_rad = 15.0f;
+    const char *name = "";
+};
+
+struct CataclysmWorldData {
+    std::array<std::vector<char>, 3> tiles;
+    std::array<std::vector<char>, 3> surfaces;
+    std::array<std::vector<std::uint8_t>, 3> enclosed;
+    std::vector<YangzhouWorldData::Zone> zones;
+    Vector2i spawn_tile{120, 200};
+    std::vector<MonsterSpawn> monster_spawns;
+    std::vector<RadZone> rad_zones;
+};
+std::shared_ptr<const CataclysmWorldData> cataclysm_world_data(std::uint32_t seed);
+
 bool is_npc_tile(Vector2i p);
 const NpcDef *npc_at_tile(Vector2i p);
 
@@ -176,6 +197,12 @@ inline bool passable_tile(char tile) {
 }
 inline char &tile_ref(Tiles &tiles, int x, int y) { return tiles[y * sector_size + x]; }
 inline bool in_city(Vector2i p) { return p.x >= 0 && p.y >= 0 && p.x < city_size && p.y < city_size; }
+inline int64_t infinite_tile_key(Vector2i p, int z) {
+    const std::uint64_t ux = static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.x)) & 0xFFFFFFULL;
+    const std::uint64_t uy = static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.y)) & 0xFFFFFFULL;
+    const std::uint64_t uz = static_cast<std::uint64_t>(static_cast<std::uint32_t>(z + 128)) & 0xFFFFULL;
+    return static_cast<int64_t>((uz << 48) | (uy << 24) | ux);
+}
 inline Vector2i sector_at(Vector2i p) { return {p.x / sector_size, p.y / sector_size}; }
 inline Vector2i hub(Vector2i sector) { return sector * sector_size + Vector2i(1, 1); }
 
@@ -196,6 +223,7 @@ struct SectorGridSnapshot {
 
 class City {
     std::uint32_t seed = 0;
+    CorePackId pack_id = CorePackId::Cangming;
     mutable std::mutex cache_mutex;
     std::list<int> recent;
     struct Cached { std::shared_ptr<const Block> block; std::list<int>::iterator position; };
@@ -205,7 +233,9 @@ class City {
 public:
     CityPlan plan;
     int layout = generator_version;
-    void reset(std::uint32_t new_seed, int version = generator_version);
+    void reset(std::uint32_t new_seed, int version = generator_version, CorePackId pack = CorePackId::Cangming);
+    CorePackId get_pack() const { return pack_id; }
+    float radiation_at(Vector2i p) const;
     std::shared_ptr<Block> generate_block(Vector2i sector) const;
     void prewarm_sectors(Rect2i area);
     SectorGridSnapshot snapshot_sectors(Rect2i area);

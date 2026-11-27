@@ -107,11 +107,13 @@ bool CanglingWorld::is_smashable_tile(char tile) {
 }
 
 char CanglingWorld::effective_tile(Vector2i p, int z) {
-    if (!in_city(p)) return ' ';
+    if (!in_bounds(p)) return ' ';
     const int64_t k = key(p, z);
     char tile = '\0';
     if (const auto it = tile_overrides.find(k); it != tile_overrides.end()) {
         tile = it->second;
+    } else if (active_pack == CorePackId::Cataclysm) {
+        tile = (z == 0) ? ccb_overmap.compat_tile_at(p) : ' ';
     } else {
         tile = city.tile(p, z);
     }
@@ -126,19 +128,22 @@ bool CanglingWorld::is_container_open(Vector2i p) const {
 }
 
 String CanglingWorld::open_at(Vector2i p) {
-    if (!in_city(p) || !near(p)) return {};
+    if (!in_bounds(p) || !near(p)) return {};
     const int64_t k = key(p, floor);
     const char raw = effective_tile(p, floor);
     if (raw == 'D') {
         doors.insert(k);
         char_state.last_sound = 6;
+        if (active_pack == CorePackId::Cataclysm) ccb_advance_moves(100);
         return String::utf8("你打开了门。");
     }
     if (raw == 'w') {
         doors.insert(k);
         char_state.last_sound = 5;
-        return String::utf8("你推开了雕花木窗。");
+        if (active_pack == CorePackId::Cataclysm) ccb_advance_moves(100);
+        return String::utf8("你推开了窗户。");
     }
+    if (active_pack == CorePackId::Cataclysm) return {};
     if (is_openable_container(raw)) {
         if (open_containers.count(k)) {
             return String::utf8(furniture_label(raw)) + String::utf8("已经是打开状态。");
@@ -155,19 +160,22 @@ String CanglingWorld::open_at(Vector2i p) {
 }
 
 String CanglingWorld::close_at(Vector2i p) {
-    if (!in_city(p) || !near(p)) return {};
+    if (!in_bounds(p) || !near(p)) return {};
     const int64_t k = key(p, floor);
     const char cur = effective_tile(p, floor);
     if (cur == 'o' && p != pos) {
         doors.erase(k);
         char_state.last_sound = 8;
+        if (active_pack == CorePackId::Cataclysm) ccb_advance_moves(100);
         return String::utf8("你关上了门。");
     }
     if (cur == 'O' && p != pos) {
         doors.erase(k);
         char_state.last_sound = 5;
+        if (active_pack == CorePackId::Cataclysm) ccb_advance_moves(100);
         return String::utf8("你关上了窗户。");
     }
+    if (active_pack == CorePackId::Cataclysm) return {};
     if (is_openable_container(cur)) {
         if (!open_containers.erase(k)) {
             return String::utf8(furniture_label(cur)) + String::utf8("本来就是关着的。");
@@ -179,7 +187,15 @@ String CanglingWorld::close_at(Vector2i p) {
 }
 
 String CanglingWorld::smash_at(Vector2i p) {
-    if (!in_city(p) || !near(p) || p == pos) {
+    if (!in_bounds(p) || !near(p)) {
+        return String::utf8("只能砸击紧邻身旁的物件或尸体。");
+    }
+    // Vanilla CCB: smashing a tile with an unpulped corpse pulps the corpse first!
+    if (active_pack == CorePackId::Cataclysm) {
+        const String pulp_msg = ccb_pulp_at(p);
+        if (!pulp_msg.is_empty()) return pulp_msg;
+        if (p == pos) return String::utf8("脚下没有未捣烂的尸体。");
+    } else if (p == pos) {
         return String::utf8("只能砸击紧邻身旁的物件。");
     }
     const int64_t k = key(p, floor);
@@ -422,6 +438,69 @@ bool CanglingWorld::move_grabbed_furniture(Vector2i next_player_pos) {
 Array CanglingWorld::list_nearby(int radius) {
     Array result;
     const int r = std::clamp(radius, 1, 18);
+    if (active_pack == CorePackId::Cataclysm) {
+        const auto &db = CcbVanillaDB::instance();
+        struct CEntry { int d2; Dictionary data; };
+        std::vector<CEntry> rows;
+        // 1. Nearby vanilla CCB items
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                const Vector2i p = pos + Vector2i(dx, dy);
+                const int64_t k = key(p, floor);
+                const auto wit = ccb_state.world_items.find(k);
+                if (wit == ccb_state.world_items.end() || wit->second.empty()) continue;
+                const int d2 = dx * dx + dy * dy;
+                const int dist = std::max(std::abs(dx), std::abs(dy));
+                const String dir = String::utf8(direction_name(dx, dy));
+                for (const auto &st : wit->second) {
+                    const auto *def = db.find_item(st.id);
+                    Dictionary row;
+                    row["kind"] = "item";
+                    row["item_id"] = String::utf8(st.id.c_str());
+                    row["name"] = String::utf8(def ? def->name_zh.c_str() : st.id.c_str());
+                    row["category"] = String::utf8(def ? def->subtype.c_str() : "ITEM");
+                    row["count"] = st.count;
+                    row["pos"] = p;
+                    row["dist"] = dist;
+                    row["dir"] = dir;
+                    rows.push_back({d2, row});
+                }
+            }
+        }
+        // 2. Nearby corpses
+        for (const auto &c : ccb_state.corpses) {
+            if (c.butchered || c.floor != floor) continue;
+            const int dx = c.pos.x - pos.x, dy = c.pos.y - pos.y;
+            if (std::abs(dx) > r || std::abs(dy) > r) continue;
+            const auto *mdef = db.find_monster(c.mtype_id);
+            Dictionary row;
+            row["kind"] = "corpse";
+            row["name"] = String::utf8(mdef ? mdef->name.c_str() : c.mtype_id.c_str()) +
+                          (c.pulped ? String::utf8("尸体(已捣烂)") : String::utf8("尸体(会复活!)"));
+            row["pos"] = c.pos;
+            row["dist"] = std::max(std::abs(dx), std::abs(dy));
+            row["dir"] = String::utf8(direction_name(dx, dy));
+            rows.push_back({dx * dx + dy * dy, row});
+        }
+        // 3. Nearby monsters
+        const Array mons = monsters.monsters_in_rect(Rect2i(pos - Vector2i(r, r), Vector2i(r * 2 + 1, r * 2 + 1)), floor);
+        for (int i = 0; i < mons.size(); ++i) {
+            const Dictionary md = mons[i];
+            const Vector2i mp = md["pos"];
+            const int dx = mp.x - pos.x, dy = mp.y - pos.y;
+            Dictionary row;
+            row["kind"] = "monster";
+            row["name"] = md["name"];
+            row["pos"] = mp;
+            row["dist"] = std::max(std::abs(dx), std::abs(dy));
+            row["dir"] = String::utf8(direction_name(dx, dy));
+            rows.push_back({dx * dx + dy * dy, row});
+        }
+        std::sort(rows.begin(), rows.end(), [](const CEntry &a, const CEntry &b) { return a.d2 < b.d2; });
+        const int lim = std::min<int>(static_cast<int>(rows.size()), 90);
+        for (int i = 0; i < lim; ++i) result.append(rows[i].data);
+        return result;
+    }
     struct Entry {
         int dist_sq;
         Dictionary data;
@@ -505,6 +584,48 @@ Array CanglingWorld::compass_summary() {
     best_dist.fill(999);
     std::array<String, 8> best_label;
     std::array<int, 8> best_prio{};
+
+    if (active_pack == CorePackId::Cataclysm) {
+        constexpr int r = 14;
+        const Array mons = monsters.monsters_in_rect(Rect2i(pos - Vector2i(r, r), Vector2i(r * 2 + 1, r * 2 + 1)), floor);
+        for (int i = 0; i < mons.size(); ++i) {
+            const Dictionary md = mons[i];
+            const Vector2i mp = md["pos"];
+            const int dx = mp.x - pos.x, dy = mp.y - pos.y;
+            if (dx == 0 && dy == 0) continue;
+            const int oct = octant_index(dx, dy);
+            const int dist = std::max(std::abs(dx), std::abs(dy));
+            if (5 > best_prio[oct] || (5 == best_prio[oct] && dist < best_dist[oct])) {
+                best_prio[oct] = 5;
+                best_dist[oct] = dist;
+                best_label[oct] = md["name"];
+            }
+        }
+        const auto &db = CcbVanillaDB::instance();
+        for (const auto &c : ccb_state.corpses) {
+            if (c.butchered || c.floor != floor) continue;
+            const int dx = c.pos.x - pos.x, dy = c.pos.y - pos.y;
+            if (dx == 0 && dy == 0) continue;
+            const int dist = std::max(std::abs(dx), std::abs(dy));
+            if (dist > r) continue;
+            const int oct = octant_index(dx, dy);
+            if (3 > best_prio[oct] || (3 == best_prio[oct] && dist < best_dist[oct])) {
+                const auto *mdef = db.find_monster(c.mtype_id);
+                best_prio[oct] = 3;
+                best_dist[oct] = dist;
+                best_label[oct] = String::utf8(mdef ? mdef->name.c_str() : "尸体") + String::utf8("尸体");
+            }
+        }
+        Array out;
+        for (int i = 0; i < 8; ++i) {
+            Dictionary d;
+            d["dir"] = String::utf8(kOctNames[i]);
+            d["label"] = best_label[i];
+            d["dist"] = best_prio[i] > 0 ? best_dist[i] : 0;
+            out.append(d);
+        }
+        return out;
+    }
 
     constexpr int r = 9;
     const Rect2i scan = Rect2i(pos - Vector2i(r, r), Vector2i(r * 2 + 1, r * 2 + 1))

@@ -2,6 +2,7 @@
 
 namespace cangling {
 String CanglingWorld::generated_prop(Vector2i p) {
+    if (active_pack == CorePackId::Cataclysm) return {};
     if (city.layout < 2 || !in_city(p)) return {};
     const ItemCounts spawned = spawn_contextual_items(effective_tile(p, floor), city.surface(p, floor), seed, p, floor);
     const auto &cat = item_catalog();
