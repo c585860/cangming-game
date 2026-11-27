@@ -30,9 +30,57 @@ inline float smoothstep_f(float e0, float e1, float x) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-inline int64_t door_key(int x, int y, int z) {
+inline int64_t door_key(int x, int y, int z, bool use_infinite) {
+    if (use_infinite) return infinite_tile_key({x, y}, z);
     return (static_cast<int64_t>(z) * city_size + y) * city_size + x;
 }
+
+struct OvermapGridSnapshot {
+    int min_ox = 0;
+    int min_oy = 0;
+    int cols = 0;
+    int rows = 0;
+    std::vector<std::shared_ptr<const OmtChunk>> chunks;
+
+    static int floor_div_i(int a, int b) {
+        int q = a / b;
+        int r = a % b;
+        if (r != 0 && ((r < 0) != (b < 0))) --q;
+        return q;
+    }
+
+    static OvermapGridSnapshot capture(CcbOvermapManager &om, Rect2i area) {
+        OvermapGridSnapshot s;
+        const int x0 = area.position.x - 1;
+        const int y0 = area.position.y - 1;
+        const int x1 = area.position.x + area.size.x + 1;
+        const int y1 = area.position.y + area.size.y + 1;
+        s.min_ox = floor_div_i(x0, kOmtSize);
+        s.min_oy = floor_div_i(y0, kOmtSize);
+        const int max_ox = floor_div_i(x1, kOmtSize);
+        const int max_oy = floor_div_i(y1, kOmtSize);
+        s.cols = std::max(1, max_ox - s.min_ox + 1);
+        s.rows = std::max(1, max_oy - s.min_oy + 1);
+        s.chunks.resize(static_cast<std::size_t>(s.cols * s.rows));
+        for (int oy = s.min_oy; oy <= max_oy; ++oy) {
+            for (int ox = s.min_ox; ox <= max_ox; ++ox) {
+                s.chunks[static_cast<std::size_t>((oy - s.min_oy) * s.cols + (ox - s.min_ox))] = om.chunk_at_omt({ox, oy});
+            }
+        }
+        return s;
+    }
+
+    const OmtChunk *at_world(int wx, int wy, int &lx, int &ly) const {
+        const int ox = floor_div_i(wx, kOmtSize);
+        const int oy = floor_div_i(wy, kOmtSize);
+        const int cx = ox - min_ox;
+        const int cy = oy - min_oy;
+        if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) return nullptr;
+        lx = wx - ox * kOmtSize;
+        ly = wy - oy * kOmtSize;
+        return chunks[static_cast<std::size_t>(cy * cols + cx)].get();
+    }
+};
 
 inline float tile_height(char t) {
     switch (t) {
@@ -115,11 +163,34 @@ inline RGB furniture_reflectance(char t) {
     }
 }
 
-inline char sample_tile(const SectorGridSnapshot &snap, const std::unordered_set<int64_t> &doors,
+inline char sample_tile(const SectorGridSnapshot &snap, const OvermapGridSnapshot *om_snap,
+        const std::unordered_set<int64_t> &doors,
         const std::unordered_map<int64_t, char> &overrides,
         int wx, int wy, int level) {
+    if (om_snap != nullptr) {
+        if (level != 0) return ' ';
+        const int64_t dk = door_key(wx, wy, level, true);
+        char t = '.';
+        if (!overrides.empty()) {
+            if (const auto it = overrides.find(dk); it != overrides.end()) {
+                t = it->second;
+                if ((t == 'D' || t == 'w') && !doors.empty() && doors.count(dk)) {
+                    t = (t == 'D') ? 'o' : 'O';
+                }
+                return t;
+            }
+        }
+        int lx = 0, ly = 0;
+        if (const OmtChunk *ch = om_snap->at_world(wx, wy, lx, ly)) {
+            t = ch->compat_tile[static_cast<std::size_t>(ly * kOmtSize + lx)];
+        }
+        if ((t == 'D' || t == 'w') && !doors.empty() && doors.count(dk)) {
+            t = (t == 'D') ? 'o' : 'O';
+        }
+        return t;
+    }
     if (wx < 0 || wy < 0 || wx >= city_size || wy >= city_size) return ' ';
-    const int64_t dk = door_key(wx, wy, level);
+    const int64_t dk = door_key(wx, wy, level, false);
     char t = ' ';
     if (!overrides.empty()) {
         if (const auto it = overrides.find(dk); it != overrides.end()) {
@@ -143,7 +214,8 @@ inline char sample_tile(const SectorGridSnapshot &snap, const std::unordered_set
     return t;
 }
 
-inline char sample_surface(const SectorGridSnapshot &snap, int wx, int wy, int level) {
+inline char sample_surface(const SectorGridSnapshot &snap, const OvermapGridSnapshot *om_snap, int wx, int wy, int level) {
+    if (om_snap != nullptr) return '\0';
     if (wx < 0 || wy < 0 || wx >= city_size || wy >= city_size) return '\0';
     const int sx = wx / sector_size;
     const int sy = wy / sector_size;
@@ -154,7 +226,14 @@ inline char sample_surface(const SectorGridSnapshot &snap, int wx, int wy, int l
     return level_surfaces(*blk, level)[ly * sector_size + lx];
 }
 
-inline std::uint8_t sample_column_flags(const SectorGridSnapshot &snap, int wx, int wy, int z, int layers) {
+inline std::uint8_t sample_column_flags(const SectorGridSnapshot &snap, const OvermapGridSnapshot *om_snap, int wx, int wy, int z, int layers) {
+    if (om_snap != nullptr) {
+        if (z != 0) return 0;
+        int lx = 0, ly = 0;
+        const OmtChunk *ch = om_snap->at_world(wx, wy, lx, ly);
+        if (!ch) return 0;
+        return ch->enclosed[static_cast<std::size_t>(ly * kOmtSize + lx)] ? 3u : 0u;
+    }
     if (wx < 0 || wy < 0 || wx >= city_size || wy >= city_size) return 0;
     const int sx = wx / sector_size;
     const int sy = wy / sector_size;
@@ -210,7 +289,8 @@ constexpr LampSpec kLampHerb{0.35f, 6.0f, 0.45f, 0.94f, 0.74f, 2.0f, 0.28f};
 
 godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<int64_t> &doors,
         const std::unordered_map<int64_t, char> &overrides,
-        Rect2i area, int z, int layers, const String &season, double &out_bake_ms) {
+        Rect2i area, int z, int layers, const String &season, double &out_bake_ms,
+        CcbOvermapManager *overmap) {
     const auto t0 = std::chrono::steady_clock::now();
     godot::Dictionary result;
     const int w = area.size.x;
@@ -221,7 +301,15 @@ godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<
         return result;
     }
 
-    const SectorGridSnapshot snap = city.snapshot_sectors(area);
+    SectorGridSnapshot snap;
+    OvermapGridSnapshot om_holder;
+    const OvermapGridSnapshot *om_snap = nullptr;
+    if (overmap != nullptr) {
+        om_holder = OvermapGridSnapshot::capture(*overmap, area);
+        om_snap = &om_holder;
+    } else {
+        snap = city.snapshot_sectors(area);
+    }
     const int total = w * h;
 
     godot::PackedByteArray tiles_buf;
@@ -254,21 +342,21 @@ godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<
             for (int x = 0; x < w; ++x) {
                 const int wx = area.position.x + x;
                 const int idx = y * w + x;
-                const char t = sample_tile(snap, doors, overrides, wx, wy, z);
-                const char s = sample_surface(snap, wx, wy, z);
-                const std::uint8_t f = sample_column_flags(snap, wx, wy, z, clamped_layers);
+                const char t = sample_tile(snap, om_snap, doors, overrides, wx, wy, z);
+                const char s = sample_surface(snap, om_snap, wx, wy, z);
+                const std::uint8_t f = sample_column_flags(snap, om_snap, wx, wy, z, clamped_layers);
                 tiles_ptr[idx] = static_cast<std::uint8_t>(t);
                 surf_ptr[idx] = static_cast<std::uint8_t>(s);
                 flags_ptr[idx] = f;
                 layer_tiles_all[static_cast<std::size_t>(idx)] = t;
                 for (int layer = 1; layer < clamped_layers; ++layer) {
                     layer_tiles_all[static_cast<std::size_t>(layer * total + idx)] =
-                        sample_tile(snap, doors, overrides, wx, wy, z + layer);
+                        sample_tile(snap, om_snap, doors, overrides, wx, wy, z + layer);
                 }
                 if (need_below) {
                     if (t == ' ') {
-                        below_t_ptr[idx] = static_cast<std::uint8_t>(sample_tile(snap, doors, overrides, wx, wy, 0));
-                        below_s_ptr[idx] = static_cast<std::uint8_t>(sample_surface(snap, wx, wy, 0));
+                        below_t_ptr[idx] = static_cast<std::uint8_t>(sample_tile(snap, om_snap, doors, overrides, wx, wy, 0));
+                        below_s_ptr[idx] = static_cast<std::uint8_t>(sample_surface(snap, om_snap, wx, wy, 0));
                     } else {
                         below_t_ptr[idx] = static_cast<std::uint8_t>(' ');
                         below_s_ptr[idx] = 0;
@@ -671,7 +759,8 @@ godot::Dictionary RenderBaker::bake_region(City &city, const std::unordered_set<
 
 godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordered_set<int64_t> &doors,
         const std::unordered_map<int64_t, char> &overrides,
-        Rect2i area, Rect2i region, int z, float outdoor_light, float sun_warmth) {
+        Rect2i area, Rect2i region, int z, float outdoor_light, float sun_warmth,
+        CcbOvermapManager *overmap) {
     godot::PackedByteArray out;
     const int w = area.size.x;
     const int h = area.size.y;
@@ -683,7 +772,15 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
     const Rect2i clipped = region.intersection(area);
     if (clipped.size.x <= 0 || clipped.size.y <= 0) return out;
 
-    const SectorGridSnapshot snap = city.snapshot_sectors(area);
+    SectorGridSnapshot snap;
+    OvermapGridSnapshot om_holder;
+    const OvermapGridSnapshot *om_snap = nullptr;
+    if (overmap != nullptr) {
+        om_holder = OvermapGridSnapshot::capture(*overmap, area);
+        om_snap = &om_holder;
+    } else {
+        snap = city.snapshot_sectors(area);
+    }
     constexpr float kAmbientLow = 3.5f;
     constexpr float kAmbientDim = 5.0f;
     const float inside_blend = smoothstep_f(4.5f, 26.0f, outdoor_light);
@@ -705,9 +802,9 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
             const int wy = area.position.y + y;
             for (int x = rx0; x < rx1; ++x) {
                 const int wx = area.position.x + x;
-                const char tile = sample_tile(snap, doors, overrides, wx, wy, z);
+                const char tile = sample_tile(snap, om_snap, doors, overrides, wx, wy, z);
                 if (tile == ' ') continue;
-                const std::uint8_t flags = sample_column_flags(snap, wx, wy, z, 3);
+                const std::uint8_t flags = sample_column_flags(snap, om_snap, wx, wy, z, 3);
                 const bool enclosed = (flags & 1u) != 0u;
                 const bool sky_open = (flags & 0xAAu) == 0u;
 
@@ -717,8 +814,8 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
                 } else if (z >= 0 && is_wall_tile(tile)) {
                     const int ey = wy + 1;
                     if (ey < area.position.y + h) {
-                        const char ext_tile = sample_tile(snap, doors, overrides, wx, ey, z);
-                        const std::uint8_t ext_flags = sample_column_flags(snap, wx, ey, z, 3);
+                        const char ext_tile = sample_tile(snap, om_snap, doors, overrides, wx, ey, z);
+                        const std::uint8_t ext_flags = sample_column_flags(snap, om_snap, wx, ey, z, 3);
                         const bool ext_enc = (ext_flags & 1u) != 0u;
                         const bool ext_sky = (ext_flags & 0xAAu) == 0u;
                         if (ext_sky && !ext_enc && !is_wall_tile(ext_tile)) {
@@ -748,13 +845,22 @@ godot::PackedByteArray RenderBaker::bake_ambient(City &city, const std::unordere
 
 godot::Dictionary RenderBaker::bake_point_lights(City &city, const std::unordered_set<int64_t> &doors,
         const std::unordered_map<int64_t, char> &overrides,
-        Rect2i area, Rect2i region, int z, const godot::Dictionary &sites, int seed) {
+        Rect2i area, Rect2i region, int z, const godot::Dictionary &sites, int seed,
+        CcbOvermapManager *overmap) {
     godot::Dictionary result;
     const int w = area.size.x;
     const int h = area.size.y;
     if (w <= 0 || h <= 0) return result;
 
-    const SectorGridSnapshot snap = city.snapshot_sectors(area);
+    SectorGridSnapshot snap;
+    OvermapGridSnapshot om_holder;
+    const OvermapGridSnapshot *om_snap = nullptr;
+    if (overmap != nullptr) {
+        om_holder = OvermapGridSnapshot::capture(*overmap, area);
+        om_snap = &om_holder;
+    } else {
+        snap = city.snapshot_sectors(area);
+    }
     const int total = w * h;
 
     // Flat tile + enclosed cache over area for ultra-fast parallel ray transmission.
@@ -766,8 +872,8 @@ godot::Dictionary RenderBaker::bake_point_lights(City &city, const std::unordere
             for (int x = 0; x < w; ++x) {
                 const int wx = area.position.x + x;
                 const int idx = y * w + x;
-                tiles[idx] = sample_tile(snap, doors, overrides, wx, wy, z);
-                enclosed[idx] = sample_column_flags(snap, wx, wy, z, 1) & 1u;
+                tiles[idx] = sample_tile(snap, om_snap, doors, overrides, wx, wy, z);
+                enclosed[idx] = sample_column_flags(snap, om_snap, wx, wy, z, 1) & 1u;
             }
         }
     });

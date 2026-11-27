@@ -140,7 +140,7 @@ String npc_dialogue(int idx, int turn) {
 
 StringName CanglingWorld::site(Vector2i p) {
     if (!in_city(p)) return {};
-    if (floor == 0) {
+    if (active_pack == CorePackId::Cangming && floor == 0) {
         if (const NpcDef *npc = npc_at_tile(p)) {
             return StringName(npc->id);
         }
@@ -163,7 +163,15 @@ Dictionary CanglingWorld::actions_at(Vector2i p) {
     const char tile = effective_tile(p, floor);
     if (tile == ' ') return out;
 
-    if (floor == 0) {
+    if (active_pack == CorePackId::Cataclysm) {
+        if (monsters.has_alive_at(p, floor)) {
+            const Dictionary md = monsters.monster_dict_at(p, floor);
+            out["attack_monster"] = text("近战攻击「") + String(md.get("name", text("丧尸"))) + text("」");
+            return out;
+        }
+    }
+
+    if (active_pack == CorePackId::Cangming && floor == 0) {
         if (p == kNoticeBoardTile) {
             out["bounty_board"] = text("查看沧灵告示牌（接取江湖委托 M）");
         }
@@ -252,11 +260,17 @@ Dictionary CanglingWorld::actions_at(Vector2i p) {
         }
     }
 
-    const auto available = items_on(p);
-    int item_sum = 0;
-    for (int i = 0; i < item_types; ++i) item_sum += available[i];
-    if (item_sum > 0 && (!is_openable_container(tile) || is_container_open(p) || tile == 'r')) {
-        out["loot"] = text("拾取 / 食用此处物品 (g)");
+    if (active_pack == CorePackId::Cataclysm) {
+        if (!ccb_items_at(p).is_empty() && (!is_openable_container(tile) || is_container_open(p) || tile == 'r')) {
+            out["loot"] = text("搜刮此处原版物品 (g)");
+        }
+    } else {
+        const auto available = items_on(p);
+        int item_sum = 0;
+        for (int i = 0; i < item_types; ++i) item_sum += available[i];
+        if (item_sum > 0 && (!is_openable_container(tile) || is_container_open(p) || tile == 'r')) {
+            out["loot"] = text("拾取 / 食用此处物品 (g)");
+        }
     }
     if (std::string_view("btckKlruCaFqS").find(tile) != std::string_view::npos &&
         std::any_of(carried.begin(), carried.end(), [](int n) { return n != 0; })) {
@@ -275,7 +289,11 @@ Dictionary CanglingWorld::actions_at(Vector2i p) {
 
 String CanglingWorld::interact(Vector2i p, const String &action) {
     if (!near(p) || !actions_at(p).has(action)) return {};
-    if (floor == 0) {
+    if (active_pack == CorePackId::Cataclysm && action == "attack_monster") {
+        const Dictionary ar = attack_monster_at(p);
+        return ar.get("message", String());
+    }
+    if (active_pack == CorePackId::Cangming && floor == 0) {
         const int nidx = npc_index_at(p);
         if (nidx >= 0) {
             const NpcDef &npc = kYangzhouNpcs[static_cast<std::size_t>(nidx)];

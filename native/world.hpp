@@ -1,11 +1,15 @@
 #pragma once
 
 #include "bounties.hpp"
+#include "ccb_overmap.hpp"
+#include "ccb_vanilla.hpp"
 #include "character_state.hpp"
 #include "city.hpp"
 #include "combat.hpp"
+#include "core_packs.hpp"
 #include "crafting.hpp"
 #include "item_catalog.hpp"
+#include "monsters.hpp"
 #include "multiplayer.hpp"
 #include "shops.hpp"
 #include "skills.hpp"
@@ -51,6 +55,23 @@ class CanglingWorld : public godot::RefCounted {
     SparSession spar_session;
     BountyTracker bounty_tracker;
 
+    // Dual Core-Pack State (Cangming vs Cataclysm: Cleanwater Bomb)
+    CorePackId active_pack = CorePackId::Cangming;
+    std::string active_scenario = "evacuee";
+    CcbOvermapManager ccb_overmap;
+    std::unordered_set<int64_t> ccb_spawned_omts;
+    int ccb_turn_moves = 0;
+    int ccb_turn_seconds = 0;
+    int world_city_size = 8;
+    int world_city_spacing = 4;
+    float world_monster_rate = 1.0f;
+    MonsterManager monsters;
+    CcbSurvivalState ccb_state;
+    int kills = 0;
+    godot::Array pending_ccb_messages;
+    void ensure_ccb_loot_at(Vector2i p);
+    void ensure_ccb_omt_populated(Vector2i center_wp);
+
     CraftEnv current_craft_env() const;
     bool is_pos_indoors(Vector2i p, int z);
     bool is_pos_near_hearth(Vector2i p, int z);
@@ -76,7 +97,13 @@ class CanglingWorld : public godot::RefCounted {
     Dictionary item_state() const;
     bool restore_item_state(const Dictionary &state, City &loaded);
     void clear_items();
-    static int64_t key(Vector2i p, int z) { return (static_cast<int64_t>(z) * city_size + p.y) * city_size + p.x; }
+    int64_t key(Vector2i p, int z) const {
+        if (active_pack == CorePackId::Cataclysm) return infinite_tile_key(p, z);
+        return (static_cast<int64_t>(z) * city_size + p.y) * city_size + p.x;
+    }
+    bool in_bounds(Vector2i p) const {
+        return active_pack == CorePackId::Cataclysm || in_city(p);
+    }
     godot::StringName site(Vector2i p);
     bool walkable_on(Vector2i p, int z);
     std::vector<Vector2i> local_path(Vector2i from, Vector2i to, Rect2i bounds, int z);
@@ -90,6 +117,74 @@ public:
     CanglingWorld();
     ~CanglingWorld() override;
     void setup(int64_t new_seed);
+    void setup_with_pack(const String &pack_slug, int64_t new_seed, const String &scenario_id = String("evacuee"));
+    godot::Array list_core_packs() const;
+    godot::Array list_ccb_scenarios() const;
+    String get_pack_id() const;
+    String get_pack_name() const;
+    bool is_cataclysm_pack() const { return active_pack == CorePackId::Cataclysm; }
+
+    // Vanilla CCB Core Pack APIs (10,366 items, 591 mutations, radiation, vanilla melee combat, infinite Overmap, turn-based engine, corpses)
+    void setup_ccb_world(const Dictionary &world_cfg, const Dictionary &char_cfg);
+    godot::Array ccb_list_scenarios() const;
+    godot::Array ccb_list_professions(bool hobbies_only) const;
+    godot::Array ccb_list_starting_traits() const;
+    godot::Array ccb_list_skills() const;
+    Dictionary ccb_overmap_slice(Vector2i center_omt, int radius);
+    Vector2i ccb_world_to_omt(Vector2i wp) const;
+    Dictionary ccb_render_rect(Rect2i area, int z);
+    Dictionary ccb_advance_moves(int moves);
+    Dictionary ccb_wait_turn();
+    Dictionary ccb_wait_minutes(int mins);
+    Dictionary ccb_sleep_minutes(int mins);
+    godot::Array ccb_corpses_at(Vector2i p) const;
+    String ccb_pulp_at(Vector2i p);
+    String ccb_butcher_at(Vector2i p);
+    godot::Array ccb_recipe_list(const String &category_filter, const String &query, int limit) const;
+    String ccb_craft_recipe(const String &recipe_id);
+    void ccb_teleport_debug(Vector2i target);
+    int get_ccb_turn_seconds() const { return ccb_turn_seconds; }
+
+    Dictionary ccb_db_stats() const;
+    godot::Array ccb_search_items(const String &query, const String &subtype_filter, int limit) const;
+    Dictionary ccb_status() const;
+    godot::Array ccb_inventory() const;
+    godot::Array ccb_worn() const;
+    godot::Array ccb_items_at(Vector2i p);
+    String ccb_wield(const String &item_id);
+    String ccb_unwield();
+    String ccb_wear(const String &item_id);
+    String ccb_takeoff(const String &item_id);
+    String ccb_use_item(const String &item_id);
+    String ccb_take_item(Vector2i p, const String &item_id);
+    String ccb_take_all_at(Vector2i p);
+    String ccb_drop_item(const String &item_id);
+    String ccb_give_item(const String &item_id, int count);
+    String ccb_wash_item(const String &item_id);
+    bool ccb_reorder_worn(int idx, int delta);
+    String ccb_transfer_item(Vector2i from_pos, bool from_bag, Vector2i to_pos, bool to_bag, const String &item_id, int count);
+    String ccb_craft_batch(const String &recipe_id, int batch_count);
+    Dictionary ccb_pixel_minimap_data(int radius);
+    Dictionary ccb_inspect_tile(Vector2i p);
+    void ccb_set_overmap_note(Vector2i omt, const String &note);
+    godot::Array ccb_search_overmap(const String &query, Vector2i from_omt, int radius);
+    bool ccb_debug_spawn_monster(const String &mtype_id, Vector2i target);
+    double ccb_tile_radiation(Vector2i p) const;
+    godot::Array ccb_irradiate(double rads, bool bypass);
+    godot::Array ccb_mutate_category(const String &cat_id);
+    godot::Array ccb_purify();
+    godot::Array pop_ccb_messages();
+
+    godot::Array monsters_in_rect(Rect2i area) const;
+    Dictionary monster_at(Vector2i p) const;
+    Dictionary tick_monsters(int steps);
+    Dictionary attack_monster_at(Vector2i p);
+    int get_kills() const { return kills; }
+    int alive_monster_count() const { return monsters.alive_count(); }
+
+    Dictionary inspect_save_meta(const String &path) const;
+    bool apply_world_mutation(const Dictionary &mut);
+
     int64_t get_seed() const { return seed; }
     Vector2i get_pos() const { return pos; }
     int get_floor() const { return floor; }
@@ -105,13 +200,13 @@ public:
     int get_sector_size() const { return sector_size; }
     String get_quest_text() const;
     Dictionary get_landmarks() const { return city.landmarks(); }
-    String location(Vector2i p) { return city.location(p); }
+    String location(Vector2i p);
     String overview(Vector2i sector) const;
     godot::PackedByteArray city_survey() { return city.survey(); }
     int road_mask(Vector2i sector) const { return city.plan.road_mask(sector); }
     String terrain_at(Vector2i p);
     String terrain_at_level(Vector2i p, int z);
-    int lighting_column(Vector2i p, int z, int layers) { return city.lighting_column(p, z, layers); }
+    int lighting_column(Vector2i p, int z, int layers);
     String surface_at(Vector2i p);
     String surface_at_level(Vector2i p, int z);
     String prop_at(Vector2i p);

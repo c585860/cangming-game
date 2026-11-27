@@ -192,20 +192,28 @@ func draw_character(board: Control, dest: Control, role: StringName, at_world: V
 		Pack.draw_at(dest, "player_male", local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
 		if use_custom:
 			for oid: String in worn_overlays:
+				if not Pack.has_tile(oid):
+					continue
 				var ot := outfit_tint if oid in ["overlay_worn_cloak", "overlay_worn_robe"] else tint
 				Pack.draw_at(dest, oid, local_origin, cell_f, 0, -1, 0, ot, Vector2.ZERO, false)
 		else:
 			for id: String in ["overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
-				Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
-			Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, false)
+				if Pack.has_tile(id):
+					Pack.draw_at(dest, id, local_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, false)
+			if Pack.has_tile(outfit):
+				Pack.draw_at(dest, outfit, local_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, false)
 		dest.draw_set_transform(Vector2.ZERO)
 	else:
 		Pack.draw_at(dest, "player_male", draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
 		if use_custom:
 			for oid: String in worn_overlays:
+				if not Pack.has_tile(oid):
+					continue
 				var ot := outfit_tint if oid in ["overlay_worn_cloak", "overlay_worn_robe"] else tint
 				Pack.draw_at(dest, oid, draw_origin, cell_f, 0, -1, 0, ot, Vector2.ZERO, flip)
 		else:
 			for id: String in ["overlay_worn_pants", "overlay_worn_boots", "overlay_worn_tunic"]:
-				Pack.draw_at(dest, id, draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
-			Pack.draw_at(dest, outfit, draw_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, flip)
+				if Pack.has_tile(id):
+					Pack.draw_at(dest, id, draw_origin, cell_f, 0, -1, 0, tint, Vector2.ZERO, flip)
+			if Pack.has_tile(outfit):
+				Pack.draw_at(dest, outfit, draw_origin, cell_f, 0, -1, 0, outfit_tint, Vector2.ZERO, flip)

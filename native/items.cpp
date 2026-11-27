@@ -87,6 +87,7 @@ int CanglingWorld::generated_item(Vector2i p) {
 }
 
 ItemCounts CanglingWorld::items_on(Vector2i p) {
+    if (active_pack == CorePackId::Cataclysm) return {};
     if (!in_city(p)) return {};
     const int64_t k = key(p, floor);
     ItemCounts count{};
@@ -110,6 +111,7 @@ void CanglingWorld::materialize_tile_items(Vector2i p) {
 }
 
 String CanglingWorld::prop_at(Vector2i p) {
+    if (active_pack == CorePackId::Cataclysm) return {};
     const char tile = effective_tile(p, floor);
     // Keep closed opaque wardrobes/cabinets/trunks clean outside until opened, while showing open-surface items on tables/beds/counters/floors!
     if (is_openable_container(tile) && !is_container_open(p) && tile != 'r') {
@@ -125,6 +127,7 @@ String CanglingWorld::prop_at(Vector2i p) {
 
 Dictionary CanglingWorld::props_in_rect(Rect2i area) {
     Dictionary out;
+    if (active_pack == CorePackId::Cataclysm) return out;
     const Rect2i clipped = area.intersection(Rect2i(0, 0, city_size, city_size));
     if (clipped.size.x <= 0 || clipped.size.y <= 0) return out;
     const SectorGridSnapshot snap = city.snapshot_sectors(clipped);
@@ -188,6 +191,7 @@ Dictionary CanglingWorld::props_in_rect(Rect2i area) {
 }
 
 Array CanglingWorld::inventory() const {
+    if (active_pack == CorePackId::Cataclysm) return ccb_inventory();
     Array result;
     for (int i = 0; i < item_types; ++i) {
         if (!carried[i]) continue;
@@ -197,6 +201,7 @@ Array CanglingWorld::inventory() const {
 }
 
 Array CanglingWorld::items_at(Vector2i p) {
+    if (active_pack == CorePackId::Cataclysm) return ccb_items_at(p);
     Array result;
     if (!in_city(p)) return result;
     const auto count = items_on(p);

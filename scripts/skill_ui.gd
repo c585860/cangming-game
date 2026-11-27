@@ -508,18 +508,43 @@ static func multiplayer_panel(game: Control, contents: VBoxContainer) -> void:
 	var btn_row := HBoxContainer.new()
 	btn_row.add_theme_constant_override("separation", 6)
 	contents.add_child(btn_row)
-	game._button(btn_row, "创建联机房 (HOST)", func():
-		var p := int(port_edit.text) if port_edit.text.is_valid_int() else 24680
-		game._note(ns.host_session(game, world, p))
+	game._button(btn_row, "创建 ENet 联机房 (HOST)", func():
+		var p := int(port_edit.text) if port_edit.text.is_valid_int() else 27015
+		game._note(ns.host_from_ui(world, p))
 		game._reopen_overlay("multiplayer"), mode == "OFFLINE")
-	game._button(btn_row, "加入联机房 (CLIENT)", func():
-		var p := int(port_edit.text) if port_edit.text.is_valid_int() else 24680
-		game._note(ns.join_session(game, world, host_edit.text, p))
+	game._button(btn_row, "加入 ENet 联机房 (CLIENT)", func():
+		var p := int(port_edit.text) if port_edit.text.is_valid_int() else 27015
+		game._note(ns.join_from_ui(world, host_edit.text, p))
 		game._reopen_overlay("multiplayer"))
 	game._button(btn_row, "切回单机 (OFFLINE)", func():
-		game._note(ns.disconnect_session(game, world))
-		game.board.player_layer.queue_redraw()
+		game._note(ns.disconnect_from_ui(world))
 		game._reopen_overlay("multiplayer"))
+
+	# Live Co-op Chat box
+	contents.add_child(CCB.divider())
+	var chat_row := HBoxContainer.new()
+	chat_row.add_theme_constant_override("separation", 6)
+	contents.add_child(chat_row)
+	var chat_edit := LineEdit.new()
+	chat_edit.placeholder_text = "输入联机消息按回车发送..."
+	chat_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	CCB.style_line_edit(chat_edit)
+	chat_row.add_child(chat_edit)
+	var send_cb := func():
+		if not chat_edit.text.strip_edges().is_empty():
+			ns.send_chat(world, chat_edit.text)
+			chat_edit.text = ""
+			game._reopen_overlay("multiplayer")
+	game._button(chat_row, "发送", send_cb, true)
+	chat_edit.text_submitted.connect(func(_t: String): send_cb.call())
+
+	if not ns.chat_log.is_empty():
+		var cbox := VBoxContainer.new()
+		cbox.add_theme_constant_override("separation", 2)
+		contents.add_child(cbox)
+		for i in range(mini(5, ns.chat_log.size())):
+			var cm: Dictionary = ns.chat_log[i]
+			game._label(cbox, "[%s] %s" % [str(cm.get("name", "")), str(cm.get("text", ""))], 11, CCB.C_LTCYAN)
 
 	var peer_lbl: String = "[ 当前同步的同道玩家 (%d) ]" % peers.size()
 	game._label(contents, peer_lbl, 12, CCB.C_CYAN)

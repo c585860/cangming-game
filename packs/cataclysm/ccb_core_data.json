@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "source": "Cataclysm-Cleanwater-Bomb (CCB Core Pack)",
+  "monsters": [
+    {
+      "id": "mon_zombie",
+      "name": "普通丧尸",
+      "tile": "mon_zombie",
+      "hp": 72,
+      "melee_dmg": 9,
+      "speed": 70,
+      "vision": 12,
+      "hear_radius": 18,
+      "exp_reward": 12,
+      "pot_reward": 8,
+      "desc": "步履蹒跚却不知疲倦的普通感染者，被声响与动静吸引。"
+    },
+    {
+      "id": "mon_zombie_runner",
+      "name": "疾行丧尸",
+      "tile": "mon_zombie_runner",
+      "hp": 58,
+      "melee_dmg": 8,
+      "speed": 115,
+      "vision": 15,
+      "hear_radius": 20,
+      "exp_reward": 16,
+      "pot_reward": 11,
+      "desc": "动作迅捷的奔跑型丧尸，极易在开阔街道追上奔跑中的幸存者。"
+    },
+    {
+      "id": "mon_zombie_tough",
+      "name": "壮硕丧尸",
+      "tile": "mon_zombie_tough",
+      "hp": 118,
+      "melee_dmg": 14,
+      "speed": 78,
+      "vision": 13,
+      "hear_radius": 18,
+      "exp_reward": 22,
+      "pot_reward": 15,
+      "desc": "肌肉畸变的强壮丧尸，抗击打能力远超常人。"
+    },
+    {
+      "id": "mon_zombie_fat",
+      "name": "肥胖丧尸",
+      "tile": "mon_zombie_fat",
+      "hp": 96,
+      "melee_dmg": 10,
+      "speed": 58,
+      "vision": 11,
+      "hear_radius": 16,
+      "exp_reward": 14,
+      "pot_reward": 9,
+      "desc": "行动迟缓但皮糙肉厚的胖丧尸，常徘徊在超市与民居厨房附近。"
+    },
+    {
+      "id": "mon_zombie_cop",
+      "name": "警装丧尸",
+      "tile": "mon_zombie_cop",
+      "hp": 105,
+      "melee_dmg": 13,
+      "speed": 85,
+      "vision": 14,
+      "hear_radius": 20,
+      "exp_reward": 24,
+      "pot_reward": 16,
+      "desc": "身穿残破防弹背心的警员丧尸，多出没于警局与十字路口。"
+    },
+    {
+      "id": "mon_dog",
+      "name": "变异野犬",
+      "tile": "mon_dog",
+      "hp": 46,
+      "melee_dmg": 7,
+      "speed": 122,
+      "vision": 16,
+      "hear_radius": 24,
+      "exp_reward": 13,
+      "pot_reward": 9,
+      "desc": "凶猛敏锐的末世流浪犬，听觉极佳且速度极快。"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "evacuee",
+      "name": "避难所幸存者 (Evacuee)",
+      "desc": "在政府应急避难所中醒来，物资逐渐见底，必须踏入被丧尸占据的新英格兰城镇搜刮求生。"
+    },
+    {
+      "id": "scavenger",
+      "name": "废土拾荒客 (Scavenger)",
+      "desc": "自带撬棍、手灯与急救绷带，擅长破门入室与夜间潜行搜刮。"
+    }
+  ]
+}

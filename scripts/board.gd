@@ -6,6 +6,7 @@ signal context_requested(cell: Vector2i)
 const World = preload("res://scripts/world.gd")
 const CanglingCalendar = preload("res://scripts/cangling_calendar.gd")
 const Tiles = preload("res://scripts/undead_tiles.gd")
+const StreetArt = preload("res://scripts/street_art.gd")
 const Lighting = preload("res://scripts/lighting.gd")
 const LightGeometry = preload("res://scripts/light_geometry.gd")
 const SceneLighting = preload("res://scripts/scene_lighting.gd")
@@ -321,8 +322,14 @@ func follow(p: Vector2i) -> void:
 func _recompute_camera_window() -> void:
 	cell = ZOOMS[zoom]
 	var exact_span := size / float(cell)
-	var max_world := (Vector2(world.city_size) - exact_span).max(Vector2.ZERO)
-	view_world_exact = (camera_world - exact_span * 0.5).clamp(Vector2.ZERO, max_world)
+	var is_ccb: bool = world != null and world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack()
+	if is_ccb:
+		bounds = Rect2i(-8000000, -8000000, 16000000, 16000000)
+		view_world_exact = camera_world - exact_span * 0.5
+	else:
+		bounds = Rect2i(Vector2i.ZERO, world.city_size)
+		var max_world := (Vector2(world.city_size) - exact_span).max(Vector2.ZERO)
+		view_world_exact = (camera_world - exact_span * 0.5).clamp(Vector2.ZERO, max_world)
 	view_origin = Vector2i(floori(view_world_exact.x), floori(view_world_exact.y))
 	var frac := view_world_exact - Vector2(view_origin)
 	cam_px_offset = -frac * float(cell)
@@ -515,6 +522,15 @@ func _populate_cells_from_baked(baked: Dictionary, baked_area: Rect2i, sub_area:
 func _sync_render_state() -> void:
 	if world == null or size.x < 2.0 or size.y < 2.0:
 		return
+	var is_ccb: bool = world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack()
+	var tileset_switched := Tiles.ensure_pack_tileset(is_ccb)
+	if StreetArt.cataclysm_mode != is_ccb or roof_system.modern_mode != is_ccb or tileset_switched:
+		StreetArt.cataclysm_mode = is_ccb
+		roof_system.modern_mode = is_ccb
+		geometry_key.clear()
+		world_cache.invalidate()
+		roof_system.invalidate_cache()
+		_recompute_camera_window()
 	var visible := Rect2i(view_origin, view_size).intersection(bounds)
 	if not visible.has_area():
 		return
@@ -529,7 +545,7 @@ func _sync_render_state() -> void:
 	var layers := maxi(1, 3 - z) if can_read_upper_levels and z >= 0 else 1
 	var reach := LightGeometry.REACH + SceneLighting.LIGHT_MARGIN + 2
 	var required := props.grow(reach).intersection(bounds)
-	var static_key: Array = [world.seed, z, current_season]
+	var static_key: Array = [world.seed, z, current_season, StreetArt.cataclysm_mode]
 	var rebuilt_geom := false
 
 	if static_key != geometry_key or not geometry_area.encloses(required):
@@ -640,19 +656,20 @@ func exit_posture() -> void:
 
 
 func _draw_water_life() -> void:
-	if world == null:
+	if world == null or (world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack()):
 		return
 	ambient_life.draw_water_layer(water_life_layer, self, scene_lighting.current_daylight, scene_lighting.current_lamp_power)
 
 
 func _draw_sky_life() -> void:
-	if world == null:
+	if world == null or (world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack()):
 		return
 	ambient_life.draw_sky_layer(sky_life_layer, self, current_season, scene_lighting.current_daylight, scene_lighting.current_lamp_power)
 
 
 func _draw_roofs() -> void:
-	if world == null or world.floor != 0:
+	# Pure vanilla CCB uses unmodified top-down vanilla tileset without custom procedural roofs!
+	if world == null or world.floor != 0 or (world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack()):
 		return
 	var visible := Rect2i(view_origin, view_size).intersection(bounds).grow(1).intersection(bounds)
 	var seed: int = world.seed ^ (world.floor * 0x65bd4e97)
@@ -677,7 +694,63 @@ func _draw_player() -> void:
 		var flicker := 0.92 + 0.08 * sin(visual_time * 13.7) + 0.05 * sin(visual_time * 23.1)
 		var warm := Color(1.06, 0.80, 0.56) if ls == 1 else (Color(1.08, 0.88, 0.64) if ls == 2 else Color(1.10, 0.95, 0.74))
 		tint = tint.lerp(warm * flicker, 0.58 if ls == 1 else 0.68)
+	var is_ccb: bool = world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack()
+	var mtint := scene_lighting.current_roof_light.clamp(Color(0.32, 0.34, 0.38), Color.WHITE)
+	var mfont := get_theme_default_font()
+
+	# Cataclysm Core Pack: Render live blood splatters, vanilla corpses & ground vanilla items dynamically under player & monsters!
+	if is_ccb:
+		var dyn: Dictionary = world.ccb_render_rect(visible.grow(1), world.floor)
+		for b: Dictionary in dyn.get("blood", []):
+			var bp: Vector2i = b.get("pos", Vector2i.ZERO)
+			var bpx := Vector2((bp - view_origin) * cell) + cam_px_offset
+			if Tiles.has_tile("fd_blood"):
+				Tiles.draw_at(player_layer, "fd_blood", bpx, float(cell), absi(bp.x * 31 + bp.y * 17), -1, 0, mtint)
+			else:
+				player_layer.draw_circle(bpx + Vector2(cell * 0.5, cell * 0.6), cell * 0.25, Color(0.58, 0.06, 0.08, 0.78) * mtint)
+		for it: Dictionary in dyn.get("items", []):
+			var ip: Vector2i = it.get("pos", Vector2i.ZERO)
+			var ipx := Vector2((ip - view_origin) * cell) + cam_px_offset
+			var itile: String = str(it.get("tile", ""))
+			if not itile.is_empty() and Tiles.has_tile(itile):
+				Tiles.draw_at(player_layer, itile, ipx, float(cell), 0, -1, 0, mtint)
+			elif Tiles.has_tile("rag"):
+				Tiles.draw_at(player_layer, "rag", ipx, float(cell), 0, -1, 0, mtint)
+		for c: Dictionary in dyn.get("corpses", []):
+			var cp: Vector2i = c.get("pos", Vector2i.ZERO)
+			var cpx := Vector2((cp - view_origin) * cell) + cam_px_offset
+			var ctile: String = str(c.get("tile", "corpse"))
+			var pulped: bool = bool(c.get("pulped", false))
+			var chosen := ctile if Tiles.has_tile(ctile) else ("corpse_bloody" if (pulped and Tiles.has_tile("corpse_bloody")) else ("corpse" if Tiles.has_tile("corpse") else "mon_zombie_crawler"))
+			var ctint := mtint * (Color(0.68, 0.42, 0.42) if pulped else Color.WHITE)
+			Tiles.draw_at(player_layer, chosen, cpx, float(cell), 0, -1, 0, ctint)
+			if mfont != null and cell >= 20:
+				var tag := "烂" if pulped else "尸"
+				var tcol := Color("997777") if pulped else Color("e05a5a")
+				player_layer.draw_string(mfont, cpx + Vector2(2.0, cell - 3.0), tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, tcol)
+
 	motion.draw_character(self, player_layer, &"player", motion.visual_pos, true, world.pos, tint, world.worn_overlays())
+	# Cataclysm Core Pack: Render live vanilla CCB monsters with dynamic lighting tint, HP bar & alert badge!
+	if is_ccb:
+		var mons: Array = world.monsters_in_rect(visible.grow(1))
+		for m: Dictionary in mons:
+			var mpos: Vector2i = m.get("pos", Vector2i.ZERO)
+			var mtile: String = str(m.get("tile", "mon_zombie"))
+			var mpx := Vector2((mpos - view_origin) * cell) + cam_px_offset
+			# Subtle ground shadow
+			player_layer.draw_set_transform(mpx + Vector2(cell * 0.5, cell * 0.86), 0, Vector2(1.0, 0.36))
+			player_layer.draw_circle(Vector2.ZERO, cell * 0.34, Color(0.02, 0.03, 0.04, 0.45))
+			player_layer.draw_set_transform(Vector2.ZERO)
+			Tiles.draw_at(player_layer, mtile, mpx, float(cell), 0, -1, 0, mtint)
+			var mhp: int = int(m.get("hp", 1))
+			var mmax: int = maxi(1, int(m.get("max_hp", 1)))
+			if mhp < mmax:
+				var bw := float(cell) * 0.84
+				var bar := Rect2(mpx + Vector2((cell - bw) * 0.5, -5.0), Vector2(bw, 4.0))
+				player_layer.draw_rect(bar.grow(1.0), Color(0.04, 0.04, 0.05, 0.90))
+				player_layer.draw_rect(Rect2(bar.position, Vector2(bw * clampf(float(mhp) / float(mmax), 0.0, 1.0), 4.0)), Color("e65a5a"))
+			if bool(m.get("alerted", false)) and mfont != null:
+				player_layer.draw_string(mfont, mpx + Vector2(cell * 0.72, 8.0), "!", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("f0d86c"))
 	# Multiplayer Hook: Render synced remote players on the same floor (zero cost in single-player!)
 	if world.remote_player_count() > 0:
 		var remotes: Array = world.remote_players_in_rect(visible.grow(1))
@@ -775,8 +848,8 @@ func _draw_markers() -> void:
 		markers.draw_set_transform(center, 0, Vector2(1.0, 0.34))
 		markers.draw_arc(Vector2.ZERO, cell * 0.40, 0, TAU, 24, ring_col, 1.3, true)
 		markers.draw_set_transform(Vector2.ZERO)
-	# Central Square Notice Board ('榜') wooden stand marker
-	if world != null and world.floor == 0 and cell >= 20:
+	# Central Square Notice Board ('榜') wooden stand marker (Cangming pack only)
+	if world != null and world.floor == 0 and cell >= 20 and not (world.has_method("is_cataclysm_pack") and world.is_cataclysm_pack()):
 		var nb: Vector2i = world.notice_board_pos()
 		if visible.has_point(nb):
 			var nbo := Vector2((nb - view_origin) * cell) + cam_px_offset

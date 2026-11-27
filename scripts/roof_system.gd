@@ -12,6 +12,7 @@ const ROOF_FADE_NEAR := 1.4
 const ROOF_FADE_FAR := 4.8
 
 var enabled := true
+var modern_mode := false
 var buildings: Dictionary = {} # anchor: Vector2i -> Array[Vector2i]
 var building_roof_tiles: Dictionary = {} # anchor: Vector2i -> Dictionary[Vector2i, Vector3i(north_d, south_d, edge_mask)]
 var building_bounds: Dictionary = {} # anchor: Vector2i -> Rect2i (largest inscribed rect)
@@ -359,6 +360,9 @@ func _draw_building(canvas: Control, board: Control, anchor: Vector2i, visible: 
 	var b_rect: Rect2i = building_bounds[anchor]
 	var roof_meta: Dictionary = building_roof_tiles[anchor]
 	var stories: int = int(building_stories.get(anchor, 1))
+	if modern_mode:
+		_draw_modern_building(canvas, board, roof_meta, b_rect, visible, seed, alpha, light_tint, wetness, snow_cover, stories)
+		return
 	var style: String = String(building_style.get(anchor, "H"))
 	var roof_var: int = int(building_variant.get(anchor, 0))
 	var vertical_ridge: bool = bool(building_vertical_ridge.get(anchor, false))
@@ -415,7 +419,7 @@ func draw_all(canvas: Control, board: Control, _cells: Dictionary, visible: Rect
 		var night_b := int(round(night_warmth * 2.0))
 		var sig := _opaque_signature(target_rect)
 		var cell_i: int = int(board.cell)
-		var key: Array = [cell_i, seed, _index_version, wet_b, snow_b, night_b, sig]
+		var key: Array = [cell_i, seed, _index_version, wet_b, snow_b, night_b, sig, modern_mode]
 		if _cache_dirty or key != _cache_key or not _cache_rect.encloses(visible):
 			_cache_rect = target_rect
 			var px_size: Vector2i = (_cache_rect.size * cell_i).max(Vector2i(2, 2))
@@ -459,6 +463,55 @@ func draw_all(canvas: Control, board: Control, _cells: Dictionary, visible: Rect
 		if not b_box.grow(3).intersects(visible):
 			continue
 		_draw_building(canvas, board, anchor, visible, seed, alpha, light_tint, wetness, snow_cover, night_warmth)
+
+
+static func _draw_modern_building(canvas: Control, board: Control, roof_meta: Dictionary, b_rect: Rect2i,
+		visible: Rect2i, seed: int, alpha: float, light_tint: Color, wetness: float, snow_cover: float, stories: int) -> void:
+	# Clean New England modern flat/tar-gravel/asphalt-shingle commercial & suburban roofs (ZERO Chinese eaves!)
+	var cam_offset: Vector2 = board.cam_px_offset if "cam_px_offset" in board else Vector2.ZERO
+	var s := float(board.cell)
+	var is_commercial := b_rect.size.x >= 11 or b_rect.size.y >= 11
+	for p: Vector2i in roof_meta:
+		if not visible.has_point(p):
+			continue
+		var meta: Vector3i = roof_meta[p]
+		var em := meta.z
+		var o := Vector2((p - board.view_origin) * board.cell) + cam_offset
+		var roll := _hash(p, seed ^ 0x41a3)
+		var jit := (float(roll % 7) - 3.0) * 0.008
+		var base := Color(0.24 + jit, 0.25 + jit, 0.27 + jit) if is_commercial else Color(0.26 + jit, 0.24 + jit, 0.23 + jit)
+		if stories >= 2:
+			base = base.lightened(0.05)
+		if wetness > 0.01:
+			base = base.darkened(0.16 * wetness)
+		var lit := Color(base.r * light_tint.r, base.g * light_tint.g, base.b * light_tint.b, alpha)
+		canvas.draw_rect(Rect2(o, Vector2(s, s)), lit)
+		# Subtle shingle / tar seam texture
+		var seam := Color(lit.r * 0.72, lit.g * 0.74, lit.b * 0.78, alpha * 0.65)
+		canvas.draw_line(Vector2(o.x, o.y + s * 0.5), Vector2(o.x + s, o.y + s * 0.5), seam, 1.0)
+		if snow_cover > 0.04:
+			var sa := clampf(snow_cover * 0.76, 0.0, 0.84) * alpha
+			canvas.draw_rect(Rect2(o, Vector2(s, s * 0.9)), Color(minf(0.90 * light_tint.r + 0.06, 1.0), minf(0.94 * light_tint.g + 0.07, 1.0), minf(0.98 * light_tint.b + 0.08, 1.0), sa))
+		# Clean concrete roof parapet edges + drop shadow
+		var par := Color(0.46 * light_tint.r, 0.48 * light_tint.g, 0.50 * light_tint.b, alpha)
+		var trim := maxf(2.5, s * 0.11)
+		if (em & 1) != 0: canvas.draw_rect(Rect2(o.x, o.y, s, trim), par)
+		if (em & 2) != 0:
+			canvas.draw_rect(Rect2(o.x, o.y + s - trim, s, trim), par.darkened(0.15))
+			canvas.draw_rect(Rect2(o.x, o.y + s, s, maxf(3.0, s * 0.16)), Color(0.02, 0.03, 0.05, 0.44 * alpha))
+		if (em & 4) != 0: canvas.draw_rect(Rect2(o.x, o.y, trim, s), par)
+		if (em & 8) != 0:
+			canvas.draw_rect(Rect2(o.x + s - trim, o.y, trim, s), par.darkened(0.15))
+			canvas.draw_rect(Rect2(o.x + s, o.y, maxf(2.5, s * 0.12), s), Color(0.02, 0.03, 0.05, 0.36 * alpha))
+	# Rooftop HVAC / skylight vent unit on commercial roofs
+	if is_commercial and b_rect.size.x >= 6 and b_rect.size.y >= 6:
+		var cx := b_rect.position.x + b_rect.size.x / 2
+		var cy := b_rect.position.y + b_rect.size.y / 2
+		if visible.has_point(Vector2i(cx, cy)):
+			var vo := Vector2((Vector2i(cx, cy) - board.view_origin) * board.cell) + cam_offset
+			var box_r := Rect2(vo + Vector2(s * 0.1, s * 0.1), Vector2(s * 0.8, s * 0.65))
+			canvas.draw_rect(box_r, Color(0.42 * light_tint.r, 0.45 * light_tint.g, 0.48 * light_tint.b, alpha))
+			canvas.draw_rect(box_r, Color(0.18 * light_tint.r, 0.20 * light_tint.g, 0.22 * light_tint.b, alpha), false, 1.2)
 
 
 static func _draw_upper_story_tier(canvas: Control, r: Rect2, s: float, story_num: int, is_top: bool,

@@ -15,9 +15,10 @@ CanglingWorld::CanglingWorld() {
     MemoryManager::instance().register_hook(
         this,
         "city_sector_cache",
-        [this]() { return city.memory_bytes(); },
+        [this]() { return city.memory_bytes() + ccb_overmap.memory_bytes(); },
         [this](bool aggressive) {
-            return city.trim_cache(aggressive ? 12u : 24u);
+            return city.trim_cache(aggressive ? 12u : 24u) +
+                   ccb_overmap.trim_cache(aggressive ? 24u : 64u);
         });
 }
 
@@ -27,7 +28,39 @@ CanglingWorld::~CanglingWorld() {
 
 void CanglingWorld::_bind_methods() {
 #define BIND(name, ...) ClassDB::bind_method(D_METHOD(#name, ##__VA_ARGS__), &CanglingWorld::name)
-    BIND(setup, "seed"); BIND(get_seed); BIND(get_pos); BIND(get_floor); BIND(get_minutes);
+    BIND(setup, "seed"); BIND(setup_with_pack, "pack_id", "seed", "scenario_id");
+    BIND(setup_ccb_world, "world_cfg", "char_cfg");
+    BIND(list_core_packs); BIND(list_ccb_scenarios);
+    BIND(ccb_list_scenarios); BIND(ccb_list_professions, "hobbies_only");
+    BIND(ccb_list_starting_traits); BIND(ccb_list_skills);
+    BIND(ccb_overmap_slice, "center_omt", "radius"); BIND(ccb_world_to_omt, "world_pos");
+    BIND(ccb_render_rect, "area", "z");
+    BIND(ccb_advance_moves, "moves"); BIND(ccb_wait_turn);
+    BIND(ccb_wait_minutes, "mins"); BIND(ccb_sleep_minutes, "mins");
+    BIND(ccb_corpses_at, "position"); BIND(ccb_pulp_at, "position"); BIND(ccb_butcher_at, "position");
+    BIND(ccb_recipe_list, "category_filter", "query", "limit"); BIND(ccb_craft_recipe, "recipe_id");
+    BIND(ccb_teleport_debug, "target"); BIND(get_ccb_turn_seconds);
+    BIND(get_pack_id); BIND(get_pack_name); BIND(is_cataclysm_pack);
+    BIND(ccb_db_stats); BIND(ccb_search_items, "query", "subtype_filter", "limit");
+    BIND(ccb_status); BIND(ccb_inventory); BIND(ccb_worn); BIND(ccb_items_at, "position");
+    BIND(ccb_wield, "item_id"); BIND(ccb_unwield);
+    BIND(ccb_wear, "item_id"); BIND(ccb_takeoff, "item_id");
+    BIND(ccb_use_item, "item_id"); BIND(ccb_take_item, "position", "item_id");
+    BIND(ccb_take_all_at, "position");
+    BIND(ccb_drop_item, "item_id"); BIND(ccb_give_item, "item_id", "count");
+    BIND(ccb_wash_item, "item_id"); BIND(ccb_reorder_worn, "idx", "delta");
+    BIND(ccb_transfer_item, "from_pos", "from_bag", "to_pos", "to_bag", "item_id", "count");
+    BIND(ccb_craft_batch, "recipe_id", "batch_count");
+    BIND(ccb_pixel_minimap_data, "radius"); BIND(ccb_inspect_tile, "position");
+    BIND(ccb_set_overmap_note, "omt", "note"); BIND(ccb_search_overmap, "query", "from_omt", "radius");
+    BIND(ccb_debug_spawn_monster, "mtype_id", "target");
+    BIND(ccb_tile_radiation, "position"); BIND(ccb_irradiate, "rads", "bypass");
+    BIND(ccb_mutate_category, "cat_id"); BIND(ccb_purify); BIND(pop_ccb_messages);
+    BIND(monsters_in_rect, "area"); BIND(monster_at, "position");
+    BIND(tick_monsters, "steps"); BIND(attack_monster_at, "position");
+    BIND(get_kills); BIND(alive_monster_count);
+    BIND(inspect_save_meta, "path"); BIND(apply_world_mutation, "mutation");
+    BIND(get_seed); BIND(get_pos); BIND(get_floor); BIND(get_minutes);
     BIND(advance_time, "amount"); BIND(rest_minutes, "amount", "sleeping");
     BIND(get_quest); BIND(get_herbs); BIND(get_coins); BIND(get_jobs_done); BIND(npc_list);
     BIND(get_city_size); BIND(get_sector_size); BIND(get_quest_text);
@@ -129,23 +162,59 @@ void CanglingWorld::advance_time(int amount) {
     if (amount > 0) {
         minutes += amount;
         char_state.advance_minutes(amount, false, false);
+        if (active_pack == CorePackId::Cataclysm) {
+            std::vector<String> msgs;
+            ccb_state.tick_minute_effects(amount, ccb_overmap.radiation_at(pos), char_state, msgs);
+            for (const auto &m : msgs) pending_ccb_messages.append(m);
+            // Check zombie corpse revival!
+            const auto revived = ccb_state.collect_reviving_corpses(minutes, floor);
+            for (const auto &[mid, rpos] : revived) {
+                if (monsters.spawn_one(mid, rpos, floor, true)) {
+                    const auto *mdef = CcbVanillaDB::instance().find_monster(mid);
+                    pending_ccb_messages.append(
+                        String::utf8("[尸变复活] 「") +
+                        String::utf8(mdef ? mdef->name.c_str() : mid.c_str()) +
+                        String::utf8("」的尸体重新爬了起来！"));
+                }
+            }
+        }
     }
 }
 
 void CanglingWorld::rest_minutes(int amount, bool sleeping) {
     if (amount > 0) {
-        const bool inn_bonus = (floor == 1 && pos.x >= 108 && pos.x <= 117 && pos.y >= 104 && pos.y <= 113 &&
+        const bool inn_bonus = (active_pack == CorePackId::Cangming &&
+                                floor == 1 && pos.x >= 108 && pos.x <= 117 && pos.y >= 104 && pos.y <= 113 &&
                                 char_state.inn_room_until_min > minutes);
         char_state.advance_minutes(amount, !sleeping, sleeping, inn_bonus);
+        if (active_pack == CorePackId::Cataclysm) {
+            std::vector<String> msgs;
+            ccb_state.tick_minute_effects(amount, ccb_overmap.radiation_at(pos), char_state, msgs);
+            for (const auto &m : msgs) pending_ccb_messages.append(m);
+            const auto revived = ccb_state.collect_reviving_corpses(minutes, floor);
+            for (const auto &[mid, rpos] : revived) {
+                if (monsters.spawn_one(mid, rpos, floor, true)) {
+                    const auto *mdef = CcbVanillaDB::instance().find_monster(mid);
+                    pending_ccb_messages.append(
+                        String::utf8("[尸变复活] 「") +
+                        String::utf8(mdef ? mdef->name.c_str() : mid.c_str()) +
+                        String::utf8("」的尸体重新爬了起来！"));
+                }
+            }
+        }
     }
 }
 
 void CanglingWorld::setup(int64_t new_seed) {
+    setup_with_pack(String("cangming"), new_seed, String("evacuee"));
+}
+
+void CanglingWorld::setup_with_pack(const String &pack_slug, int64_t new_seed, const String &scenario_id) {
+    active_pack = parse_core_pack_id(pack_slug.utf8().get_data());
+    active_scenario = scenario_id.is_empty() ? std::string("evacuee") : std::string(scenario_id.utf8().get_data());
     seed = static_cast<std::uint32_t>(new_seed);
-    city.reset(seed);
-    pos = start_tile;
-    floor = quest = herbs = jobs_done = 0;
-    coins = 10;
+    city.reset(seed, generator_version, active_pack);
+    floor = quest = herbs = jobs_done = kills = 0;
     minutes = 440;
     collected.fill(false);
     npc_talk_count.fill(0);
@@ -159,16 +228,46 @@ void CanglingWorld::setup(int64_t new_seed) {
     skill_set.reset_defaults();
     spar_session.reset();
     bounty_tracker.reset();
-    char_state.sync_with_skills(skill_set);
+    monsters.clear();
+    ccb_spawned_omts.clear();
+    ccb_turn_moves = 0;
+    ccb_turn_seconds = 0;
+    pending_ccb_messages.clear();
     remote_players.clear();
-    // Starting traveler provisions: flatbread, tea, portable Tung-oil lamp, tinderbox, bandages & water bottle
-    carried[16] = 2; // 芝麻炊饼
-    carried[23] = 1; // 江南清茶
-    carried[41] = 1; // 桐油手灯
-    carried[42] = 1; // 火折子
-    carried[46] = 1; // 金创纱布
-    carried_water = 500;
+
+    if (active_pack == CorePackId::Cataclysm) {
+        ccb_overmap.reset(seed, world_city_size, world_city_spacing, world_monster_rate);
+        const auto *sdef = CcbVanillaDB::instance().find_scenario(active_scenario);
+        const std::string start_omt = sdef ? sdef->start_omt : std::string("shelter");
+        pos = ccb_overmap.find_scenario_start(start_omt);
+        coins = 0;
+        carried_water = 500;
+        if (player_name == String::utf8("江湖少侠")) {
+            player_name = String::utf8("末日幸存者");
+        }
+        ccb_state.reset(seed, active_scenario);
+        ensure_ccb_omt_populated(pos);
+    } else {
+        pos = start_tile;
+        coins = 10;
+        if (player_name == String::utf8("末日幸存者")) {
+            player_name = String::utf8("江湖少侠");
+        }
+        char_state.sync_with_skills(skill_set);
+        // Starting traveler provisions: flatbread, tea, portable Tung-oil lamp, tinderbox, bandages & water bottle
+        carried[16] = 2; // 芝麻炊饼
+        carried[23] = 1; // 江南清茶
+        carried[41] = 1; // 桐油手灯
+        carried[42] = 1; // 火折子
+        carried[46] = 1; // 金创纱布
+        carried_water = 500;
+    }
 }
+
+Array CanglingWorld::list_core_packs() const { return list_core_packs_array(); }
+Array CanglingWorld::list_ccb_scenarios() const { return list_ccb_scenarios_array(); }
+String CanglingWorld::get_pack_id() const { return String::utf8(core_pack_slug(active_pack)); }
+String CanglingWorld::get_pack_name() const { return String::utf8(core_pack_info(active_pack).name.c_str()); }
 
 String CanglingWorld::overview(Vector2i s) const { return String::chr(city.plan.overview(s)); }
 
@@ -197,9 +296,27 @@ String CanglingWorld::terrain_at(Vector2i p) {
     return String::chr(effective_tile(p, floor));
 }
 
+String CanglingWorld::location(Vector2i p) {
+    if (active_pack == CorePackId::Cataclysm) return ccb_overmap.location_name(p);
+    return city.location(p);
+}
+
+int CanglingWorld::lighting_column(Vector2i p, int z, int layers) {
+    if (active_pack == CorePackId::Cataclysm) {
+        return (z == 0 && ccb_overmap.enclosed_at(p)) ? 3 : 0;
+    }
+    return city.lighting_column(p, z, layers);
+}
+
 bool CanglingWorld::walkable_on(Vector2i p, int z) {
-    if (!in_city(p)) return false;
-    if (z == 0 && is_npc_tile(p)) return false;
+    if (!in_bounds(p)) return false;
+    if (active_pack == CorePackId::Cangming && z == 0 && is_npc_tile(p)) return false;
+    if (active_pack == CorePackId::Cataclysm) {
+        if (monsters.has_alive_at(p, z)) return false;
+        const char t = effective_tile(p, z);
+        if (t == 'o' || t == 'O' || t == '%' || t == 'D') return true;
+        return passable_tile(t);
+    }
     return passable_tile(effective_tile(p, z));
 }
 
@@ -210,6 +327,31 @@ bool CanglingWorld::near(Vector2i p) const {
 
 bool CanglingWorld::move_one(Vector2i next) {
     if (pos == next || !near(next)) return false;
+
+    // Vanilla CCB: breaking free from monster grab & bump-to-attack (strictly turn-based / move-point driven!)
+    if (active_pack == CorePackId::Cataclysm) {
+        if (monsters.has_alive_at(next, floor)) {
+            const Dictionary ar = attack_monster_at(next);
+            const String msg = ar.get("message", String());
+            if (!msg.is_empty()) pending_ccb_messages.append(msg);
+            const int atk_moves = ccb_state.weapon_attack_moves();
+            ccb_advance_moves(atk_moves);
+            return true;
+        }
+        if (ccb_state.grab_intensity > 0) {
+            const auto mods = ccb_state.compute_mods();
+            const int eff_str = std::max(1, char_state.stat_str + mods.str_mod);
+            if (ccb_state.rng_range(1, 14) <= eff_str) {
+                ccb_state.grab_intensity = 0;
+                pending_ccb_messages.append(String::utf8("你用力挣脱了丧尸的抓取！"));
+            } else {
+                pending_ccb_messages.append(String::utf8("你被紧紧抓住了，未能挣脱！"));
+                ccb_advance_moves(100);
+                return true;
+            }
+        }
+    }
+
     const Vector2i delta = next - pos;
     if (delta.x != 0 && delta.y != 0) {
         if (!walkable(pos + Vector2i(delta.x, 0)) && !walkable(pos + Vector2i(0, delta.y))) {
@@ -224,33 +366,57 @@ bool CanglingWorld::move_one(Vector2i next) {
     if (tile == 'D') {
         doors.insert(key(next, floor));
         char_state.last_sound = 6;
+        if (active_pack == CorePackId::Cataclysm) ccb_advance_moves(100);
         return true;
     }
     const Vector2i prev = pos;
     pos = next;
-    // CCB movement stance effects (0=Walk, 1=Run, 2=Crouch, 3=Prone) — real-time clock unaffected by actions
+    // CCB movement stance effects (0=Walk, 1=Run, 2=Crouch, 3=Prone)
+    int step_moves = 100;
     if (char_state.move_mode == 1) {
         if (char_state.stamina > 300) {
             char_state.spend_stamina(180);
             char_state.last_sound = 14;
+            step_moves = 55;
         } else {
             char_state.move_mode = 0;
             char_state.last_sound = 6;
+            step_moves = 100;
         }
     } else if (char_state.move_mode == 2) {
         char_state.last_sound = 2;
+        step_moves = 145;
     } else if (char_state.move_mode == 3) {
         char_state.last_sound = 0;
+        step_moves = 220;
     } else {
         char_state.last_sound = (tile == 'O' || tile == '%') ? 10 : 6;
+    }
+    if (delta.x != 0 && delta.y != 0) {
+        step_moves = (step_moves * 141) / 100; // Diagonal √2 move cost in CCB
     }
     if (char_state.hauling) {
         haul_items_from(prev, pos);
     }
-    if (spar_session.active && !near(spar_session.npc_pos)) {
-        spar_session.reset();
+    if (active_pack == CorePackId::Cangming) {
+        if (spar_session.active && !near(spar_session.npc_pos)) {
+            spar_session.reset();
+        }
+        bounty_tracker.update_proximity(pos, char_state.spar_total);
+    } else {
+        ensure_ccb_omt_populated(pos);
+        // Step-driven radiation exposure & strict move-point turn advance!
+        const float tile_rad = ccb_overmap.radiation_at(pos);
+        if (tile_rad > 0.0f) {
+            std::vector<String> rmsgs;
+            ccb_state.last_tile_rad = tile_rad;
+            ccb_state.irradiate(tile_rad * 0.2f, false, rmsgs);
+            for (const auto &rm : rmsgs) pending_ccb_messages.append(rm);
+        } else {
+            ccb_state.last_tile_rad = 0.0f;
+        }
+        ccb_advance_moves(step_moves);
     }
-    bounty_tracker.update_proximity(pos, char_state.spar_total);
     return true;
 }
 
@@ -349,15 +515,40 @@ String CanglingWorld::take_off_item(int worn_index) {
 }
 
 Dictionary CanglingWorld::character_status() const {
-    return char_state.to_dict(carried, carried_water);
+    Dictionary d = char_state.to_dict(carried, carried_water);
+    d["pack_id"] = get_pack_id();
+    d["pack_name"] = get_pack_name();
+    d["kills"] = kills;
+    d["alive_monsters"] = monsters.alive_count();
+    if (active_pack == CorePackId::Cataclysm) {
+        const Dictionary cs = ccb_state.status_dict(char_state);
+        d["rad"] = cs["rad"];
+        d["tile_rad"] = cs["tile_rad"];
+        d["rad_badge_color"] = cs["rad_badge_color"];
+        d["has_rad_badge"] = cs["has_rad_badge"];
+        d["changing"] = cs["changing"];
+        d["mutagen_catalyst"] = cs["mutagen_catalyst"];
+        d["mutations"] = cs["mutations"];
+        d["wounds"] = cs["wounds"];
+        d["wielded_name"] = cs["wielded_name"];
+        d["str"] = cs["eff_str"];
+        d["dex"] = cs["eff_dex"];
+        d["int"] = cs["eff_int"];
+        d["per"] = cs["eff_per"];
+        d["encumbrance"] = cs["encumbrance"];
+        d["ccb"] = cs;
+    }
+    return d;
 }
 
 PackedStringArray CanglingWorld::worn_overlays() const {
+    if (active_pack == CorePackId::Cataclysm) return ccb_state.worn_overlays();
     return char_state.worn_overlays();
 }
 
 Array CanglingWorld::npc_list() const {
     Array out;
+    if (active_pack != CorePackId::Cangming) return out;
     for (const auto &npc : kYangzhouNpcs) {
         Dictionary row;
         row["id"] = StringName(npc.id);
@@ -376,7 +567,7 @@ Array CanglingWorld::npc_list() const {
 
 Dictionary CanglingWorld::active_sites_in_rect(Rect2i area) const {
     Dictionary out;
-    if (floor != 0) return out;
+    if (active_pack != CorePackId::Cangming || floor != 0) return out;
     for (const auto &npc : kYangzhouNpcs) {
         if (area.has_point(npc.pos)) {
             out[npc.pos] = StringName(npc.id);
@@ -389,6 +580,16 @@ Dictionary CanglingWorld::active_sites_in_rect(Rect2i area) const {
 }
 
 void CanglingWorld::prewarm_area(Rect2i area) {
+    if (active_pack == CorePackId::Cataclysm) {
+        const Vector2i omt0 = CcbOvermapManager::world_to_omt(area.position);
+        const Vector2i omt1 = CcbOvermapManager::world_to_omt(area.position + area.size);
+        for (int oy = omt0.y; oy <= omt1.y; ++oy) {
+            for (int ox = omt0.x; ox <= omt1.x; ++ox) {
+                ccb_overmap.chunk_at_omt({ox, oy});
+            }
+        }
+        return;
+    }
     const Rect2i clipped = area.intersection(Rect2i(0, 0, city_size, city_size));
     if (clipped.size.x > 0 && clipped.size.y > 0) {
         city.prewarm_sectors(clipped);
@@ -396,16 +597,19 @@ void CanglingWorld::prewarm_area(Rect2i area) {
 }
 
 Dictionary CanglingWorld::bake_region_data(Rect2i area, int z, int layers, const String &season) {
-    return RenderBaker::bake_region(city, doors, tile_overrides, area, z, layers, season, last_bake_ms);
+    CcbOvermapManager *om = (active_pack == CorePackId::Cataclysm) ? &ccb_overmap : nullptr;
+    return RenderBaker::bake_region(city, doors, tile_overrides, area, z, layers, season, last_bake_ms, om);
 }
 
 PackedByteArray CanglingWorld::bake_ambient_data(Rect2i area, Rect2i region, int z, double outdoor_light, double sun_warmth) {
+    CcbOvermapManager *om = (active_pack == CorePackId::Cataclysm) ? &ccb_overmap : nullptr;
     return RenderBaker::bake_ambient(city, doors, tile_overrides, area, region, z,
-        static_cast<float>(outdoor_light), static_cast<float>(sun_warmth));
+        static_cast<float>(outdoor_light), static_cast<float>(sun_warmth), om);
 }
 
 Dictionary CanglingWorld::bake_point_lights_data(Rect2i area, Rect2i region, int z, const Dictionary &sites, int seed_val) {
-    return RenderBaker::bake_point_lights(city, doors, tile_overrides, area, region, z, sites, seed_val);
+    CcbOvermapManager *om = (active_pack == CorePackId::Cataclysm) ? &ccb_overmap : nullptr;
+    return RenderBaker::bake_point_lights(city, doors, tile_overrides, area, region, z, sites, seed_val, om);
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +859,7 @@ String CanglingWorld::learn_from_npc(Vector2i npc_pos, const String &skill_id) {
 }
 
 Dictionary CanglingWorld::workstation_at(Vector2i p) const {
-    if (floor != 0) return Dictionary();
+    if (active_pack != CorePackId::Cangming || floor != 0) return Dictionary();
     const WorkstationDef *ws = workstation_at_tile(p);
     if (ws == nullptr) return Dictionary();
     return workstation_to_dict(*ws, skill_set);
@@ -663,6 +867,7 @@ Dictionary CanglingWorld::workstation_at(Vector2i p) const {
 
 Array CanglingWorld::list_workstations() const {
     Array out;
+    if (active_pack != CorePackId::Cangming) return out;
     for (const auto &ws : workstation_catalog()) {
         out.append(workstation_to_dict(ws, skill_set));
     }
@@ -671,7 +876,7 @@ Array CanglingWorld::list_workstations() const {
 
 Array CanglingWorld::workstations_in_rect(Rect2i area) const {
     Array out;
-    if (floor != 0) return out;
+    if (active_pack != CorePackId::Cangming || floor != 0) return out;
     for (const auto &ws : workstation_catalog()) {
         if (area.has_point(ws.pos)) {
             out.append(workstation_to_dict(ws, skill_set));
@@ -991,6 +1196,7 @@ String CanglingWorld::study_book_cycle(int item_id) {
 // Phase 2: CCB Crafting (&), Dismantle (B), Ambient Temp/Wetness & Sparring
 // ---------------------------------------------------------------------------
 bool CanglingWorld::is_pos_indoors(Vector2i p, int z) {
+    if (active_pack == CorePackId::Cataclysm) return z == 0 && ccb_overmap.enclosed_at(p);
     if (!in_city(p)) return false;
     return city.lighting_column(p, z, 1) > 0 || (effective_tile(p, z) == 'i');
 }
@@ -999,7 +1205,7 @@ bool CanglingWorld::is_pos_near_hearth(Vector2i p, int z) {
     for (int dy = -2; dy <= 2; ++dy) {
         for (int dx = -2; dx <= 2; ++dx) {
             const Vector2i q = p + Vector2i(dx, dy);
-            if (in_city(q) && effective_tile(q, z) == 'h') return true;
+            if (in_bounds(q) && effective_tile(q, z) == 'h') return true;
         }
     }
     return false;
@@ -1038,10 +1244,19 @@ Dictionary CanglingWorld::craft_env_dict() {
 }
 
 Array CanglingWorld::craft_recipe_list(const String &category_filter) {
+    if (active_pack == CorePackId::Cataclysm) {
+        return ccb_recipe_list(category_filter, String(), 80);
+    }
     return list_recipes_for_player(carried, carried_water, char_state.wielded, skill_set, current_craft_env(), category_filter);
 }
 
 Dictionary CanglingWorld::can_craft_recipe(const String &recipe_id) {
+    if (active_pack == CorePackId::Cataclysm) {
+        Dictionary d;
+        d["ok"] = true;
+        d["reason"] = String();
+        return d;
+    }
     const int idx = find_recipe_index(recipe_id.utf8().get_data());
     if (idx < 0) {
         Dictionary d;
@@ -1054,6 +1269,9 @@ Dictionary CanglingWorld::can_craft_recipe(const String &recipe_id) {
 }
 
 String CanglingWorld::complete_craft_recipe(const String &recipe_id) {
+    if (active_pack == CorePackId::Cataclysm) {
+        return ccb_craft_recipe(recipe_id);
+    }
     const int idx = find_recipe_index(recipe_id.utf8().get_data());
     if (idx < 0) return String::utf8("未找到该制作配方。");
     return execute_craft(recipe_catalog()[static_cast<std::size_t>(idx)], carried, carried_water,
@@ -1323,6 +1541,922 @@ Dictionary CanglingWorld::perf_stats() const {
     out["auto_freed_kb"] = static_cast<double>(mem.total_freed_bytes) / 1024.0;
     out["auto_trim_count"] = static_cast<int64_t>(mem.auto_trim_count);
     out["last_bake_ms"] = last_bake_ms;
+    out["pack_id"] = get_pack_id();
+    out["alive_monsters"] = monsters.alive_count();
     return out;
+}
+
+void CanglingWorld::setup_ccb_world(const Dictionary &world_cfg, const Dictionary &char_cfg) {
+    world_city_size = std::clamp(static_cast<int>(world_cfg.get("city_size", 8)), 3, 16);
+    world_city_spacing = std::clamp(static_cast<int>(world_cfg.get("city_spacing", 4)), 2, 8);
+    world_monster_rate = std::clamp(static_cast<float>(static_cast<double>(world_cfg.get("monster_rate", 1.0))), 0.25f, 4.0f);
+    const int64_t new_seed = static_cast<int64_t>(world_cfg.get("seed", 20260415));
+    const String scen = String(char_cfg.get("scenario_id", String("evacuee")));
+    setup_with_pack(String("cataclysm"), new_seed, scen);
+    const String cname = String(char_cfg.get("name", String()));
+    if (!cname.strip_edges().is_empty()) {
+        set_player_name(cname);
+    }
+    ccb_state.apply_character_config(char_cfg, char_state);
+}
+
+Array CanglingWorld::ccb_list_scenarios() const {
+    return CcbVanillaDB::instance().list_scenarios_array();
+}
+
+Array CanglingWorld::ccb_list_professions(bool hobbies_only) const {
+    return CcbVanillaDB::instance().list_professions_array(hobbies_only);
+}
+
+Array CanglingWorld::ccb_list_starting_traits() const {
+    return CcbVanillaDB::instance().list_starting_traits_array();
+}
+
+Array CanglingWorld::ccb_list_skills() const {
+    return CcbVanillaDB::instance().list_skills_array();
+}
+
+Dictionary CanglingWorld::ccb_overmap_slice(Vector2i center_omt, int radius) {
+    Dictionary out = ccb_overmap.overmap_slice(center_omt, radius);
+    const int r = std::clamp(radius, 1, 40);
+    const int side = r * 2 + 1;
+    Array seen_rows;
+    Dictionary notes;
+    for (int dy = -r; dy <= r; ++dy) {
+        Array srow;
+        for (int dx = -r; dx <= r; ++dx) {
+            const Vector2i omt = center_omt + Vector2i(dx, dy);
+            srow.append(ccb_state.is_omt_seen(omt));
+            const std::string nt = ccb_state.get_overmap_note(omt);
+            if (!nt.empty()) {
+                notes[String::num_int64(omt.x) + String(",") + String::num_int64(omt.y)] = String::utf8(nt.c_str());
+            }
+        }
+        seen_rows.append(srow);
+    }
+    out["seen"] = seen_rows;
+    out["notes"] = notes;
+    return out;
+}
+
+Vector2i CanglingWorld::ccb_world_to_omt(Vector2i wp) const {
+    return CcbOvermapManager::world_to_omt(wp);
+}
+
+void CanglingWorld::ensure_ccb_omt_populated(Vector2i center_wp) {
+    if (active_pack != CorePackId::Cataclysm) return;
+    const Vector2i c_omt = CcbOvermapManager::world_to_omt(center_wp);
+    const int hour = (minutes / 60) % 24;
+    const int sight_r = (hour < 6 || hour >= 20) ? 2 : 5;
+    ccb_state.mark_omt_seen(c_omt, sight_r);
+    const auto &db = CcbVanillaDB::instance();
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            const Vector2i omt = c_omt + Vector2i(dx, dy);
+            const int64_t ok = infinite_tile_key(omt, 0);
+            if (!ccb_spawned_omts.insert(ok).second) continue;
+            const auto ch = ccb_overmap.chunk_at_omt(omt);
+            // Stream authentic vanilla OMT monsters lazily!
+            monsters.add_spawns(ch->monster_spawns);
+            // Materialize authentic vanilla OMT item spawns from mapgen_omt.json!
+            const Vector2i base_wp = omt * kOmtSize;
+            for (const auto &sp : ch->item_spawns) {
+                if (sp.items.empty()) continue;
+                const Vector2i wp = base_wp + Vector2i(sp.lx, sp.ly);
+                const int64_t tk = key(wp, 0);
+                ccb_state.loot_materialized[tk] = true;
+                const std::uint32_t h = (static_cast<std::uint32_t>(wp.x) * 374761393u) ^
+                                        (static_cast<std::uint32_t>(wp.y) * 668265263u) ^ seed;
+                const std::string &pick = sp.items[h % sp.items.size()];
+                if (db.find_item(pick)) {
+                    ccb_state.world_items[tk].push_back({pick, 1, 0});
+                }
+            }
+        }
+    }
+}
+
+Dictionary CanglingWorld::ccb_render_rect(Rect2i area, int z) {
+    Dictionary out;
+    if (active_pack != CorePackId::Cataclysm || area.size.x <= 0 || area.size.y <= 0) return out;
+    const int x0 = area.position.x;
+    const int y0 = area.position.y;
+    const int w = area.size.x;
+    const int h = area.size.y;
+
+    // Pre-fetch OMT chunks covering area
+    const Vector2i omt0 = CcbOvermapManager::world_to_omt({x0, y0});
+    const Vector2i omt1 = CcbOvermapManager::world_to_omt({x0 + w - 1, y0 + h - 1});
+    const int ox_span = std::max(1, omt1.x - omt0.x + 1);
+    const int oy_span = std::max(1, omt1.y - omt0.y + 1);
+    std::vector<std::shared_ptr<const OmtChunk>> grid(static_cast<std::size_t>(ox_span * oy_span));
+    for (int oy = omt0.y; oy <= omt1.y; ++oy) {
+        for (int ox = omt0.x; ox <= omt1.x; ++ox) {
+            grid[static_cast<std::size_t>((oy - omt0.y) * ox_span + (ox - omt0.x))] = ccb_overmap.chunk_at_omt({ox, oy});
+        }
+    }
+
+    std::unordered_map<std::string, int> tmap;
+    std::unordered_map<std::string, int> fmap;
+    PackedStringArray tpal;
+    PackedStringArray fpal;
+    fmap[""] = 0;
+    fpal.append(String());
+
+    PackedInt32Array tidx;
+    PackedInt32Array fidx;
+    tidx.resize(w * h);
+    fidx.resize(w * h);
+    int32_t *tp = tidx.ptrw();
+    int32_t *fp = fidx.ptrw();
+
+    auto get_ti = [&](const std::string &s) -> int {
+        const auto it = tmap.find(s);
+        if (it != tmap.end()) return it->second;
+        const int id = tpal.size();
+        tmap[s] = id;
+        tpal.append(String::utf8(s.c_str()));
+        return id;
+    };
+    auto get_fi = [&](const std::string &s) -> int {
+        const auto it = fmap.find(s);
+        if (it != fmap.end()) return it->second;
+        const int id = fpal.size();
+        fmap[s] = id;
+        fpal.append(String::utf8(s.c_str()));
+        return id;
+    };
+
+    const auto &db = CcbVanillaDB::instance();
+    Array ground_items;
+    Array blood_arr;
+
+    for (int ly = 0; ly < h; ++ly) {
+        const int wy = y0 + ly;
+        const int oy = CcbOvermapManager::world_to_omt({0, wy}).y;
+        const int cy = wy - oy * kOmtSize;
+        for (int lx = 0; lx < w; ++lx) {
+            const int wx = x0 + lx;
+            const int ox = CcbOvermapManager::world_to_omt({wx, 0}).x;
+            const int cx = wx - ox * kOmtSize;
+            const auto &ch = grid[static_cast<std::size_t>((oy - omt0.y) * ox_span + (ox - omt0.x))];
+            const std::size_t cidx = static_cast<std::size_t>(cy * kOmtSize + cx);
+            std::string ter = ch->terrain[cidx];
+            std::string furn = ch->furniture[cidx];
+
+            const int64_t dk = key({wx, wy}, z);
+            if (!tile_overrides.empty()) {
+                if (const auto oit = tile_overrides.find(dk); oit != tile_overrides.end()) {
+                    const char ov = oit->second;
+                    if (ov == '%') { ter = "t_window_frame"; furn.clear(); }
+                    else if (ov == 'i') { ter = "t_floor"; furn.clear(); }
+                    else if (ov == '.') { ter = "t_grass"; furn.clear(); }
+                }
+            }
+            if (!doors.empty() && doors.count(dk)) {
+                if (ter.find("t_door") != std::string::npos) ter = "t_door_o";
+                else if (ter.find("t_window") != std::string::npos) ter = "t_window_open";
+            }
+
+            tp[ly * w + lx] = get_ti(ter);
+            fp[ly * w + lx] = get_fi(furn);
+
+            if (const auto bit = ccb_state.blood_tiles.find(dk); bit != ccb_state.blood_tiles.end() && bit->second > 0) {
+                Dictionary bd;
+                bd["pos"] = Vector2i(wx, wy);
+                bd["intensity"] = bit->second;
+                blood_arr.append(bd);
+            }
+            if (const auto wit = ccb_state.world_items.find(dk); wit != ccb_state.world_items.end() && !wit->second.empty()) {
+                const auto &top = wit->second.front();
+                const auto *idef = db.find_item(top.id);
+                Dictionary idict;
+                idict["pos"] = Vector2i(wx, wy);
+                idict["id"] = String::utf8(top.id.c_str());
+                idict["tile"] = String::utf8((idef && !idef->tile.empty()) ? idef->tile.c_str() : top.id.c_str());
+                idict["count"] = static_cast<int>(wit->second.size());
+                ground_items.append(idict);
+            }
+        }
+    }
+
+    Array corpse_arr;
+    for (const auto &c : ccb_state.corpses) {
+        if (c.butchered || c.floor != z || !area.has_point(c.pos)) continue;
+        const auto *mdef = db.find_monster(c.mtype_id);
+        Dictionary cd;
+        cd["pos"] = c.pos;
+        cd["mtype_id"] = String::utf8(c.mtype_id.c_str());
+        cd["name"] = String::utf8(mdef ? mdef->name.c_str() : c.mtype_id.c_str());
+        cd["pulped"] = c.pulped;
+        cd["tile"] = String("corpse_") + String::utf8(c.mtype_id.c_str());
+        corpse_arr.append(cd);
+    }
+
+    out["origin"] = Vector2i(x0, y0);
+    out["size"] = Vector2i(w, h);
+    out["ter_palette"] = tpal;
+    out["furn_palette"] = fpal;
+    out["ter_idx"] = tidx;
+    out["furn_idx"] = fidx;
+    out["corpses"] = corpse_arr;
+    out["blood"] = blood_arr;
+    out["items"] = ground_items;
+    return out;
+}
+
+Dictionary CanglingWorld::ccb_advance_moves(int moves) {
+    Dictionary out;
+    out["messages"] = Array();
+    out["safe_mode_alert"] = false;
+    out["player_damaged"] = false;
+    if (active_pack != CorePackId::Cataclysm || moves <= 0) return out;
+
+    // 1. Scale moves by player speed (vanilla: speed 100 = 100 moves/sec)
+    const auto mods = ccb_state.compute_mods();
+    const int eff_speed = std::clamp(100 + mods.speed_mod - char_state.pain / 2, 35, 160);
+    const int world_moves = std::max(10, (moves * 100) / eff_speed);
+
+    ccb_turn_moves += world_moves;
+    const int delta_sec = ccb_turn_moves / 100;
+    ccb_turn_moves %= 100;
+    ccb_turn_seconds += delta_sec;
+    const int delta_min = ccb_turn_seconds / 60;
+    ccb_turn_seconds %= 60;
+
+    // 2. Tick monsters strictly proportional to exact world_moves!
+    const int hour = (minutes / 60) % 24;
+    const bool is_night = (hour < 6 || hour >= 20);
+    const auto mres = monsters.tick_moves(
+        world_moves, pos, floor, is_night, char_state, ccb_state,
+        [this](Vector2i p, int z) {
+            const char t = effective_tile(p, z);
+            return passable_tile(t) && t != 'D';
+        },
+        [this](Vector2i p, int z) {
+            const char t = effective_tile(p, z);
+            return t == '#' || t == 'D';
+        });
+    for (int i = 0; i < mres.messages.size(); ++i) pending_ccb_messages.append(mres.messages[i]);
+
+    // 3. Advance minute-based vanilla systems (hunger/thirst/radiation/bleed/bite/infection/mutagen/revival)
+    if (delta_min > 0) {
+        advance_time(delta_min);
+    }
+
+    out["messages"] = mres.messages;
+    out["player_damaged"] = mres.player_damaged;
+    out["safe_mode_alert"] = mres.safe_mode_alert;
+    out["delta_min"] = delta_min;
+    out["world_moves"] = world_moves;
+    return out;
+}
+
+Dictionary CanglingWorld::ccb_wait_turn() {
+    if (active_pack != CorePackId::Cataclysm) return Dictionary();
+    char_state.last_sound = 0;
+    char_state.stamina = std::min(10000, char_state.stamina + 90);
+    return ccb_advance_moves(100);
+}
+
+Dictionary CanglingWorld::ccb_wait_minutes(int mins) {
+    Dictionary out;
+    out["completed_min"] = 0;
+    out["interrupted"] = false;
+    if (active_pack != CorePackId::Cataclysm || mins <= 0) return out;
+    const int total = std::clamp(mins, 1, 360);
+    int done = 0;
+    for (int m = 0; m < total; ++m) {
+        // Tick monsters & survival effects per minute, stopping immediately on alert or damage!
+        const Dictionary step = ccb_advance_moves(6000);
+        ++done;
+        if (static_cast<bool>(step.get("safe_mode_alert", false)) || static_cast<bool>(step.get("player_damaged", false))) {
+            out["interrupted"] = true;
+            break;
+        }
+    }
+    out["completed_min"] = done;
+    return out;
+}
+
+Dictionary CanglingWorld::ccb_sleep_minutes(int mins) {
+    Dictionary out;
+    out["completed_min"] = 0;
+    out["interrupted"] = false;
+    if (active_pack != CorePackId::Cataclysm || mins <= 0) return out;
+    const int total = std::clamp(mins, 10, 480);
+    int done = 0;
+    for (int m = 0; m < total; m += 5) {
+        const int chunk = std::min(5, total - m);
+        minutes += chunk;
+        rest_minutes(chunk, true);
+        const Dictionary t = tick_monsters(2);
+        done += chunk;
+        if (static_cast<bool>(t.get("player_damaged", false)) || static_cast<bool>(t.get("safe_mode_alert", false))) {
+            out["interrupted"] = true;
+            break;
+        }
+    }
+    out["completed_min"] = done;
+    return out;
+}
+
+Array CanglingWorld::ccb_corpses_at(Vector2i p) const {
+    if (active_pack != CorePackId::Cataclysm) return Array();
+    return ccb_state.corpses_at(p, floor);
+}
+
+String CanglingWorld::ccb_pulp_at(Vector2i p) {
+    if (active_pack != CorePackId::Cataclysm || !near(p)) return String();
+    const String msg = ccb_state.pulp_corpse_at(p, floor);
+    if (!msg.is_empty()) {
+        char_state.spend_stamina(180);
+        char_state.last_sound = 12;
+        ccb_advance_moves(150);
+    }
+    return msg;
+}
+
+String CanglingWorld::ccb_butcher_at(Vector2i p) {
+    if (active_pack != CorePackId::Cataclysm || !near(p)) return String();
+    const String msg = ccb_state.butcher_corpse_at(p, floor, char_state);
+    if (msg.find(String::utf8("解剖了")) >= 0) {
+        ccb_advance_moves(6000 * 10); // 10 minutes vanilla quick butcher
+    }
+    return msg;
+}
+
+Array CanglingWorld::ccb_recipe_list(const String &category_filter, const String &query, int limit) const {
+    return ccb_state.recipe_list(category_filter, query, limit);
+}
+
+String CanglingWorld::ccb_craft_recipe(const String &recipe_id) {
+    if (active_pack != CorePackId::Cataclysm) return String();
+    int tmin = 0;
+    const String msg = ccb_state.craft_recipe(recipe_id.utf8().get_data(), char_state, tmin);
+    if (tmin > 0) {
+        ccb_advance_moves(tmin * 6000);
+    }
+    return msg;
+}
+
+void CanglingWorld::ccb_teleport_debug(Vector2i target) {
+    if (active_pack != CorePackId::Cataclysm) return;
+    pos = target;
+    ensure_ccb_omt_populated(pos);
+}
+
+// ---------------------------------------------------------------------------
+// Vanilla CCB Core Pack APIs (10,366 items, 591 mutations, radiation, combat)
+// ---------------------------------------------------------------------------
+Dictionary CanglingWorld::ccb_db_stats() const {
+    return CcbVanillaDB::instance().db_stats_dict();
+}
+
+Array CanglingWorld::ccb_search_items(const String &query, const String &subtype_filter, int limit) const {
+    return CcbVanillaDB::instance().search_items(query, subtype_filter, limit);
+}
+
+Dictionary CanglingWorld::ccb_status() const {
+    return ccb_state.status_dict(char_state);
+}
+
+Array CanglingWorld::ccb_inventory() const {
+    return ccb_state.bag_to_array();
+}
+
+Array CanglingWorld::ccb_worn() const {
+    return ccb_state.worn_to_array();
+}
+
+void CanglingWorld::ensure_ccb_loot_at(Vector2i p) {
+    if (active_pack != CorePackId::Cataclysm) return;
+    ensure_ccb_omt_populated(p);
+    const int64_t k = key(p, floor);
+    if (ccb_state.loot_materialized[k]) return;
+    ccb_state.loot_materialized[k] = true;
+
+    const char tile = effective_tile(p, floor);
+    if (std::string_view("FCrKktb").find(tile) == std::string_view::npos) return;
+
+    const auto &db = CcbVanillaDB::instance();
+    const String loc = location(p);
+    const std::uint32_t h = (static_cast<std::uint32_t>(p.x) * 374761393u) ^
+                            (static_cast<std::uint32_t>(p.y) * 668265263u) ^ seed;
+    auto push_if = [&](const char *id, int n) {
+        if (db.find_item(id)) ccb_state.world_items[k].push_back({id, n, 0});
+    };
+
+    if (loc.find(String::utf8("避难所")) >= 0) {
+        static constexpr const char *kEvacPool[] = {"protein_bar_evac", "water_clean", "blanket", "bandages", "flashlight", "matches", "pocketknife", "rag"};
+        push_if(kEvacPool[h % 8], 1);
+    } else if (loc.find(String::utf8("药房")) >= 0) {
+        static constexpr const char *kMedPool[] = {"bandages", "antiseptic", "antibiotics", "aspirin", "firstaid", "iodine", "cotton_ball", "saline", "vitamins"};
+        push_if(kMedPool[h % 9], 1);
+    } else if (loc.find(String::utf8("超市")) >= 0) {
+        static constexpr const char *kFoodPool[] = {"water_clean", "protein_bar_evac", "jerky", "beans_cooked", "apple", "bread", "chocolate", "soda"};
+        push_if(kFoodPool[h % 8], 1 + static_cast<int>(h % 2));
+    } else if (loc.find(String::utf8("五金")) >= 0) {
+        static constexpr const char *kToolPool[] = {"crowbar", "hatchet", "machete", "pipe", "hammer", "flashlight", "screwdriver", "duct_tape"};
+        push_if(kToolPool[h % 8], 1);
+    } else if (loc.find(String::utf8("警局")) >= 0) {
+        static constexpr const char *kCopPool[] = {"kevlar", "helmet_riot", "baton", "flashlight", "bandages", "holster", "backpack"};
+        push_if(kCopPool[h % 7], 1);
+    } else if (loc.find(String::utf8("核废料")) >= 0 || loc.find(String::utf8("实验室")) >= 0) {
+        static constexpr const char *kLabPool[] = {"geiger_off", "hazmat_suit", "prussian_blue", "iodine", "iv_mutagen", "purifier", "rad_badge"};
+        push_if(kLabPool[h % 7], 1);
+    } else {
+        static constexpr const char *kHousePool[] = {"water_clean", "bandages", "rag", "pocketknife", "bread", "flashlight", "jacket_leather", "jeans", "backpack"};
+        if ((h % 3) != 0) push_if(kHousePool[h % 9], 1);
+    }
+}
+
+Array CanglingWorld::ccb_items_at(Vector2i p) {
+    Array out;
+    if (active_pack != CorePackId::Cataclysm) return out;
+    ensure_ccb_loot_at(p);
+    const auto it = ccb_state.world_items.find(key(p, floor));
+    if (it == ccb_state.world_items.end()) return out;
+    const auto &db = CcbVanillaDB::instance();
+    for (const auto &st : it->second) {
+        out.append(db.stack_to_dict(st));
+    }
+    return out;
+}
+
+String CanglingWorld::ccb_wield(const String &item_id) {
+    return ccb_state.wield_item_id(item_id.utf8().get_data());
+}
+
+String CanglingWorld::ccb_unwield() {
+    return ccb_state.unwield_item();
+}
+
+String CanglingWorld::ccb_wear(const String &item_id) {
+    return ccb_state.wear_item_id(item_id.utf8().get_data());
+}
+
+String CanglingWorld::ccb_takeoff(const String &item_id) {
+    return ccb_state.takeoff_item_id(item_id.utf8().get_data());
+}
+
+String CanglingWorld::ccb_use_item(const String &item_id) {
+    std::vector<String> extra;
+    const String msg = ccb_state.use_or_consume_item(item_id.utf8().get_data(), char_state, extra);
+    for (const auto &e : extra) pending_ccb_messages.append(e);
+    return msg;
+}
+
+String CanglingWorld::ccb_take_item(Vector2i p, const String &item_id) {
+    if (active_pack != CorePackId::Cataclysm || !near(p)) return String();
+    ensure_ccb_loot_at(p);
+    const int64_t k = key(p, floor);
+    auto it = ccb_state.world_items.find(k);
+    if (it == ccb_state.world_items.end()) return String();
+    const std::string sid = item_id.utf8().get_data();
+    for (auto vit = it->second.begin(); vit != it->second.end(); ++vit) {
+        if (vit->id == sid) {
+            ccb_state.add_bag_item(vit->id, vit->count, vit->filthy, vit->damage);
+            const auto *def = CcbVanillaDB::instance().find_item(vit->id);
+            const String nm = def ? String::utf8(def->name_zh.c_str()) : item_id;
+            const String fl = vit->filthy ? String::utf8(" (脏污)") : String();
+            const int cnt = vit->count;
+            it->second.erase(vit);
+            ccb_advance_moves(50);
+            return String::utf8("你拾取了「") + nm + fl + String::utf8("」×") + String::num_int64(cnt) + String::utf8("。");
+        }
+    }
+    return String();
+}
+
+String CanglingWorld::ccb_take_all_at(Vector2i p) {
+    if (active_pack != CorePackId::Cataclysm || !near(p)) return String();
+    ensure_ccb_loot_at(p);
+    const int64_t k = key(p, floor);
+    auto it = ccb_state.world_items.find(k);
+    if (it == ccb_state.world_items.end() || it->second.empty()) return String::utf8("该处没有可拾取的物品。");
+    int count = 0;
+    for (const auto &st : it->second) {
+        ccb_state.add_bag_item(st.id, st.count, st.filthy, st.damage);
+        count += st.count;
+    }
+    it->second.clear();
+    ccb_advance_moves(std::min(400, 40 * std::max(1, count)));
+    return String::utf8("你拾取了该处的全部 ") + String::num_int64(count) + String::utf8(" 件物品。");
+}
+
+String CanglingWorld::ccb_drop_item(const String &item_id) {
+    const std::string sid = item_id.utf8().get_data();
+    bool filthy = false;
+    int damage = 0;
+    for (auto it = ccb_state.bag.begin(); it != ccb_state.bag.end(); ++it) {
+        if (it->id == sid) {
+            filthy = it->filthy;
+            damage = it->damage;
+            it->count -= 1;
+            if (it->count <= 0) ccb_state.bag.erase(it);
+            ccb_state.world_items[key(pos, floor)].push_back({sid, 1, 0, filthy, damage});
+            ccb_advance_moves(40);
+            const auto *def = CcbVanillaDB::instance().find_item(sid);
+            return String::utf8("你丢下了「") + String::utf8(def ? def->name_zh.c_str() : sid.c_str()) + String::utf8("」。");
+        }
+    }
+    return String::utf8("行囊中没有这件物品。");
+}
+
+String CanglingWorld::ccb_wash_item(const String &item_id) {
+    const String msg = ccb_state.wash_item_id(item_id.utf8().get_data());
+    if (msg.find(String::utf8("清洗干净")) >= 0) {
+        ccb_advance_moves(6000 * 5);
+    }
+    return msg;
+}
+
+bool CanglingWorld::ccb_reorder_worn(int idx, int delta) {
+    return ccb_state.reorder_worn(idx, delta);
+}
+
+String CanglingWorld::ccb_transfer_item(Vector2i from_pos, bool from_bag, Vector2i to_pos, bool to_bag, const String &item_id, int count) {
+    if (active_pack != CorePackId::Cataclysm) return String();
+    const std::string sid = item_id.utf8().get_data();
+    const int want = std::max(1, count);
+    bool filthy = false;
+    int damage = 0;
+    int moved = 0;
+
+    if (from_bag) {
+        for (auto it = ccb_state.bag.begin(); it != ccb_state.bag.end(); ++it) {
+            if (it->id == sid) {
+                moved = std::min(want, it->count);
+                filthy = it->filthy;
+                damage = it->damage;
+                it->count -= moved;
+                if (it->count <= 0) ccb_state.bag.erase(it);
+                break;
+            }
+        }
+    } else {
+        if (!near(from_pos)) return String::utf8("目标格距离太远。");
+        ensure_ccb_loot_at(from_pos);
+        auto map_it = ccb_state.world_items.find(key(from_pos, floor));
+        if (map_it != ccb_state.world_items.end()) {
+            for (auto vit = map_it->second.begin(); vit != map_it->second.end(); ++vit) {
+                if (vit->id == sid) {
+                    moved = std::min(want, vit->count);
+                    filthy = vit->filthy;
+                    damage = vit->damage;
+                    vit->count -= moved;
+                    if (vit->count <= 0) map_it->second.erase(vit);
+                    break;
+                }
+            }
+        }
+    }
+    if (moved <= 0) return String::utf8("来源处未找到该物品。");
+
+    if (to_bag) {
+        ccb_state.add_bag_item(sid, moved, filthy, damage);
+    } else {
+        if (!near(to_pos)) {
+            // Rollback
+            if (from_bag) ccb_state.add_bag_item(sid, moved, filthy, damage);
+            else ccb_state.world_items[key(from_pos, floor)].push_back({sid, moved, 0, filthy, damage});
+            return String::utf8("目标格距离太远。");
+        }
+        ccb_state.world_items[key(to_pos, floor)].push_back({sid, moved, 0, filthy, damage});
+    }
+    ccb_advance_moves(50);
+    const auto *def = CcbVanillaDB::instance().find_item(sid);
+    return String::utf8("已移动「") + String::utf8(def ? def->name_zh.c_str() : sid.c_str()) +
+           String::utf8("」×") + String::num_int64(moved) + String::utf8("。");
+}
+
+String CanglingWorld::ccb_craft_batch(const String &recipe_id, int batch_count) {
+    if (active_pack != CorePackId::Cataclysm) return String();
+    const int n = std::clamp(batch_count, 1, 20);
+    int done = 0;
+    int total_min = 0;
+    String last_msg;
+    for (int i = 0; i < n; ++i) {
+        int tmin = 0;
+        last_msg = ccb_state.craft_recipe(recipe_id.utf8().get_data(), char_state, tmin);
+        if (tmin <= 0) break;
+        ++done;
+        total_min += tmin;
+    }
+    if (done == 0) return last_msg;
+    // Vanilla batch time saving (~10-20% faster on batches)
+    const int eff_min = (done > 1) ? std::max(1, static_cast<int>(std::round(static_cast<double>(total_min) * 0.85))) : total_min;
+    ccb_advance_moves(eff_min * 6000);
+    if (done == 1) return last_msg;
+    return String::utf8("批量制作完成 ×") + String::num_int64(done) + String::utf8("（耗时 ") +
+           String::num_int64(eff_min) + String::utf8(" 分钟）。");
+}
+
+Dictionary CanglingWorld::ccb_pixel_minimap_data(int radius) {
+    Dictionary out;
+    if (active_pack != CorePackId::Cataclysm) return out;
+    const int r = std::clamp(radius, 16, 60);
+    const int side = r * 2 + 1;
+    PackedByteArray rgba;
+    rgba.resize(side * side * 4);
+    uint8_t *dst = rgba.ptrw();
+
+    const int x0 = pos.x - r;
+    const int y0 = pos.y - r;
+    const Vector2i omt0 = CcbOvermapManager::world_to_omt({x0, y0});
+    const Vector2i omt1 = CcbOvermapManager::world_to_omt({x0 + side - 1, y0 + side - 1});
+    const int ox_span = std::max(1, omt1.x - omt0.x + 1);
+    const int oy_span = std::max(1, omt1.y - omt0.y + 1);
+    std::vector<std::shared_ptr<const OmtChunk>> grid(static_cast<std::size_t>(ox_span * oy_span));
+    for (int oy = omt0.y; oy <= omt1.y; ++oy) {
+        for (int ox = omt0.x; ox <= omt1.x; ++ox) {
+            grid[static_cast<std::size_t>((oy - omt0.y) * ox_span + (ox - omt0.x))] = ccb_overmap.chunk_at_omt({ox, oy});
+        }
+    }
+
+    auto put_px = [&](int lx, int ly, uint8_t cr, uint8_t cg, uint8_t cb) {
+        if (lx < 0 || ly < 0 || lx >= side || ly >= side) return;
+        const int off = (ly * side + lx) * 4;
+        dst[off + 0] = cr;
+        dst[off + 1] = cg;
+        dst[off + 2] = cb;
+        dst[off + 3] = 255;
+    };
+
+    for (int ly = 0; ly < side; ++ly) {
+        const int wy = y0 + ly;
+        const int oy = CcbOvermapManager::world_to_omt({0, wy}).y;
+        const int cy = wy - oy * kOmtSize;
+        for (int lx = 0; lx < side; ++lx) {
+            const int wx = x0 + lx;
+            const int ox = CcbOvermapManager::world_to_omt({wx, 0}).x;
+            const int cx = wx - ox * kOmtSize;
+            const auto &ch = grid[static_cast<std::size_t>((oy - omt0.y) * ox_span + (ox - omt0.x))];
+            const std::size_t cidx = static_cast<std::size_t>(cy * kOmtSize + cx);
+            const std::string &ter = ch->terrain[cidx];
+            const std::string &furn = ch->furniture[cidx];
+
+            // Vanilla pixel_minimap.cpp semantic colors
+            uint8_t cr = 22, cg = 28, cb = 22;
+            if (ter.find("wall") != std::string::npos || ter.find("fence") != std::string::npos) {
+                cr = 175; cg = 175; cb = 175;
+            } else if (ter.find("door") != std::string::npos) {
+                cr = 180; cg = 115; cb = 55;
+            } else if (ter.find("window") != std::string::npos) {
+                cr = 90; cg = 195; cb = 220;
+            } else if (ter.find("water") != std::string::npos) {
+                cr = 35; cg = 95; cb = 195;
+            } else if (ter.find("tree") != std::string::npos || ter.find("shrub") != std::string::npos) {
+                cr = 26; cg = 105; cb = 36;
+            } else if (ter.find("pavement") != std::string::npos || ter.find("sidewalk") != std::string::npos) {
+                cr = 62; cg = 64; cb = 68;
+            } else if (ter.find("floor") != std::string::npos || ter.find("linoleum") != std::string::npos || ter.find("carpet") != std::string::npos) {
+                cr = 46; cg = 44; cb = 42;
+            } else if (ter.find("grass") != std::string::npos || ter.find("dirt") != std::string::npos) {
+                cr = 30; cg = 58; cb = 28;
+            }
+            if (!furn.empty()) {
+                cr = 128; cg = 96; cb = 64;
+            }
+            const int64_t dk = key({wx, wy}, floor);
+            if (const auto wit = ccb_state.world_items.find(dk); wit != ccb_state.world_items.end() && !wit->second.empty()) {
+                cr = static_cast<uint8_t>(std::min(255, int(cr) + 65));
+                cg = static_cast<uint8_t>(std::min(255, int(cg) + 60));
+            }
+            put_px(lx, ly, cr, cg, cb);
+        }
+    }
+
+    // Corpses (dark crimson)
+    for (const auto &c : ccb_state.corpses) {
+        if (c.butchered || c.floor != floor) continue;
+        put_px(c.pos.x - x0, c.pos.y - y0, 130, 35, 35);
+    }
+    // Live hostile monsters (bright red beacon, 2x2 highlight)
+    const Array mons = monsters.monsters_in_rect(Rect2i(x0, y0, side, side), floor);
+    for (int i = 0; i < mons.size(); ++i) {
+        const Dictionary md = mons[i];
+        const Vector2i mp = md.get("pos", Vector2i(0, 0));
+        const int lx = mp.x - x0;
+        const int ly = mp.y - y0;
+        put_px(lx, ly, 255, 45, 45);
+        put_px(lx + 1, ly, 220, 30, 30);
+    }
+    // Player beacon (bright white + green cross at center)
+    put_px(r, r, 255, 255, 255);
+    put_px(r - 1, r, 80, 255, 110);
+    put_px(r + 1, r, 80, 255, 110);
+    put_px(r, r - 1, 80, 255, 110);
+    put_px(r, r + 1, 80, 255, 110);
+
+    out["width"] = side;
+    out["height"] = side;
+    out["rgba"] = rgba;
+    return out;
+}
+
+Dictionary CanglingWorld::ccb_inspect_tile(Vector2i p) {
+    Dictionary out;
+    if (active_pack != CorePackId::Cataclysm) return out;
+    out["pos"] = p;
+    out["distance"] = std::max(std::abs(p.x - pos.x), std::abs(p.y - pos.y));
+    out["location"] = location(p);
+    const std::string ter = ccb_overmap.terrain_at(p);
+    const std::string furn = ccb_overmap.furniture_at(p);
+    out["terrain_id"] = String::utf8(ter.c_str());
+    out["furniture_id"] = String::utf8(furn.c_str());
+    out["walkable"] = walkable_on(p, floor);
+    out["radiation"] = static_cast<double>(ccb_overmap.radiation_at(p));
+    out["monster"] = monster_at(p);
+    out["corpses"] = ccb_corpses_at(p);
+    out["items"] = ccb_items_at(p);
+    out["blood"] = ccb_state.blood_tiles.count(key(p, floor)) ? ccb_state.blood_tiles[key(p, floor)] : 0;
+    return out;
+}
+
+void CanglingWorld::ccb_set_overmap_note(Vector2i omt, const String &note) {
+    ccb_state.set_overmap_note(omt, note.strip_edges().utf8().get_data());
+}
+
+Array CanglingWorld::ccb_search_overmap(const String &query, Vector2i from_omt, int radius) {
+    Array out;
+    const std::string q_raw = query.strip_edges().utf8().get_data();
+    if (q_raw.empty()) return out;
+    const int r = std::clamp(radius, 5, 60);
+    for (int dy = -r; dy <= r; ++dy) {
+        for (int dx = -r; dx <= r; ++dx) {
+            const Vector2i omt = from_omt + Vector2i(dx, dy);
+            if (!ccb_state.is_omt_seen(omt)) continue;
+            const OmtCell c = ccb_overmap.cell_at_omt(omt);
+            const String nm = String::utf8(CcbOvermapManager::omt_kind_name_cn(c.kind));
+            const String nt = String::utf8(ccb_state.get_overmap_note(omt).c_str());
+            if (nm.findn(query) >= 0 || nt.findn(query) >= 0) {
+                Dictionary d;
+                d["omt"] = omt;
+                d["name"] = nm;
+                d["note"] = nt;
+                d["dist"] = std::abs(dx) + std::abs(dy);
+                out.append(d);
+                if (out.size() >= 30) return out;
+            }
+        }
+    }
+    return out;
+}
+
+bool CanglingWorld::ccb_debug_spawn_monster(const String &mtype_id, Vector2i target) {
+    if (active_pack != CorePackId::Cataclysm) return false;
+    return monsters.spawn_one(mtype_id.utf8().get_data(), target, floor, true);
+}
+
+String CanglingWorld::ccb_give_item(const String &item_id, int count) {
+    const std::string sid = item_id.utf8().get_data();
+    const auto *def = CcbVanillaDB::instance().find_item(sid);
+    if (!def) return String::utf8("未在 CCB 物品库中找到该物品 ID。");
+    const int n = std::clamp(count, 1, 99);
+    ccb_state.add_bag_item(sid, n);
+    return String::utf8("已获得原版物品「") + String::utf8(def->name_zh.c_str()) +
+           String::utf8("」×") + String::num_int64(n) + String::utf8("。");
+}
+
+double CanglingWorld::ccb_tile_radiation(Vector2i p) const {
+    if (active_pack == CorePackId::Cataclysm) {
+        return static_cast<double>(const_cast<CcbOvermapManager &>(ccb_overmap).radiation_at(p));
+    }
+    return static_cast<double>(city.radiation_at(p));
+}
+
+Array CanglingWorld::ccb_irradiate(double rads, bool bypass) {
+    std::vector<String> msgs;
+    ccb_state.irradiate(static_cast<float>(rads), bypass, msgs);
+    Array out;
+    for (const auto &m : msgs) out.append(m);
+    return out;
+}
+
+Array CanglingWorld::ccb_mutate_category(const String &cat_id) {
+    std::vector<String> msgs;
+    ccb_state.mutate_category(cat_id.utf8().get_data(), false, msgs);
+    Array out;
+    for (const auto &m : msgs) out.append(m);
+    return out;
+}
+
+Array CanglingWorld::ccb_purify() {
+    std::vector<String> msgs;
+    ccb_state.purify_one(msgs);
+    Array out;
+    for (const auto &m : msgs) out.append(m);
+    return out;
+}
+
+Array CanglingWorld::pop_ccb_messages() {
+    Array out = pending_ccb_messages.duplicate();
+    pending_ccb_messages.clear();
+    return out;
+}
+
+Array CanglingWorld::monsters_in_rect(Rect2i area) const {
+    if (active_pack != CorePackId::Cataclysm) return Array();
+    return monsters.monsters_in_rect(area, floor);
+}
+
+Dictionary CanglingWorld::monster_at(Vector2i p) const {
+    if (active_pack != CorePackId::Cataclysm) return Dictionary();
+    return monsters.monster_dict_at(p, floor);
+}
+
+Dictionary CanglingWorld::tick_monsters(int steps) {
+    Dictionary out;
+    if (active_pack != CorePackId::Cataclysm) {
+        out["messages"] = Array();
+        out["active_count"] = 0;
+        return out;
+    }
+    const int hour = (minutes / 60) % 24;
+    const bool is_night = (hour < 6 || hour >= 20);
+    const auto res = monsters.tick(
+        steps, pos, floor, is_night, char_state, ccb_state,
+        [this](Vector2i p, int z) {
+            if (!in_bounds(p)) return false;
+            const char t = effective_tile(p, z);
+            return passable_tile(t) && t != 'D';
+        },
+        [this](Vector2i p, int z) {
+            if (!in_bounds(p)) return true;
+            const char t = effective_tile(p, z);
+            return t == '#' || t == 'D';
+        });
+    out["messages"] = res.messages;
+    out["player_damaged"] = res.player_damaged;
+    out["safe_mode_alert"] = res.safe_mode_alert;
+    out["active_count"] = res.active_count;
+    out["alerted_count"] = res.alerted_count;
+    return out;
+}
+
+Dictionary CanglingWorld::attack_monster_at(Vector2i p) {
+    Dictionary out;
+    out["hit"] = false;
+    out["killed"] = false;
+    out["damage"] = 0;
+    out["message"] = String();
+    if (active_pack != CorePackId::Cataclysm || !near(p)) return out;
+    const auto res = monsters.player_attack(p, floor, char_state, ccb_state, kills);
+    if (res.hit) {
+        ccb_state.add_blood(p, floor, res.killed ? 2 : 1);
+    }
+    Array drop_items_arr;
+    if (res.killed) {
+        // Spawn real vanilla corpse + blood + ALL vanilla death_drops (with FILTHY/damage flags)!
+        ccb_state.spawn_corpse(res.killed_species_id.empty() ? std::string("mon_zombie") : res.killed_species_id,
+                               res.drop_pos, floor, minutes);
+        const auto &db = CcbVanillaDB::instance();
+        for (const auto &dst : res.drops) {
+            ccb_state.world_items[key(res.drop_pos, floor)].push_back(dst);
+            drop_items_arr.append(db.stack_to_dict(dst));
+        }
+    }
+    out["hit"] = res.hit;
+    out["crit"] = res.crit;
+    out["killed"] = res.killed;
+    out["damage"] = res.damage;
+    out["message"] = res.message;
+    out["drop_items"] = drop_items_arr;
+    out["drop_item_id"] = drop_items_arr.is_empty() ? String() : String(Dictionary(drop_items_arr[0]).get("id", String()));
+    return out;
+}
+
+bool CanglingWorld::apply_world_mutation(const Dictionary &mut) {
+    const String kind = mut.get("kind", String());
+    const Variant pv = mut.get("pos", Vector2i(-1, -1));
+    Vector2i p(-1, -1);
+    if (pv.get_type() == Variant::VECTOR2I) p = pv;
+    else if (pv.get_type() == Variant::ARRAY) {
+        const Array a = pv;
+        if (a.size() >= 2) p = Vector2i(a[0], a[1]);
+    }
+    const int z = static_cast<int>(mut.get("floor", floor));
+    if (!in_bounds(p)) return false;
+
+    if (kind == String("door_open")) {
+        doors.insert(key(p, z));
+        return true;
+    }
+    if (kind == String("door_close")) {
+        doors.erase(key(p, z));
+        return true;
+    }
+    if (kind == String("tile_override")) {
+        const int ch = static_cast<int>(mut.get("tile", static_cast<int>('.')));
+        tile_overrides[key(p, z)] = static_cast<char>(ch);
+        return true;
+    }
+    if (kind == String("monster_hit")) {
+        const int dmg = static_cast<int>(mut.get("damage", 0));
+        return monsters.apply_remote_hit(p, z, dmg);
+    }
+    return false;
 }
 }

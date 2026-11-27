@@ -8,30 +8,185 @@ const JOINS := [
 	["end_piece", 2], ["edge", 0], ["corner", 3], ["t_connection", 3],
 	["corner", 2], ["t_connection", 1], ["t_connection", 2], ["center", 0],
 ]
+# Exact CCB tile_lookup_frame::subtile_keys order (src/tile_lookup.cpp)
+const SUBTILE_KEYS := [
+	"center", "corner", "edge", "t_connection", "end_piece", "unconnected", "open", "broken",
+]
+const LAYER_BOTH := 0
+const LAYER_BG_ONLY := 1
+const LAYER_FG_ONLY := 2
 
 static var _base_size := Vector2i(32, 32)
+static var _active_root := ROOT
+static var _active_json_file := "tile_config.json"
+static var _active_tileset_name := "builtin_undead_people"
+static var _preferred_ccb_tileset := "MSX++UndeadPeopleEdition"
 static var _tiles: Dictionary = {}
 static var _sheets: Array[Dictionary] = []
 static var _sprites: Dictionary = {}
 static var _decoded: Dictionary = {}
 static var _page_stamps: Dictionary = {}
 static var _pinned_pages: Dictionary = {}
+static var _looks_like: Dictionary = {}
+static var _resolved_cache: Dictionary = {}
+static var _tall_cache: Dictionary = {}
 static var _frame_id := 0
 static var _attempted := false
 static var _prewarmed := false
+static var _used_animated_this_frame := false
+
+
+static func consume_animated_flag() -> bool:
+	var v := _used_animated_this_frame
+	_used_animated_this_frame = false
+	return v
+
+
+static func ccb_gfx_dir() -> String:
+	var proj := ProjectSettings.globalize_path("res://").simplify_path()
+	var sibling := proj.path_join("../Cataclysm-Cleanwater-Bomb/gfx").simplify_path()
+	if DirAccess.dir_exists_absolute(sibling):
+		return sibling
+	return ""
+
+
+static func list_available_tilesets() -> Array[String]:
+	var out: Array[String] = []
+	var gfx := ccb_gfx_dir()
+	if not gfx.is_empty():
+		var d := DirAccess.open(gfx)
+		if d != null:
+			d.list_dir_begin()
+			var nm := d.get_next()
+			while not nm.is_empty():
+				if d.current_is_dir() and not nm.begins_with("."):
+					var cfg := gfx.path_join(nm).path_join("tile_config.json")
+					if FileAccess.file_exists(cfg):
+						out.append(nm)
+				nm = d.get_next()
+			d.list_dir_end()
+	out.sort()
+	var idx := out.find("MSX++UndeadPeopleEdition")
+	if idx > 0:
+		out.remove_at(idx)
+		out.insert(0, "MSX++UndeadPeopleEdition")
+	if out.is_empty():
+		out.append("builtin_undead_people")
+	return out
+
+
+static func get_active_tileset_name() -> String:
+	return _active_tileset_name
+
+
+static func get_preferred_ccb_tileset() -> String:
+	return _preferred_ccb_tileset
+
+
+static func list_vanilla_tilesets() -> Array[String]:
+	return list_available_tilesets()
+
+
+static func current_tileset_name() -> String:
+	return _preferred_ccb_tileset if _active_tileset_name == "builtin_undead_people" else _active_tileset_name
+
+
+static func set_tileset_name(name: String) -> bool:
+	return set_preferred_ccb_tileset(name)
+
+
+static func set_preferred_ccb_tileset(name: String) -> bool:
+	_preferred_ccb_tileset = name
+	if _active_tileset_name != "builtin_undead_people":
+		return set_active_tileset(name)
+	return true
+
+
+static func set_looks_like_map(looks_like: Dictionary) -> void:
+	_looks_like = looks_like
+	_resolved_cache.clear()
+	_tall_cache.clear()
+
+
+static func _reset_catalog_caches() -> void:
+	_tiles.clear()
+	_sheets.clear()
+	_sprites.clear()
+	_decoded.clear()
+	_page_stamps.clear()
+	_pinned_pages.clear()
+	_resolved_cache.clear()
+	_tall_cache.clear()
+	_attempted = false
+	_prewarmed = false
+
+
+# Directly loads ANY tileset folder discovered by CCB at runtime (gfx/ or user_gfx/),
+# supporting custom JSON: filenames from tileset.txt with ZERO recompilation!
+static func set_active_tileset_dir(dir_path: String, json_file := "tile_config.json", display_name := "") -> bool:
+	var norm_dir := dir_path.replace("\\", "/").simplify_path()
+	if not norm_dir.ends_with("/"):
+		norm_dir += "/"
+	var jfile := json_file if not json_file.is_empty() else "tile_config.json"
+	if not FileAccess.file_exists(norm_dir + jfile):
+		if FileAccess.file_exists(norm_dir + "tile_config.json"):
+			jfile = "tile_config.json"
+		else:
+			return false
+	var target_name := display_name if not display_name.is_empty() else norm_dir.trim_suffix("/").get_file()
+	if norm_dir == _active_root and jfile == _active_json_file and _attempted:
+		_active_tileset_name = target_name
+		return true
+	_active_root = norm_dir
+	_active_json_file = jfile
+	_active_tileset_name = target_name
+	_preferred_ccb_tileset = target_name
+	_reset_catalog_caches()
+	_load_catalog()
+	return not _tiles.is_empty()
+
+
+static func set_active_tileset(name: String) -> bool:
+	var target_root := ROOT
+	var target_json := "tile_config.json"
+	var target_name := "builtin_undead_people"
+	if name != "builtin_undead_people":
+		var gfx := ccb_gfx_dir()
+		if not gfx.is_empty():
+			var cand := gfx.path_join(name)
+			if FileAccess.file_exists(cand.path_join("tile_config.json")):
+				target_root = cand + "/"
+				target_name = name
+	if target_root == _active_root and target_json == _active_json_file and _attempted:
+		return true
+	_active_root = target_root
+	_active_json_file = target_json
+	_active_tileset_name = target_name
+	_reset_catalog_caches()
+	_load_catalog()
+	return not _tiles.is_empty()
+
+
+static func ensure_pack_tileset(is_cataclysm: bool) -> bool:
+	if not is_cataclysm:
+		if _active_tileset_name == "builtin_undead_people" and _attempted:
+			return false
+		set_active_tileset("builtin_undead_people")
+		return true
+	if _active_tileset_name != "builtin_undead_people" and _attempted:
+		return false
+	set_active_tileset(_preferred_ccb_tileset)
+	return true
+
 
 const GAME_TILE_IDS := [
-	# Ground & terrain
 	"t_grass", "t_grass_long", "t_stone_road", "t_dirt", "t_sand", "t_floor", "t_carpet_red",
 	"t_rock_floor", "t_stone_masonry_floor", "t_dock", "t_water_moving_dp", "t_water_moving_sh", "t_pillar",
-	# Trees, shrubs & water flora
 	"t_tree_willow", "t_tree_maple", "t_tree_pine", "t_shrub", "t_shrub_lilac", "t_shrub_blackberry",
 	"f_cattails", "f_lilypad", "f_lotus",
-	# Characters & worn overlays
 	"player_male", "overlay_worn_straw_hat", "overlay_worn_bandana", "overlay_worn_tunic",
 	"overlay_worn_pants", "overlay_worn_robe", "overlay_worn_cloak", "overlay_worn_coat_winter",
 	"overlay_worn_boots", "overlay_worn_bastsandals", "overlay_worn_backpack", "overlay_worn_mbag",
-	# All 50 SUS items
 	"sheet_cotton", "pillow", "blanket", "quilt", "straw_hat", "bandana", "tunic", "longshirt",
 	"pants", "robe", "cloak", "coat_winter", "boots", "bastsandals", "backpack", "mbag",
 	"flatbread", "bread", "deluxe_rice", "jerky", "apple", "pear", "cake2", "tea", "water_clean",
@@ -43,40 +198,65 @@ const GAME_TILE_IDS := [
 
 static func _load_catalog() -> void:
 	_attempted = true
-	var catalog: Variant = JSON.parse_string(FileAccess.get_file_as_string(ROOT + "tile_config.json"))
+	var catalog: Variant = JSON.parse_string(FileAccess.get_file_as_string(_active_root + _active_json_file))
 	if not catalog is Dictionary or not catalog.has("tiles-new"):
-		push_error("Could not read the UNDEAD_PEOPLE(CCB) tileset catalog")
-		return
+		if _active_root != ROOT:
+			_active_root = ROOT
+			_active_json_file = "tile_config.json"
+			_active_tileset_name = "builtin_undead_people"
+			catalog = JSON.parse_string(FileAccess.get_file_as_string(_active_root + _active_json_file))
+		if not catalog is Dictionary or not catalog.has("tiles-new"):
+			push_error("Could not read tileset catalog from " + _active_root + _active_json_file)
+			return
 	var info: Dictionary = catalog["tile_info"][0]
-	_base_size = Vector2i(info["width"], info["height"])
+	_base_size = Vector2i(int(info.get("width", 32)), int(info.get("height", 32)))
+	var default_scale: float = float(info.get("pixelscale", 1.0))
 	var first := 0
 	for group: Dictionary in catalog["tiles-new"]:
-		var file: String = ROOT + group["file"]
+		var file: String = _active_root + str(group.get("file", ""))
 		var size := _png_size(file)
-		var frame := Vector2i(group.get("sprite_width", _base_size.x), group.get("sprite_height", _base_size.y))
+		var frame := Vector2i(
+			int(group.get("sprite_width", _base_size.x)),
+			int(group.get("sprite_height", _base_size.y))
+		)
+		if frame.x <= 0 or frame.y <= 0:
+			continue
 		@warning_ignore("integer_division")
 		var cols := size.x / frame.x
 		@warning_ignore("integer_division")
 		var rows := size.y / frame.y
 		if cols < 1 or rows < 1:
-			push_error("Missing or invalid tileset atlas: " + file)
-			_tiles.clear()
-			return
-		_sheets.append({"file": file, "first": first, "end": first + cols * rows,
-			"frame": frame, "cols": cols, "rows": rows, "pages": {}})
+			continue
+		_sheets.append({
+			"file": file, "first": first, "end": first + cols * rows,
+			"frame": frame, "cols": cols, "rows": rows, "pages": {},
+		})
 		first += cols * rows
-		var offset := Vector2i(group.get("sprite_offset_x", 0), group.get("sprite_offset_y", 0))
-		var scale: float = group.get("pixelscale", 1.0)
-		for entry: Dictionary in group["tiles"]:
+		var offset := Vector2i(
+			int(group.get("sprite_offset_x", 0)),
+			int(group.get("sprite_offset_y", 0))
+		)
+		var scale: float = float(group.get("pixelscale", default_scale))
+		var is_tall := (frame.x > _base_size.x or frame.y > _base_size.y or offset.x != 0 or offset.y != 0)
+		for entry: Dictionary in group.get("tiles", []):
+			if not entry.has("id"):
+				continue
 			var ids: Array = entry["id"] if entry["id"] is Array else [entry["id"]]
-			var multitile: bool = entry.get("multitile", false)
-			var tile := _definition(entry, offset, scale, entry.get("rotates", multitile))
+			var multitile: bool = bool(entry.get("multitile", false))
+			var fg_v: Variant = entry.get("fg", [])
+			var bg_v: Variant = entry.get("bg", [])
+			var fg_rot: bool = (fg_v is Array and (fg_v as Array).size() > 1 and not ((fg_v as Array)[0] is Dictionary))
+			var bg_rot: bool = (bg_v is Array and (bg_v as Array).size() > 1 and not ((bg_v as Array)[0] is Dictionary))
+			var def_rot: bool = bool(entry.get("rotates", multitile or fg_rot or bg_rot))
+			var tile := _definition(entry, offset, scale, def_rot, is_tall)
 			var subtiles := {}
 			if multitile:
 				for part: Dictionary in entry.get("additional_tiles", []):
-					subtiles[part["id"]] = _definition(part, offset, scale, true)
+					subtiles[part["id"]] = _definition(part, offset, scale, true, is_tall)
 			tile["joins"] = subtiles
-			for id: String in ids:
+			# Match CCB tileset_loader.cpp: later definitions override earlier ones cleanly.
+			for id_v in ids:
+				var id := str(id_v)
 				_tiles[id] = tile
 				for part: String in subtiles:
 					_tiles[id + "_" + part] = subtiles[part]
@@ -93,9 +273,16 @@ static func _png_size(path: String) -> Vector2i:
 	return Vector2i(file.get_32(), file.get_32())
 
 
-static func _definition(entry: Dictionary, offset: Vector2i, scale: float, rotates: bool) -> Dictionary:
-	return {"fg": entry.get("fg", []), "bg": entry.get("bg", []), "offset": offset,
-		"scale": scale, "rotates": rotates}
+static func _definition(entry: Dictionary, offset: Vector2i, scale: float, rotates: bool, is_tall: bool) -> Dictionary:
+	return {
+		"fg": entry.get("fg", []),
+		"bg": entry.get("bg", []),
+		"offset": offset,
+		"scale": scale,
+		"rotates": rotates,
+		"tall": is_tall,
+		"animated": bool(entry.get("animated", false)),
+	}
 
 
 static func _page(sheet_idx: int, sheet: Dictionary, page: int, rows_per_page: int) -> Texture2D:
@@ -125,7 +312,6 @@ static func _page(sheet_idx: int, sheet: Dictionary, page: int, rows_per_page: i
 
 
 static func finish_frame() -> void:
-	# Hold decoded PNGs only during a draw, for sharing between newly requested pages.
 	_decoded.clear()
 	_frame_id += 1
 
@@ -164,7 +350,6 @@ static func prewarm_game_sprites() -> void:
 					_collect_layer_indices(sub["fg"], indices)
 	for idx in indices:
 		_sprite(idx)
-	# Pin all prewarmed pages so trim_unused_pages never evicts them and never re-decodes 4MB PNGs mid-walk!
 	for key in _page_stamps:
 		_pinned_pages[key] = true
 	_decoded.clear()
@@ -207,6 +392,182 @@ static func resolve_seasonal(id: String, season: String) -> String:
 	return id
 
 
+static func _try_with_season(key: String, season: String) -> String:
+	if not season.is_empty():
+		var sv := key + "_season_" + season
+		if _tiles.has(sv):
+			return sv
+	if _tiles.has(key):
+		return key
+	return ""
+
+
+static func _resolve_vpart_with_variant(base_id: String, variant: String, season: String) -> String:
+	# Exact CCB tile_lookup_frame::resolve parity for TILE_CATEGORY::VEHICLE_PART:
+	# 1. Try cur + "_" + variant_chunk (progressively stripping '_' from variant tail, e.g. horizontal_front -> horizontal)
+	#    plus cur + "#" + variant_chunk (for tilesets using '#' variant ids)
+	# 2. Try cur (without variant)
+	# 3. Follow looks_like chain PRESERVING variant (trying both vp_<ll> and raw <ll> for furniture fallbacks!)
+	var cur := base_id
+	for _hop in range(10):
+		if cur.is_empty():
+			break
+		if not variant.is_empty():
+			var vchunk := variant
+			while not vchunk.is_empty():
+				var hit := _try_with_season(cur + "_" + vchunk, season)
+				if not hit.is_empty():
+					return hit
+				hit = _try_with_season(cur + "#" + vchunk, season)
+				if not hit.is_empty():
+					return hit
+				var us := vchunk.rfind("_")
+				vchunk = vchunk.substr(0, us) if us > 0 else ""
+		var direct := _try_with_season(cur, season)
+		if not direct.is_empty():
+			return direct
+		# Also try raw id without "vp_" prefix if it's a furniture fallback (e.g. f_oven, f_fridge)
+		if cur.begins_with("vp_"):
+			var raw_no_vp := cur.substr(3)
+			var fhit := _try_with_season(raw_no_vp, season)
+			if not fhit.is_empty():
+				return fhit
+		var nxt := str(_looks_like.get(cur, ""))
+		if nxt.is_empty() and cur.begins_with("vp_"):
+			nxt = str(_looks_like.get(cur.substr(3), ""))
+		if nxt.is_empty() or nxt == cur:
+			break
+		cur = nxt
+
+	# Progressive tail-stripping fallback on base_id (e.g. vp_wheel_wide_or_steerable -> vp_wheel_wide)
+	if base_id.begins_with("vp_"):
+		var chunk := base_id
+		while true:
+			var u := chunk.rfind("_")
+			if u <= 2:
+				break
+			chunk = chunk.substr(0, u)
+			if not variant.is_empty():
+				var vhit := _try_with_season(chunk + "_" + variant, season)
+				if not vhit.is_empty():
+					return vhit
+			var bhit := _try_with_season(chunk, season)
+			if not bhit.is_empty():
+				return bhit
+		var unk := _try_with_season("vp_unknown_vehicle_part", season)
+		if not unk.is_empty():
+			return unk
+	return ""
+
+
+# Authentic CCB multi-hop lookup: seasonal suffix -> direct id -> overlay gender & looks_like
+# -> vehicle part #variant + looks_like chain -> 10-hop looks_like chain -> monster tail-strip!
+static func resolve_tile_id(id: String, season := "", male := true) -> String:
+	if id.is_empty():
+		return ""
+	if not _attempted:
+		_load_catalog()
+	var cache_key := id + "|" + season + ("|m" if male else "|f")
+	if _resolved_cache.has(cache_key):
+		return str(_resolved_cache[cache_key])
+
+	var found := ""
+	# 1. Vehicle parts: split CCB's '#' variant separator (e.g. "vp_frame#cover", "vp_quarterpanel#ne")
+	if id.begins_with("vp_"):
+		var sep := id.find("#")
+		var vp_base := id.substr(0, sep) if sep > 0 else id
+		var vp_var := id.substr(sep + 1) if sep > 0 else ""
+		found = _resolve_vpart_with_variant(vp_base, vp_var, season)
+	# 2. Overlay paperdoll lookup (matches cata_tiles::find_overlay_looks_like)
+	elif id.begins_with("overlay_worn_") or id.begins_with("overlay_wielded_"):
+		var over_type := "worn_" if id.begins_with("overlay_worn_") else "wielded_"
+		var item_id := id.substr(8 + over_type.length())
+		var gprefix := "overlay_male_" if male else "overlay_female_"
+		var cur := item_id
+		for _hop in range(10):
+			if cur.is_empty():
+				break
+			found = _try_with_season(gprefix + over_type + cur, season)
+			if not found.is_empty():
+				break
+			found = _try_with_season("overlay_" + over_type + cur, season)
+			if not found.is_empty():
+				break
+			cur = str(_looks_like.get(cur, ""))
+	else:
+		var cur := id
+		for _hop in range(10):
+			if cur.is_empty():
+				break
+			found = _try_with_season(cur, season)
+			if not found.is_empty():
+				break
+			var nxt := str(_looks_like.get(cur, ""))
+			if nxt == cur:
+				break
+			cur = nxt
+		# Mod/variant monster tail-stripping fallback (e.g. mon_zombie_custom_var -> mon_zombie)
+		if found.is_empty() and id.begins_with("mon_"):
+			var mchunk := id
+			while true:
+				var u := mchunk.rfind("_")
+				if u <= 3:
+					break
+				mchunk = mchunk.substr(0, u)
+				found = _try_with_season(mchunk, season)
+				if not found.is_empty():
+					break
+
+	_resolved_cache[cache_key] = found
+	return found
+
+
+static func get_tile_entry(resolved_id: String) -> Dictionary:
+	if resolved_id.is_empty():
+		return {}
+	return _tiles.get(resolved_id, {})
+
+
+static func draw_resolved_tile(board: Control, tile_in: Dictionary, origin: Vector2, cell_size: float,
+		roll := 0, subtile_idx := -1, rota := 0, tint := Color.WHITE, offset := Vector2.ZERO,
+		flip := false, layer_mode := LAYER_BOTH) -> bool:
+	if tile_in.is_empty():
+		return false
+	var tile: Dictionary = tile_in
+	if subtile_idx >= 0 and subtile_idx < SUBTILE_KEYS.size() and tile.has("joins"):
+		var sub: Dictionary = tile["joins"].get(SUBTILE_KEYS[subtile_idx], {})
+		if not sub.is_empty():
+			tile = sub
+	var rotates: bool = bool(tile.get("rotates", false))
+	var angle := rota if rotates else 0
+	var use_roll := roll
+	if bool(tile.get("animated", false)):
+		_used_animated_this_frame = true
+		@warning_ignore("integer_division")
+		use_roll = roll + int(Time.get_ticks_msec() / 17)
+	var zoom := Vector2.ONE * cell_size / Vector2(_base_size)
+	var at := origin + (Vector2(tile["offset"]) + offset) * zoom
+	var scale: Vector2 = zoom * float(tile["scale"])
+	var rot_bg := rotates and (tile["fg"] is Array and (tile["fg"] as Array).is_empty())
+	if layer_mode == LAYER_BOTH or layer_mode == LAYER_BG_ONLY:
+		_draw_layer(board, tile["bg"], use_roll, angle, rot_bg, at, scale, tint, false)
+	if layer_mode == LAYER_BOTH or layer_mode == LAYER_FG_ONLY:
+		_draw_layer(board, tile["fg"], use_roll, angle, true, at, scale, tint, flip)
+	return true
+
+
+static func is_tall_tile(id: String, season := "") -> bool:
+	var key := id + "|" + season
+	if _tall_cache.has(key):
+		return bool(_tall_cache[key])
+	var res := resolve_tile_id(id, season)
+	var tall := false
+	if not res.is_empty() and _tiles.has(res):
+		tall = bool(_tiles[res].get("tall", false))
+	_tall_cache[key] = tall
+	return tall
+
+
 static func _sprite(index: int) -> Array:
 	if _sprites.has(index):
 		return _sprites[index]
@@ -238,14 +599,14 @@ static func _pick(value: Variant, roll: int) -> Variant:
 		return value
 	var total := 0
 	for option: Dictionary in value:
-		total += int(option["weight"])
+		total += int(option.get("weight", 1))
 	if total <= 0:
 		return []
 	var slot := posmod(roll, total)
 	for option: Dictionary in value:
-		slot -= int(option["weight"])
+		slot -= int(option.get("weight", 1))
 		if slot < 0:
-			return option["sprite"]
+			return option.get("sprite", [])
 	return []
 
 
@@ -253,17 +614,22 @@ static func _draw_layer(board: Control, value: Variant, roll: int, angle: int, f
 		at: Vector2, zoom: Vector2, tint: Color, flip: bool) -> void:
 	var picked: Variant = _pick(value, roll)
 	var turn := 0
-	var index: int
+	var index: int = -1
 	if picked is Array:
 		if picked.is_empty():
 			return
-		index = int(picked[posmod(angle, picked.size())])
-		if foreground and picked.size() == 1:
-			turn = angle
-	else:
+		if picked.size() == 1:
+			index = int(picked[0])
+			if foreground:
+				turn = posmod(angle, 4)
+		else:
+			index = int(picked[posmod(angle, picked.size())])
+	elif picked is int or picked is float:
 		index = int(picked)
 		if foreground:
-			turn = angle
+			turn = posmod(angle, 4)
+	else:
+		return
 	if index < 0:
 		return
 	var sprite := _sprite(index)
@@ -272,7 +638,18 @@ static func _draw_layer(board: Control, value: Variant, roll: int, angle: int, f
 	var source: Rect2 = sprite[1]
 	var extent := source.size * zoom
 	if turn != 0 or flip:
-		board.draw_set_transform(at + extent * 0.5, turn * PI * 0.5, Vector2(-1, 1) if flip else Vector2.ONE)
+		# Exact match to CCB src/sprite_geometry.h: 1=+90deg, 2=flip H+V, 3=-90deg
+		var rot_rad := 0.0
+		var sc := Vector2.ONE
+		if turn == 1:
+			rot_rad = PI * 0.5
+		elif turn == 2:
+			sc = Vector2(-1.0, -1.0)
+		elif turn == 3:
+			rot_rad = -PI * 0.5
+		if flip:
+			sc.x = -sc.x
+		board.draw_set_transform(at + extent * 0.5, rot_rad, sc)
 		board.draw_texture_rect_region(sprite[0], Rect2(-extent * 0.5, extent), source, tint)
 		board.draw_set_transform(Vector2.ZERO)
 	else:
@@ -308,3 +685,13 @@ static func draw_at(board: Control, id: String, origin: Vector2, cell_size: floa
 	var scale: Vector2 = zoom * float(tile["scale"])
 	_draw_layer(board, tile["bg"], roll, angle, false, at, scale, tint, false)
 	_draw_layer(board, tile["fg"], roll, angle, true, at, scale, tint, flip)
+
+
+# Authentic CCB renderer using real CCB subtile (0..7) + rotation (0..15) + looks_like + layer split!
+static func draw_at_subtile(board: Control, id: String, origin: Vector2, cell_size: float, roll := 0,
+		subtile_idx := -1, rota := 0, tint := Color.WHITE, offset := Vector2.ZERO, flip := false,
+		season := "", layer_mode := LAYER_BOTH, male := true) -> bool:
+	var resolved := resolve_tile_id(id, season, male)
+	if resolved.is_empty():
+		return false
+	return draw_resolved_tile(board, _tiles[resolved], origin, cell_size, roll, subtile_idx, rota, tint, offset, flip, layer_mode)

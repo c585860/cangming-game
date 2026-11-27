@@ -1,0 +1,20 @@
+{
+  "type": "CORE_PACK",
+  "id": "cataclysm",
+  "name": "大灾变 · CCB 本体",
+  "short_name": "大灾变",
+  "version": "0.J-CCB",
+  "core": true,
+  "theme": "cataclysm_modern",
+  "subtitle": "Catharsis Covenant Basemodule · 新英格兰末世生存 · 搜刮与求生",
+  "description": "完整移植 Cataclysm-Cleanwater-Bomb (CCB) 原版核心：全部 10,366 件原版物品、591 项原版变异（30 条诱变路线）、1,193 种原版怪物；严格遵循原版近战命中/闪避/分型护甲/咬伤感染、原版辐射病与碘片/普鲁士蓝、原版诱变催化剂+引物机制，并共享实时光影、四季雨雪与 ENet 联机。",
+  "default_player_name": "避难所幸存者",
+  "save_file": "user://save_cataclysm.json",
+  "upstream_ccb_mod": "dda/ccb",
+  "features": [
+    "全量移植 10,366 件 CCB 原版物品（支持中英检索/穿戴/手持/服用）",
+    "原版近战战斗（命中/暴击/钝斩刺分型护甲/流血/深度咬伤与感染）",
+    "原版辐射与诱变（591 项变异 / 30 路线 / 催化剂+引物 / 碘片与普鲁士蓝）",
+    "共享 GPU 动态光影、手电筒、四季雨雪、多核烘焙与 ENet 实时联机"
+  ]
+}
