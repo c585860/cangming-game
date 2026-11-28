@@ -519,10 +519,19 @@ void fragment() {
 			}
 
 			// Volumetric doorway bounce bloom & ACES filmic tone mapping
-			lit += gi_light * (is_vert_face ? 0.03 : (indoors ? 0.14 : 0.04));
-			if (is_vert_face) {
+			vec3 haze = gi_light * (is_vert_face ? 0.03 : (indoors ? 0.14 : 0.04));
+			if (indoors || is_under) {
+				float lit_peak = max(lit.r, max(lit.g, lit.b));
+				lit += haze * mix(1.0, 0.45, smoothstep(0.42, 0.9, lit_peak));
+				float peak = max(lit.r, max(lit.g, lit.b));
+				float knee = is_vert_face ? 0.26 : 0.36;
+				lit /= 1.0 + max(0.0, peak - knee) / (0.88 - knee);
+			} else if (is_vert_face) {
+				lit += haze;
 				float peak = max(lit.r, max(lit.g, lit.b));
 				lit /= 1.0 + max(0.0, peak - 0.26) * 0.70;
+			} else {
+				lit += haze;
 			}
 			out_rgb = filmic_tone_map(lit);
 

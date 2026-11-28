@@ -581,6 +581,7 @@ func update_from_snapshot(snap: Dictionary, view_world_min: Vector2, view_span_t
 	_comp_mat.set_shader_parameter("vis_tex", _tex_vis)
 	_comp_mat.set_shader_parameter("grid_origin", g_orig)
 	_comp_mat.set_shader_parameter("grid_size", g_sz)
+	_comp_mat.set_shader_parameter("use_ccb_visibility", bool(snap.get("is_looking", false)))
 	_comp_mat.set_shader_parameter("is_underground", is_under)
 	_comp_mat.set_shader_parameter("wetness", _weather.wetness)
 	_comp_mat.set_shader_parameter("snow_cover", _weather.snow_cover)

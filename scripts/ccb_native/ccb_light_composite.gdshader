@@ -41,6 +41,7 @@ uniform vec3 season_tint = vec3(1.0);
 uniform float wetness = 0.0;
 uniform float snow_cover = 0.0;
 uniform bool is_underground = false;
+uniform bool use_ccb_visibility = false;
 uniform float wind_time = 0.0;
 
 uniform vec2 player_eye = vec2(0.0);
@@ -216,11 +217,12 @@ void fragment() {
 	vec2 world_p = view_world_min + UV * view_world_span;
 	vec2 local_p = world_p - grid_origin;
 	ivec2 gsz = ivec2(grid_size);
-	ivec2 own = clamp(ivec2(floor(local_p)), ivec2(0), gsz - ivec2(1));
+	ivec2 cell = ivec2(floor(local_p));
+	ivec2 own = clamp(cell, ivec2(0), gsz - ivec2(1));
 
 	vec4 own_vis = texelFetch(vis_tex, own, 0);
 	float ccb_state = own_vis.r;
-	if (ccb_state < 0.10) {
+	if (cell != own || ccb_state < 0.10) {
 		COLOR = vec4(0.0, 0.0, 0.0, 1.0);
 	} else {
 		vec3 raw = texture(raw_tex, raw_uv).rgb;
@@ -239,7 +241,9 @@ void fragment() {
 		vec2 sight_uv = clamp((world_p - light_world_min) * inv_lspan, vec2(0.002), vec2(0.998));
 
 		// Solid wall tiles sample clamped `luv` so unseen black space behind the wall never bleeds into wall edges!
-		float wall_los = texture(sight_tex, is_wall_tile ? luv : sight_uv).r;
+		// A panned snapshot can omit the player or part of the ray. Use only CCB's
+		// actual visibility in that view: dark/visible, memory, and unknown stay distinct.
+		float wall_los = use_ccb_visibility ? step(0.70, ccb_state) : texture(sight_tex, is_wall_tile ? luv : sight_uv).r;
 		bool is_fringe = (ccb_state > 0.15 && ccb_state < 0.35);
 		bool is_explored = (ccb_state >= 0.42);
 
@@ -398,20 +402,28 @@ void fragment() {
 				}
 			}
 
-			if (!is_wall) {
-				lit += gi_and_vol * (indoors ? 0.18 : 0.06);
-			}
 			if (visible_interior) {
 				float near_eye = 1.0 - smoothstep(2.0, 13.0, length(world_p - player_eye));
 				float exposed = smoothstep(0.04, 0.42, env_luma);
 				float room_fill = (mix(0.065, 0.12, sky_day) + 0.065 * near_eye) * (1.0 - 0.85 * exposed);
 				lit += raw * room_fill * mix(0.72, 1.0, ao);
 			}
-			lit += hand_halo;
-			if (is_wall) {
+			vec3 haze = hand_halo + (is_wall ? vec3(0.0) : gi_and_vol * (indoors ? 0.18 : 0.06));
+			if (indoors || is_underground) {
+				// Keep dark-room fill intact; suppress the untextured light veil and
+				// roll off bright pixels together to retain floor and sprite colors.
+				float lit_peak = max(lit.r, max(lit.g, lit.b));
+				lit += haze * mix(1.0, 0.45, smoothstep(0.42, 0.9, lit_peak));
+				float peak = max(lit.r, max(lit.g, lit.b));
+				float knee = is_wall ? 0.26 : 0.36;
+				lit /= 1.0 + max(0.0, peak - knee) / (0.88 - knee);
+			} else if (is_wall) {
+				lit += haze;
 				// Keep hotspot hue/detail instead of tone-mapping the entire face to white.
 				float peak = max(lit.r, max(lit.g, lit.b));
 				lit /= 1.0 + max(0.0, peak - 0.26) * 0.88;
+			} else {
+				lit += haze;
 			}
 
 			vec2 cv = (UV - vec2(0.5)) * 2.0;
@@ -428,7 +440,7 @@ void fragment() {
 			vec3 mem_col = mix(raw, vec3(raw_luma), 0.64) * vec3(0.15, 0.18, 0.25);
 
 			float night_amt = 1.0 - smoothstep(0.05, 0.42, sky_energy);
-			if (night_amt > 0.01 && !is_wall) {
+			if (night_amt > 0.01 && !is_wall && !use_ccb_visibility) {
 				float dist_p = length(world_p - player_eye);
 				float lit_luma = dot(direct_light + hand_light, vec3(0.299, 0.587, 0.114));
 				float far_dim = mix(1.0, visible_interior ? 0.77 : 0.36, smoothstep(5.5, 16.0, dist_p) * night_amt * (1.0 - clamp(lit_luma * 2.2, 0.0, 1.0)));
