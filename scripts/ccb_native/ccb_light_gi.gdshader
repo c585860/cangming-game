@@ -114,24 +114,16 @@ void fragment() {
 					trans = 0.0;
 					break;
 				} else if (k == 2) {
-					if (own_indoors && !is_underground) {
-						float fall = 1.0 / (1.0 + 0.065 * dist * dist);
-						gi_accum += (sky_color * sky_energy * 2.45 + sample_direct_hdr(cell) * 1.15) * trans * fall;
-						escaped_sky = true;
-					}
+					// Glass transmits light, but is not itself a second sky source.
 					trans *= 0.58;
 				} else if (k == 3 || k == 4) {
-					if (own_indoors && !is_underground) {
-						float fall = 1.0 / (1.0 + 0.052 * dist * dist);
-						gi_accum += (sky_color * sky_energy * 3.65 + sample_direct_hdr(cell) * 1.55) * trans * fall;
-						escaped_sky = true;
-					}
 					trans *= 0.92;
 				} else if (!cell_in && !is_underground) {
 					if (own_indoors) {
-						float fall = 1.0 / (1.0 + 0.055 * dist * dist);
+						// Count skylight only when the ray actually reaches the outside.
+						float fall = 1.0 / (1.0 + 0.14 * dist * dist);
 						vec3 albedo = texelFetch(mat_tex, cell, 0).rgb;
-						vec3 outdoor_rad = sky_color * sky_energy * 2.95 + sample_direct_hdr(cell) * albedo * 1.45;
+						vec3 outdoor_rad = sky_color * sky_energy * 2.30 + sample_direct_hdr(cell) * albedo * 0.75;
 						gi_accum += outdoor_rad * trans * fall;
 						escaped_sky = true;
 						break;
@@ -149,9 +141,9 @@ void fragment() {
 					}
 				} else {
 					if (dist > 0.30 && dist < 7.5) {
-						float fall = 1.0 / (1.0 + 0.22 * dist * dist);
+						float fall = 1.0 / (1.0 + 0.34 * dist * dist);
 						vec3 albedo = texelFetch(mat_tex, cell, 0).rgb;
-						gi_accum += sample_direct_hdr(cell) * albedo * 1.38 * trans * fall;
+						gi_accum += sample_direct_hdr(cell) * albedo * 0.80 * trans * fall;
 					}
 					if (k == 7) {
 						trans *= 0.78;

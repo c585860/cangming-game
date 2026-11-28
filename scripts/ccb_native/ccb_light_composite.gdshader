@@ -369,7 +369,7 @@ void fragment() {
 					float grain = smooth_noise2(world_p * vec2(2.6, 10.5));
 					float spec_wood = pow(ndh_sun, 16.0) * sun_vis * sun_energy * (0.18 + 0.14 * grain);
 					lit += sun_color * spec_wood * mix(raw, vec3(1.0, 0.84, 0.58), 0.55);
-					lit += (total_local + gi_and_vol * 0.55) * (0.085 + 0.055 * grain) * clamp(lc * 1.5, 0.22, 1.0);
+					lit += (total_local + gi_and_vol * (indoors ? 0.0 : 0.55)) * (0.085 + 0.055 * grain) * clamp(lc * 1.5, 0.22, 1.0);
 				} else if (mat_id == 2) {
 					float spec_m = pow(ndh_sun, 30.0) * sun_vis * sun_energy * 0.56;
 					float rim_m = 0.25 + 0.75 * clamp(length(surf_n.xy) * 2.4, 0.0, 1.0);
@@ -416,7 +416,13 @@ void fragment() {
 				float room_fill = (mix(0.065, 0.12, sky_day) + 0.065 * near_eye) * (1.0 - 0.85 * exposed);
 				lit += raw * room_fill * mix(0.72, 1.0, ao);
 			}
-			vec3 haze = hand_halo + (is_wall ? vec3(0.0) : gi_and_vol * (indoors ? 0.18 : 0.06));
+			vec3 haze = hand_halo;
+			if (!is_wall && !indoors && !is_underground) {
+				haze += gi_and_vol * 0.06;
+			} else if (visible_interior && !is_sprite && !is_underground) {
+				// Keep the indoor dust veil inside the actual sunbeam, off sprites and walls.
+				haze += sun_color * (sun_vis * sun_energy * 0.045);
+			}
 			if (indoors || is_underground) {
 				// Keep dark-room fill intact; suppress the untextured light veil and
 				// roll off bright pixels together to retain floor and sprite colors.
