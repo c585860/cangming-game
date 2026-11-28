@@ -14,7 +14,7 @@ render_mode unshaded, blend_disabled;
 // - Smooth continuous dusk & night across the whole unobstructed world (NEVER disappears 1 tile at a time!)
 // - Analytic 3D player body shadow + compact handheld flashlight/torch (runs ONLY when carrying active light!)
 
-uniform sampler2D raw_tex : filter_nearest, repeat_disable;
+uniform sampler2D raw_tex : filter_linear, repeat_disable;
 uniform sampler2D surface_mask : filter_nearest, repeat_disable;
 uniform sampler2D direct_tex : filter_linear, repeat_disable; // RGB * 2.0 = HDR direct light, A = sun vis
 uniform sampler2D gi_tex : filter_linear, repeat_disable;     // RGB * 2.0 = HDR colored GI + volumetric, A = curved AO
@@ -87,7 +87,7 @@ float analytic_body_shadow(vec2 world_p, float h, vec3 heading) {
 }
 
 // Compact 14-step handheld portable light raycast (executes ONLY when player holds an active light!)
-float trace_hand_light(vec2 start_local, vec2 end_local, ivec2 target_cell, bool target_wall) {
+float trace_hand_light(vec2 start_local, vec2 end_local, ivec2 target_cell) {
 	vec2 delta = end_local - start_local;
 	float dist = length(delta);
 	if (dist < 0.08) {
@@ -124,7 +124,7 @@ float trace_hand_light(vec2 start_local, vec2 end_local, ivec2 target_cell, bool
 		if (cell == start_cell) {
 			continue;
 		}
-		if (cell == target_cell && target_wall) {
+		if (cell == target_cell) {
 			return vis;
 		}
 		int k = int(round(texelFetch(geom_tex, cell, 0).g * 255.0));
@@ -139,7 +139,7 @@ float trace_hand_light(vec2 start_local, vec2 end_local, ivec2 target_cell, bool
 	return vis;
 }
 
-vec3 eval_portable_light(vec2 world_p, vec2 local_p, ivec2 own_cell, bool is_wall, vec3 surf_n, out vec3 halo_out) {
+vec3 eval_portable_light(vec2 world_p, vec2 local_p, ivec2 own_cell, vec3 surf_n, out vec3 halo_out) {
 	halo_out = vec3(0.0);
 	float energy = player_light_pos_rad.w;
 	if (energy <= 0.01) {
@@ -171,9 +171,9 @@ vec3 eval_portable_light(vec2 world_p, vec2 local_p, ivec2 own_cell, bool is_wal
 		vol_beam = vol_core * vol_dist * player_light_cone.w;
 	}
 	vec2 perp = vec2(-dir2.y, dir2.x) * 0.12;
-	float vis = trace_hand_light(l_local, local_p, own_cell, is_wall) * 0.50
-		+ trace_hand_light(l_local + perp, local_p, own_cell, is_wall) * 0.25
-		+ trace_hand_light(l_local - perp, local_p, own_cell, is_wall) * 0.25;
+	float vis = trace_hand_light(l_local, local_p, own_cell) * 0.50
+		+ trace_hand_light(l_local + perp, local_p, own_cell) * 0.25
+		+ trace_hand_light(l_local - perp, local_p, own_cell) * 0.25;
 	if (vis <= 0.01) {
 		return vec3(0.0);
 	}
@@ -205,6 +205,14 @@ vec3 filmic_tone_map(vec3 hdr) {
 }
 
 void fragment() {
+	// Filter only across texel boundaries within one output pixel, not across the entire sprite.
+	vec2 raw_size = vec2(textureSize(raw_tex, 0));
+	vec2 raw_pos = UV * raw_size;
+	vec2 texel_edge = floor(raw_pos + vec2(0.5));
+	vec2 footprint = clamp(fwidth(raw_pos), vec2(0.001), vec2(1.0));
+	vec2 raw_uv = (texel_edge + clamp((raw_pos - texel_edge) / footprint,
+			vec2(-0.5), vec2(0.5))) / raw_size;
+
 	vec2 world_p = view_world_min + UV * view_world_span;
 	vec2 local_p = world_p - grid_origin;
 	ivec2 gsz = ivec2(grid_size);
@@ -215,7 +223,7 @@ void fragment() {
 	if (ccb_state < 0.10) {
 		COLOR = vec4(0.0, 0.0, 0.0, 1.0);
 	} else {
-		vec3 raw = texture(raw_tex, UV).rgb;
+		vec3 raw = texture(raw_tex, raw_uv).rgb;
 		vec4 geom = texelFetch(geom_tex, own, 0);
 		int kind = int(round(geom.g * 255.0));
 		bool is_wall_tile = (kind >= 1 && kind <= 4);
@@ -247,15 +255,30 @@ void fragment() {
 		} else {
 			vec4 mask = texture(surface_mask, UV);
 			bool is_sprite = mask.a > 0.5;
-			bool is_char = is_sprite && ((int(round(mask.b * 255.0)) & 128) != 0);
+			int mask_hi = int(round(mask.b * 255.0));
+			bool is_char = is_sprite && ((mask_hi & 128) != 0);
 
-			vec4 mat_info = texelFetch(mat_tex, own, 0);
-			bool indoors = (int(round(geom.a * 3.0)) & 1) != 0;
-			bool is_wall = !is_char && is_wall_tile;
+			ivec2 surface_cell = own;
+			vec2 surface_p = local_p;
+			vec2 surface_uv = luv;
+			if (is_sprite && !is_char) {
+				// Overhanging pixels belong to the sprite's source cell, not the floor it covers.
+				ivec2 low = ivec2(round(mask.rg * 255.0));
+				ivec2 high = ivec2(mask_hi & 7, (mask_hi >> 4) & 7) * 256;
+				surface_cell = clamp(low + high - ivec2(2), ivec2(0), gsz - ivec2(1));
+				surface_p = vec2(surface_cell) + clamp(local_p - vec2(surface_cell), vec2(0.14), vec2(0.86));
+				surface_uv = clamp((surface_p + grid_origin - light_world_min) * inv_lspan, vec2(0.002), vec2(0.998));
+			}
+			vec4 surface_geom = surface_cell == own ? geom : texelFetch(geom_tex, surface_cell, 0);
+			int surface_kind = int(round(surface_geom.g * 255.0));
+			vec4 mat_info = texelFetch(mat_tex, surface_cell, 0);
+			bool indoors = (int(round(surface_geom.a * 3.0)) & 1) != 0;
+			bool is_wall = !is_char && surface_kind >= 1 && surface_kind <= 4;
+			bool visible_interior = ccb_state > 0.70 && indoors && !is_wall && !is_char;
 			int mat_id = int(round(mat_info.a * 7.0));
 
-			vec4 dir_s = texture(direct_tex, luv);
-			vec4 gi_s = texture(gi_tex, luv);
+			vec4 dir_s = texture(direct_tex, surface_uv);
+			vec4 gi_s = texture(gi_tex, surface_uv);
 
 			// Unpack 2x HDR range (works seamlessly in both RGBA16F and RGBA8 Compatibility renderers!)
 			vec3 direct_light = dir_s.rgb * 2.0;
@@ -264,9 +287,9 @@ void fragment() {
 			float ao = is_sprite ? mix(1.0, gi_s.a, 0.45) : gi_s.a;
 
 			// Analytic real-time 60 FPS player body shadow + soft contact feet shadow (ZERO loops!)
-			float z_surf = is_char ? 0.85 : (is_sprite ? max(0.35, geom.r * 2.2) : 0.04);
+			float z_surf = is_sprite ? max(0.35, surface_geom.r * 3.0) : 0.04;
 			if (!is_char && !is_underground && sun_energy > 0.01 && sun_vis > 0.01) {
-				float bsh = analytic_body_shadow(world_p, z_surf, sun_ray);
+				float bsh = analytic_body_shadow(surface_p + grid_origin, z_surf, sun_ray);
 				vec3 sun_part = sun_color * (sun_vis * sun_energy * 0.92);
 				direct_light = max(direct_light - sun_part * (0.88 * bsh), vec3(0.0));
 				sun_vis *= 1.0 - 0.88 * bsh;
@@ -278,9 +301,9 @@ void fragment() {
 			float lc = dot(raw, vec3(0.299, 0.587, 0.114));
 			vec3 surf_n = vec3(0.0, 0.0, 1.0);
 			if (sun_energy > 0.01 || mat_id == 2 || mat_id == 5 || player_light_pos_rad.w > 0.01) {
-				vec2 pstep = 1.0 / max(screen_px, vec2(64.0));
-				float lr = dot(texture(raw_tex, clamp(UV + vec2(pstep.x, 0.0), vec2(0.0), vec2(1.0))).rgb, vec3(0.299, 0.587, 0.114));
-				float ld = dot(texture(raw_tex, clamp(UV + vec2(0.0, pstep.y), vec2(0.0), vec2(1.0))).rgb, vec3(0.299, 0.587, 0.114));
+				vec2 pstep = 1.0 / raw_size;
+				float lr = dot(texture(raw_tex, raw_uv + vec2(pstep.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+				float ld = dot(texture(raw_tex, raw_uv + vec2(0.0, pstep.y)).rgb, vec3(0.299, 0.587, 0.114));
 				float rel_amp = is_char ? 0.15 : (mat_id == 5 ? 0.46 : (mat_id == 1 ? 0.36 : 0.28));
 				surf_n = normalize(vec3((lc - lr) * rel_amp, (lc - ld) * rel_amp, 1.0));
 			}
@@ -292,21 +315,25 @@ void fragment() {
 
 			// Compact player handheld light (zero cost when player has no active flashlight/torch!)
 			vec3 hand_halo = vec3(0.0);
-			vec3 hand_light = eval_portable_light(world_p, local_p, own, is_wall, surf_n, hand_halo);
+			vec3 hand_light = eval_portable_light(surface_p + grid_origin, surface_p, surface_cell, surf_n, hand_halo);
+			if (is_wall) {
+				hand_light *= surface_kind == 1 ? 0.42 : 0.64;
+				hand_halo *= 0.10;
+			}
 
 			// Continuous natural dark baseline (smoothly dims with twilight/night everywhere — zero steps!)
 			float sky_day = clamp(sky_energy, 0.0, 1.0);
 			vec3 base_ambient;
 			if (is_underground) {
-				base_ambient = vec3(0.056, 0.062, 0.080);
+				base_ambient = vec3(0.070, 0.075, 0.088);
 			} else if (indoors) {
-				base_ambient = mix(vec3(0.052, 0.060, 0.084), vec3(0.140, 0.138, 0.144), sky_day);
+				base_ambient = mix(vec3(0.075, 0.082, 0.100), vec3(0.218, 0.211, 0.207), sky_day);
 			} else {
 				base_ambient = mix(vec3(0.046, 0.066, 0.118), sky_color * 0.085, sky_day);
 			}
 
 			// Total incident light = curved-AO ambient & rich colored GI bounce + direct sun/moon/point lights + handheld
-			float gi_gain = (mat_id == 5 || is_wall) ? 1.15 : (indoors ? 1.08 : 0.85);
+			float gi_gain = is_wall ? 0.71 : (indoors ? 1.21 : 0.85);
 			vec3 incident = (base_ambient + gi_and_vol * gi_gain) * ao + direct_light + hand_light;
 			if (is_char) {
 				incident = max(incident, vec3(0.20, 0.21, 0.25));
@@ -338,10 +365,10 @@ void fragment() {
 					vec3 metal_tint = mix(vec3(0.84, 0.90, 0.98), raw * 1.35, 0.55);
 					lit += sun_color * spec_m * metal_tint * dark_w + env_refl_col * metal_tint * (0.09 + 0.09 * rim_m) * dark_w;
 				} else if (mat_id == 3) {
-					float spec_g = pow(ndh_sun, 52.0) * sun_vis * sun_energy * 0.82;
+					float spec_g = pow(ndh_sun, 52.0) * sun_vis * sun_energy * 0.42;
 					float sheen_g = smooth_noise2(world_p * vec2(4.0, 4.0) + vec2(0.0, wind_time * 0.02));
-					vec3 glass_refl = mix(sky_color * (0.42 + 0.52 * sky_energy), env_refl_col, 0.48);
-					lit += sun_color * spec_g + glass_refl * (0.30 + 0.12 * sheen_g);
+					vec3 glass_refl = mix(sky_color * (0.06 + 0.50 * sky_energy), env_refl_col, 0.56);
+					lit += sun_color * spec_g + glass_refl * (0.12 + 0.08 * sheen_g);
 				} else if (mat_id == 4 || own_vis.a > 0.25) {
 					// Chroma-mask water reflection strictly to actual cool/blue-teal water pixels so dirt puddles
 					// (t_puddle + murky water) and grassy riverbanks NEVER wash out into white 32x32 squares!
@@ -374,7 +401,18 @@ void fragment() {
 			if (!is_wall) {
 				lit += gi_and_vol * (indoors ? 0.18 : 0.06);
 			}
+			if (visible_interior) {
+				float near_eye = 1.0 - smoothstep(2.0, 13.0, length(world_p - player_eye));
+				float exposed = smoothstep(0.04, 0.42, env_luma);
+				float room_fill = (mix(0.065, 0.12, sky_day) + 0.065 * near_eye) * (1.0 - 0.85 * exposed);
+				lit += raw * room_fill * mix(0.72, 1.0, ao);
+			}
 			lit += hand_halo;
+			if (is_wall) {
+				// Keep hotspot hue/detail instead of tone-mapping the entire face to white.
+				float peak = max(lit.r, max(lit.g, lit.b));
+				lit /= 1.0 + max(0.0, peak - 0.26) * 0.88;
+			}
 
 			vec2 cv = (UV - vec2(0.5)) * 2.0;
 			float vig = 1.0 - 0.065 * smoothstep(0.62, 1.48, dot(cv, cv));
@@ -393,7 +431,7 @@ void fragment() {
 			if (night_amt > 0.01 && !is_wall) {
 				float dist_p = length(world_p - player_eye);
 				float lit_luma = dot(direct_light + hand_light, vec3(0.299, 0.587, 0.114));
-				float far_dim = mix(1.0, 0.36, smoothstep(5.5, 16.0, dist_p) * night_amt * (1.0 - clamp(lit_luma * 2.2, 0.0, 1.0)));
+				float far_dim = mix(1.0, visible_interior ? 0.77 : 0.36, smoothstep(5.5, 16.0, dist_p) * night_amt * (1.0 - clamp(lit_luma * 2.2, 0.0, 1.0)));
 				lit *= far_dim;
 			}
 

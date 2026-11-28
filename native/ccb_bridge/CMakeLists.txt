@@ -79,6 +79,8 @@ list(REMOVE_ITEM CCB_CORE_SOURCES
     "${CCB_ROOT}/src/uilist.cpp"
     "${CCB_ROOT}/src/sounds.cpp"
     "${CCB_ROOT}/src/animation.cpp"
+    "${CCB_ROOT}/src/action.cpp"
+    "${CCB_ROOT}/src/input_context.cpp"
     "${CCB_ROOT}/src/main_menu.cpp"
 )
 
@@ -86,6 +88,8 @@ list(REMOVE_ITEM CCB_CORE_SOURCES
 set(UILIST_BRIDGE_CPP "${CMAKE_CURRENT_BINARY_DIR}/uilist_bridge.cpp")
 set(SOUNDS_BRIDGE_CPP "${CMAKE_CURRENT_BINARY_DIR}/sounds_bridge.cpp")
 set(ANIMATION_BRIDGE_CPP "${CMAKE_CURRENT_BINARY_DIR}/animation_bridge.cpp")
+set(ACTION_BRIDGE_CPP "${CMAKE_CURRENT_BINARY_DIR}/action_bridge.cpp")
+set(INPUT_CONTEXT_BRIDGE_CPP "${CMAKE_CURRENT_BINARY_DIR}/input_context_bridge.cpp")
 set(MAIN_MENU_BRIDGE_CPP "${CMAKE_CURRENT_BINARY_DIR}/main_menu_bridge.cpp")
 
 add_custom_command(
@@ -94,6 +98,22 @@ add_custom_command(
             "${CCB_ROOT}/src/main_menu.cpp" "${MAIN_MENU_BRIDGE_CPP}"
     DEPENDS "${CCB_ROOT}/src/main_menu.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/patch_main_menu.py"
     COMMENT "Syncing main_menu_bridge.cpp"
+)
+
+add_custom_command(
+    OUTPUT "${INPUT_CONTEXT_BRIDGE_CPP}"
+    COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/patch_input_context.py"
+            "${CCB_ROOT}/src/input_context.cpp" "${INPUT_CONTEXT_BRIDGE_CPP}"
+    DEPENDS "${CCB_ROOT}/src/input_context.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/patch_input_context.py"
+    COMMENT "Syncing input_context_bridge.cpp"
+)
+
+add_custom_command(
+    OUTPUT "${ACTION_BRIDGE_CPP}"
+    COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/patch_action.py"
+            "${CCB_ROOT}/src/action.cpp" "${ACTION_BRIDGE_CPP}"
+    DEPENDS "${CCB_ROOT}/src/action.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/patch_action.py"
+    COMMENT "Syncing action_bridge.cpp"
 )
 
 add_custom_command(
@@ -177,6 +197,8 @@ add_library(ccb_bridge SHARED
     "${UILIST_BRIDGE_CPP}"
     "${SOUNDS_BRIDGE_CPP}"
     "${ANIMATION_BRIDGE_CPP}"
+    "${ACTION_BRIDGE_CPP}"
+    "${INPUT_CONTEXT_BRIDGE_CPP}"
     "${MAIN_MENU_BRIDGE_CPP}"
 )
 target_compile_definitions(ccb_bridge PRIVATE CCB_BRIDGE_EXPORTS)

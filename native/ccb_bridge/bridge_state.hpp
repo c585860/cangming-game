@@ -77,6 +77,7 @@ struct BridgeState {
     std::atomic<bool> resume_signal{false};
     std::atomic<uint64_t> generation{0};
     std::atomic<uint64_t> world_generation{0};
+    std::atomic<int> map_zoom_steps{0};
     std::atomic<uint64_t> scene3d_generation{0};
     std::atomic<int> capture_rad_x{22};
     std::atomic<int> capture_rad_y{16};

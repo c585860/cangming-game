@@ -8,13 +8,13 @@ extends Control
 # - Channel 2: CcbTerminalOverlay renders 100% genuine CCB curses + ImTui UI/menus/sidebar.
 
 signal return_to_launcher_requested()
+signal quit_requested()
 
 const TerminalOverlay = preload("res://scripts/ccb_native/ccb_terminal_overlay.gd")
 const GpuViewport = preload("res://scripts/ccb_native/ccb_gpu_viewport.gd")
 const Viewport3D = preload("res://scripts/ccb_native/ccb_viewport_3d.gd")
 const NativeMinimap = preload("res://scripts/ccb_native/ccb_native_minimap.gd")
 const CombatAudio = preload("res://scripts/ccb_native/ccb_combat_audio.gd")
-const AmbienceAudio = preload("res://scripts/ccb_native/ccb_ambience_audio.gd")
 const Tiles = preload("res://scripts/undead_tiles.gd")
 
 const CELL_W_DEFAULT := 8
@@ -95,7 +95,6 @@ var _term_overlay: TerminalOverlay
 var _minimap: NativeMinimap
 var _menu_credits_panel: PanelContainer
 var _combat_audio: CombatAudio
-var _ambience_audio: AmbienceAudio
 var _loading_overlay: ColorRect
 var _loading_tex_rect: TextureRect
 var _loading_tip_lbl: Label
@@ -188,11 +187,9 @@ func build(font: Font) -> void:
 	_minimap = NativeMinimap.new()
 	_canvas_root.add_child(_minimap)
 
-	# Realistic 44.1/22.05 kHz Polyphonic Combat & Dynamic World Ambience Audio Engines
+	# Polyphonic firearm audio.
 	_combat_audio = CombatAudio.new()
 	add_child(_combat_audio)
-	_ambience_audio = AmbienceAudio.new()
-	add_child(_ambience_audio)
 	_base_max_fps = Engine.max_fps
 	_fps_throttle_disabled = OS.get_cmdline_user_args().has("--no-fps-throttle") or OS.get_cmdline_args().has("--no-fps-throttle") or DisplayServer.get_name() == "headless"
 
@@ -296,7 +293,7 @@ func _build_host_toolbar() -> void:
 	_host_bar.add_child(_mode3d_btn)
 
 	_same_lvl_btn = Button.new()
-	_same_lvl_btn.text = "同层: 关 (z)"
+	_same_lvl_btn.text = "同层: 关"
 	_same_lvl_btn.visible = false
 	_same_lvl_btn.focus_mode = Control.FOCUS_NONE
 	_same_lvl_btn.add_theme_font_size_override("font_size", 11)
@@ -305,7 +302,7 @@ func _build_host_toolbar() -> void:
 	_host_bar.add_child(_same_lvl_btn)
 
 	_dither_btn = Button.new()
-	_dither_btn.text = "透视: 开 (Z)"
+	_dither_btn.text = "透视: 开"
 	_dither_btn.visible = false
 	_dither_btn.focus_mode = Control.FOCUS_NONE
 	_dither_btn.add_theme_font_size_override("font_size", 11)
@@ -324,15 +321,13 @@ func _build_host_toolbar() -> void:
 	_host_bar.add_child(_reset_cam_btn)
 
 	_sfx_btn = Button.new()
-	_sfx_btn.text = "音效: 开"
+	_sfx_btn.text = "枪械: 开"
 	_sfx_btn.focus_mode = Control.FOCUS_NONE
 	_sfx_btn.add_theme_font_size_override("font_size", 11)
 	_sfx_btn.pressed.connect(func():
 		if _combat_audio != null:
 			var m := _combat_audio.toggle_mute()
-			if _ambience_audio != null:
-				_ambience_audio.set_muted(m)
-			_sfx_btn.text = "音效: 静音" if m else "音效: 开")
+			_sfx_btn.text = "枪械: 静音" if m else "枪械: 开")
 	_host_bar.add_child(_sfx_btn)
 
 	_ime_btn = Button.new()
@@ -409,8 +404,6 @@ func activate() -> bool:
 
 	if _combat_audio != null:
 		_combat_audio.setup(engine)
-	if _ambience_audio != null:
-		_ambience_audio.setup(engine)
 
 	_compute_grid_size()
 	var base_dir := resolve_ccb_root()
@@ -455,8 +448,6 @@ func _ensure_view_3d() -> Viewport3D:
 	if _gpu_view != null and _gpu_view.get_parent() == _canvas_root:
 		_canvas_root.move_child(_view_3d, _gpu_view.get_index() + 1)
 	_view_3d.build(_ui_font)
-	if _ambience_audio != null:
-		_view_3d.lightning_flashed.connect(_ambience_audio.trigger_lightning_thunder)
 	_sync_terrain_rect()
 	return _view_3d
 
@@ -507,8 +498,6 @@ func deactivate_to_launcher() -> void:
 	visible = false
 	if not _fps_throttle_disabled:
 		Engine.max_fps = _base_max_fps
-	if _ambience_audio != null:
-		_ambience_audio.set_in_world(false)
 	_clear_loading_image_cache()
 	Tiles.clear_decoded_cache()
 	_want_text_input = false
@@ -672,7 +661,7 @@ func _compute_grid_size() -> void:
 	var vw := maxi(640, int(size.x))
 	var vh := maxi(384, int(size.y) - TOP_BAR_H)
 	# Keep crisp legible cell metrics across every resolution / aspect ratio (720p, 1080p, 2K, 4K, 16:10, 21:9)
-	var target_ch := clampi(int(round(float(vh) / 43.0)), 14, 22)
+	var target_ch := clampi(int(round(float(vh) / 57.0)), 14, 18)
 	if (target_ch & 1) != 0:
 		target_ch -= 1
 	@warning_ignore("integer_division")
@@ -753,7 +742,7 @@ func toggle_3d_same_level() -> void:
 	var next := not _view_3d.same_level_only
 	_view_3d.set_same_level_only(next)
 	if _same_lvl_btn != null:
-		_same_lvl_btn.text = "同层: 开 (z)" if next else "同层: 关 (z)"
+		_same_lvl_btn.text = "同层: 开" if next else "同层: 关"
 	if engine != null and engine.has_method("set_render3d_mode"):
 		engine.set_render3d_mode(_render_3d, next)
 	_last_gen = -1
@@ -765,7 +754,7 @@ func toggle_3d_cursor_dither() -> void:
 	var next := not _view_3d.cursor_dither_enabled
 	_view_3d.set_cursor_dither(next)
 	if _dither_btn != null:
-		_dither_btn.text = "透视: 开 (Z)" if next else "透视: 关 (Z)"
+		_dither_btn.text = "透视: 开" if next else "透视: 关"
 
 
 func _sync_native_tileset_option() -> void:
@@ -812,6 +801,10 @@ func _process(delta: float) -> void:
 				engine.resize(_grid_cols, _grid_rows)
 
 	var status := str(engine.get_status())
+	if status == "quit_requested":
+		quit_requested.emit()
+		return
+
 	if status.begins_with("error:"):
 		_loading_overlay.visible = true
 		_loading_lbl.text = "CCB 引擎错误：%s" % status
@@ -834,6 +827,16 @@ func _process(delta: float) -> void:
 	if _loading_overlay.visible:
 		_loading_overlay.visible = false
 		_clear_loading_image_cache()
+
+	# Input comes from CCB's active map context, independent of menu cutouts and IME focus heuristics.
+	if engine.has_method("take_map_zoom_steps"):
+		var map_zoom_steps := int(engine.take_map_zoom_steps())
+		if map_zoom_steps != 0 and _use_tiles and _has_terrain:
+			_note_activity()
+			if _render_3d and _view_3d != null:
+				_view_3d.cycle_map_zoom(map_zoom_steps)
+			else:
+				_gpu_view.cycle_map_zoom(map_zoom_steps)
 
 	# Periodically trim unused tileset texture pages (LRU budget) & expire stale decoded PNG atlases
 	_tile_trim_accum += delta
@@ -927,8 +930,6 @@ func _process(delta: float) -> void:
 				_gpu_view.update_world_snapshot(_last_wsnap)
 				if _view_3d != null:
 					_view_3d.visible = false
-			if _ambience_audio != null and need_world_poll:
-				_ambience_audio.on_world_snapshot(_last_wsnap, _gpu_view.get_3d_lighting_bundle())
 
 		var ter_px := Rect2(_gpu_view.position, _gpu_view.size)
 		if _terrain_unoccluded:
@@ -937,8 +938,6 @@ func _process(delta: float) -> void:
 			_minimap.visible = false
 	else:
 		_world_view_dirty = false
-		if _ambience_audio != null:
-			_ambience_audio.set_in_world(false)
 		_terrain_unoccluded = false
 		_gpu_view.visible = false
 		if _view_3d != null:
@@ -1049,16 +1048,6 @@ func _input(event: InputEvent) -> void:
 				_gpu_view.adjust_zoom(-1)
 			get_viewport().set_input_as_handled()
 			return
-
-		# Exact CCB 3D display toggles ('z' = same-level cutaway, 'Z' = cursor peek dither) when unoccluded on 3D map
-		if _render_3d and _view_3d != null and _has_terrain and _terrain_unoccluded and (not _want_text_input) and (not kev.ctrl_pressed) and (not kev.alt_pressed):
-			if kev.keycode == KEY_Z:
-				if kev.shift_pressed:
-					toggle_3d_cursor_dither()
-				else:
-					toggle_3d_same_level()
-				get_viewport().set_input_as_handled()
-				return
 
 		# Committed Chinese / CJK / Unicode characters from Windows IME -> dedicated UTF-8 text input channel!
 		if kev.unicode > 127 and not kev.ctrl_pressed and not kev.alt_pressed:

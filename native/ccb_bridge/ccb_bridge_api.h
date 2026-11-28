@@ -89,6 +89,8 @@ extern "C" {
 #define CCB_OV_ZONE           5u // Zone manager (~ green area)
 #define CCB_OV_SOUND          6u // Unseen sound marker (?)
 #define CCB_OV_CURSOR         7u // Explicit cursor / target X / unobscuring arrows
+#define CCB_OV_Z_CREATURE     8u // Visible creature one level above or below
+#define CCB_OV_ADJACENT       9u // Valid tile in an adjacent-action prompt
 
 // Creature flags
 #define CCB_CRITTER_PLAYER   0x01u
@@ -167,6 +169,8 @@ extern "C" {
 // World light flags
 #define CCB_LIGHT_FLAG_FIRE      0x01u
 #define CCB_LIGHT_FLAG_SPOTLIGHT 0x02u
+#define CCB_LIGHT_FLAG_STROBE_ODD  0x04u
+#define CCB_LIGHT_FLAG_STROBE_EVEN 0x08u
 
 // Audio flags
 #define CCB_AUDIO_FLAG_INDOORS    0x01u
@@ -496,6 +500,7 @@ CCB_API int      ccb_get_loading_state(CcbLoadingState *out_state);
 // Frame & world snapshots
 CCB_API uint64_t ccb_get_generation(void);
 CCB_API uint64_t ccb_get_world_generation(void);
+CCB_API int      ccb_take_map_zoom_steps(void);
 CCB_API uint64_t ccb_get_scene3d_generation(void);
 CCB_API uint64_t ccb_get_audio_generation(void);
 CCB_API void     ccb_set_world_capture_radius(int rad_x, int rad_y);

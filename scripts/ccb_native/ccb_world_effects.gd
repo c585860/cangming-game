@@ -23,6 +23,10 @@ const OV_BULLET := 4
 const OV_ZONE := 5
 const OV_SOUND := 6
 const OV_CURSOR := 7
+const OV_Z_CREATURE := 8
+const OV_ADJACENT := 9
+const ADJACENT_OUTLINE := Color(1.0, 0.86, 0.32, 0.90)
+const ADJACENT_FILL := Color(1.0, 0.86, 0.32, 0.17)
 
 const VFX_MUZZLE_FLASH := 1
 const VFX_TRACER := 2
@@ -866,7 +870,7 @@ static func _unpack_rgba(rgba: int, alpha_override := -1.0) -> Color:
 
 # ==============================================================================
 # PASS 1 (BLEND_MODE_MIX): Routes, Ground Scorch, Billowing Volumetric Smoke,
-# Flying Debris, Brass Casings, Reticles, SCT & Monster HP Bars
+# Flying Debris, Brass Casings, Reticles & SCT
 # ==============================================================================
 func draw_overlays(canvas: Control, snap: Dictionary, view_origin_world: Vector2,
 		tile_px: float, ui_font: Font) -> void:
@@ -1065,26 +1069,6 @@ func draw_overlays(canvas: Control, snap: Dictionary, view_origin_world: Vector2
 			var shadow := Color(0.0, 0.0, 0.0, alpha * 0.85)
 			canvas.draw_string(ui_font, Vector2(sx + 1.0, sy + 1.0), txt, HORIZONTAL_ALIGNMENT_LEFT, -1.0, fsize, shadow)
 			canvas.draw_string(ui_font, Vector2(sx, sy), txt, HORIZONTAL_ALIGNMENT_LEFT, -1.0, fsize, col)
-
-	# 5. Subtle damage indicator bar under injured creatures
-	var creatures: Array = snap.get("creatures", [])
-	for c_var in creatures:
-		var cd: Dictionary = c_var
-		var hp_pct := int(cd.get("hp_pct", 100))
-		var cflags := int(cd.get("flags", 0))
-		if hp_pct >= 100 or (cflags & CRITTER_PLAYER) != 0:
-			continue
-		var uid := int(cd.get("uid", 0))
-		var vpos := get_creature_visual(uid, Vector2(float(cd.get("x", 0)), float(cd.get("y", 0))))
-		var sx := (vpos.x - view_origin_world.x) * tile_px
-		var sy := (vpos.y - view_origin_world.y) * tile_px
-		if sx < -tile_px or sy < -tile_px or sx > canvas.size.x + tile_px or sy > canvas.size.y + tile_px:
-			continue
-		var bw := tile_px - 4.0
-		var fill_w := bw * clampf(float(hp_pct) / 100.0, 0.0, 1.0)
-		canvas.draw_rect(Rect2(sx + 2.0, sy + tile_px - 4.0, bw, 3.0), Color(0.0, 0.0, 0.0, 0.82))
-		var bar_col := Color(0.28, 0.90, 0.30) if hp_pct > 60 else (Color(0.95, 0.80, 0.18) if hp_pct > 30 else Color(0.95, 0.24, 0.22))
-		canvas.draw_rect(Rect2(sx + 2.0, sy + tile_px - 4.0, fill_w, 3.0), bar_col)
 
 
 # ==============================================================================
@@ -1377,6 +1361,16 @@ func _draw_tile_effect(canvas: Control, kind: int, cp: int, sx: float, sy: float
 		OV_CURSOR:
 			var ccol := Color(0.40, 1.0, 0.62, 0.88) if cp == 88 else Color(0.45, 0.92, 1.0, 0.88)
 			_draw_corner_reticle(canvas, rect, ccol, 1.8)
+		OV_ADJACENT:
+			var marker := rect.grow(-maxf(2.0, tpx * 0.14))
+			canvas.draw_rect(marker, ADJACENT_FILL)
+			canvas.draw_rect(marker, ADJACENT_OUTLINE, false, 1.5)
+		OV_Z_CREATURE:
+			var tip_y := -tpx * 0.17 if cp == 94 else tpx * 0.17
+			var offset := Vector2(0.0, tip_y)
+			var arrow := PackedVector2Array([center + Vector2(-tpx * 0.14, -tip_y * 0.24), center + offset, center + Vector2(tpx * 0.14, -tip_y * 0.24)])
+			canvas.draw_polyline(arrow, Color(0.0, 0.08, 0.10, 0.90), 4.0, true)
+			canvas.draw_polyline(arrow, Color(0.47, 0.94, 0.84, 0.98), 2.0, true)
 		OV_SOUND:
 			var rad := tpx * (0.28 + 0.18 * pulse)
 			canvas.draw_arc(center, rad, 0.0, TAU, 20, Color(fg_col.r, fg_col.g, fg_col.b, 0.65 * (1.0 - pulse * 0.5)), 1.5, true)

@@ -19,7 +19,7 @@ var has_terrain := false
 var cutout_enabled := true
 var ui_font: Font
 var font_size := 14
-var font_ascent := 13.0
+var font_baseline := 13.0
 var ime_preedit := ""
 var _col_cache: Dictionary = {}
 var _glyph_cache: Dictionary = {}
@@ -67,7 +67,7 @@ func configure_font(f: Font, cw: int, ch: int) -> void:
 	ui_font = f
 	cell_w = maxi(6, cw)
 	cell_h = maxi(12, ch)
-	font_size = maxi(10, cell_h - 1)
+	font_size = cell_h
 	_cjk_batch_font = ui_font
 	_ascii_batch_ok = false
 	_cjk_batch_ok = false
@@ -97,9 +97,10 @@ func configure_font(f: Font, cw: int, ch: int) -> void:
 		if c_err <= 0.40:
 			_cjk_batch_ok = true
 			_cjk_max_run = clampi(int(floor(1.6 / maxf(0.02, c_err))), 4, 24)
-		font_ascent = ui_font.get_ascent(font_size)
+		var ascent := ui_font.get_ascent(font_size)
+		font_baseline = clampf((float(cell_h) + ascent - ui_font.get_descent(font_size)) * 0.5, 1.0, float(cell_h - 1))
 	else:
-		font_ascent = float(cell_h) * 0.82
+		font_baseline = float(cell_h) * 0.82
 	queue_redraw()
 
 
@@ -181,9 +182,14 @@ func _draw() -> void:
 
 	var cw := float(cell_w)
 	var ch := float(cell_h)
-	var baseline := floorf((ch - float(font_size)) * 0.5 + font_ascent)
-	if baseline > ch - 1.0:
-		baseline = ch - 2.0
+	# Align text to output pixels even when the root canvas has a fractional scale.
+	var screen := get_screen_transform()
+	var sx := maxf(screen.x.x, 0.001)
+	var sy := maxf(screen.y.y, 0.001)
+	var glyph_x := PackedFloat32Array()
+	glyph_x.resize(cols)
+	for x in range(cols):
+		glyph_x[x] = (roundf(float(x) * cw * sx + screen.origin.x) - screen.origin.x) / sx
 
 	# Pass 1: Batched horizontal background runs (skipping terrain cutout cells!)
 	for y in range(rows):
@@ -219,7 +225,8 @@ func _draw() -> void:
 	var cjk_font := _cjk_batch_font if _cjk_batch_font != null else ui_font
 	for y in range(rows):
 		var py := float(y) * ch
-		var baseline_y := py + baseline
+		var screen_y := (py + font_baseline) * sy + screen.origin.y
+		var baseline_y := (roundf(screen_y) - screen.origin.y) / sy
 		var row_base := y * cols * CELL_STRIDE
 		var run_text := ""
 		var run_x := -1
@@ -241,7 +248,7 @@ func _draw() -> void:
 				continue
 			if cutout_enabled and (flags & FLAG_TERRAIN) != 0:
 				if run_x >= 0:
-					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(float(run_x) * cw, baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
+					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(glyph_x[run_x], baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
 					ds_calls += 1
 					run_x = -1
 					run_text = ""
@@ -260,7 +267,7 @@ func _draw() -> void:
 					run_text += " "
 					run_next_x = x + 1
 				elif run_x >= 0:
-					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(float(run_x) * cw, baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
+					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(glyph_x[run_x], baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
 					ds_calls += 1
 					run_x = -1
 					run_text = ""
@@ -271,7 +278,7 @@ func _draw() -> void:
 			# Coalesce horizontal ─ (0x2500) box-drawing lines into a single draw_rect!
 			if cp == 0x2500:
 				if run_x >= 0:
-					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(float(run_x) * cw, baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
+					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(glyph_x[run_x], baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
 					ds_calls += 1
 					run_x = -1
 					run_text = ""
@@ -289,7 +296,7 @@ func _draw() -> void:
 
 			if cp >= 0x2502 and cp <= 0x253C:
 				if run_x >= 0:
-					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(float(run_x) * cw, baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
+					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(glyph_x[run_x], baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
 					ds_calls += 1
 					run_x = -1
 					run_text = ""
@@ -308,7 +315,7 @@ func _draw() -> void:
 					run_next_x = x + step
 				else:
 					if run_x >= 0:
-						draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(float(run_x) * cw, baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
+						draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(glyph_x[run_x], baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
 						ds_calls += 1
 					run_x = x
 					run_next_x = x + step
@@ -317,15 +324,15 @@ func _draw() -> void:
 					run_text = _get_cached_glyph(cp)
 			else:
 				if run_x >= 0:
-					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(float(run_x) * cw, baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
+					draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(glyph_x[run_x], baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
 					ds_calls += 1
 					run_x = -1
 					run_text = ""
-				draw_string(ui_font, Vector2(float(x) * cw, baseline_y), _get_cached_glyph(cp), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(fg_rgba))
+				draw_string(ui_font, Vector2(glyph_x[x], baseline_y), _get_cached_glyph(cp), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(fg_rgba))
 				ds_calls += 1
 
 		if run_x >= 0:
-			draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(float(run_x) * cw, baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
+			draw_string(cjk_font if run_kind == 2 else ui_font, Vector2(glyph_x[run_x], baseline_y), run_text.strip_edges(false, true), HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, _get_cached_color(run_fg))
 			ds_calls += 1
 		if hline_start >= 0:
 			draw_rect(Rect2(float(hline_start) * cw, floorf(py + ch * 0.5), float(cols - hline_start) * cw, 1.0), _get_cached_color(hline_fg))
@@ -355,4 +362,4 @@ func _draw() -> void:
 		var pill := Rect2(px, maxf(0.0, py - 2.0), pill_w, pill_h)
 		draw_rect(pill, Color(0.08, 0.14, 0.24, 0.96))
 		draw_rect(pill, Color(0.45, 0.82, 1.0, 0.95), false, 1.2)
-		draw_string(ui_font, Vector2(px + 5.0, maxf(0.0, py - 2.0) + baseline + 1.0), ime_preedit, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, Color(0.96, 0.98, 1.0))
+		draw_string(ui_font, Vector2(px + 5.0, maxf(0.0, py - 2.0) + font_baseline + 1.0), ime_preedit, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, Color(0.96, 0.98, 1.0))

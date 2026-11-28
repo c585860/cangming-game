@@ -67,7 +67,6 @@ static func build_menu(game: Control, contents: VBoxContainer) -> void:
 		["历史消息日志", "messages", "P"],
 		["静候一段时间", "wait", "|"],
 		["躺床 / 坐椅 / 原地小憩", "sleep", "$"],
-		["开关江南环境音效", "toggle_audio", "—"],
 		["开关安全模式", "safe_mode", "!"],
 		["保存游戏", "save", "S"],
 		["读取存档", "load", "—"],

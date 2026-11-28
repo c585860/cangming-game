@@ -730,7 +730,7 @@ func _draw_player() -> void:
 				player_layer.draw_string(mfont, cpx + Vector2(2.0, cell - 3.0), tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, tcol)
 
 	motion.draw_character(self, player_layer, &"player", motion.visual_pos, true, world.pos, tint, world.worn_overlays())
-	# Cataclysm Core Pack: Render live vanilla CCB monsters with dynamic lighting tint, HP bar & alert badge!
+	# Cataclysm Core Pack: Render monsters with lighting tint and alert badge.
 	if is_ccb:
 		var mons: Array = world.monsters_in_rect(visible.grow(1))
 		for m: Dictionary in mons:
@@ -742,13 +742,6 @@ func _draw_player() -> void:
 			player_layer.draw_circle(Vector2.ZERO, cell * 0.34, Color(0.02, 0.03, 0.04, 0.45))
 			player_layer.draw_set_transform(Vector2.ZERO)
 			Tiles.draw_at(player_layer, mtile, mpx, float(cell), 0, -1, 0, mtint)
-			var mhp: int = int(m.get("hp", 1))
-			var mmax: int = maxi(1, int(m.get("max_hp", 1)))
-			if mhp < mmax:
-				var bw := float(cell) * 0.84
-				var bar := Rect2(mpx + Vector2((cell - bw) * 0.5, -5.0), Vector2(bw, 4.0))
-				player_layer.draw_rect(bar.grow(1.0), Color(0.04, 0.04, 0.05, 0.90))
-				player_layer.draw_rect(Rect2(bar.position, Vector2(bw * clampf(float(mhp) / float(mmax), 0.0, 1.0), 4.0)), Color("e65a5a"))
 			if bool(m.get("alerted", false)) and mfont != null:
 				player_layer.draw_string(mfont, mpx + Vector2(cell * 0.72, 8.0), "!", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("f0d86c"))
 	# Multiplayer Hook: Render synced remote players on the same floor (zero cost in single-player!)

@@ -6,7 +6,7 @@ signal lightning_flashed(distance_norm: float)
 # Features 1:1 parity with CCB src/render3d.cpp:
 # - Multi-Z building stacking, dollhouse translucent upper roofs, clamped door/window sills & lintels
 # - Instanced MultiMesh batches across all 6 CCB geometry modes + depth-write-off decal pass
-# - Camera->player elliptical screen-door occlusion cutout + cursor-centered peek hole (Z) + same-level wall cut (z)
+# - Camera->player elliptical screen-door occlusion cutout, cursor-centered peek hole and same-level wall cut
 # - Real calendar sun disc/halo & wind-drifting clouds (ccb_sky3d.gdshader), night vision, map memory presets
 # - Hostile/Neutral/Friendly creature silhouette outlines + 3D dynamic point lights + projected combat VFX/SCT/routes
 # - Smooth 60fps right-drag orbit camera, scroll zoom, raycast tile picking, and compass-relative movement!
@@ -331,6 +331,19 @@ func note_mouse_look(dx: float, dy: float) -> void:
 
 func note_mouse_wheel(ticks: float) -> void:
 	cam_dist = clampf(cam_dist - ticks * 1.5, 6.0, 30.0)
+	_cam_dirty = true
+	_request_3d_render()
+
+
+func cycle_map_zoom(steps: int) -> void:
+	var levels := [30.0, 24.0, 18.0, 12.0, 6.0]
+	var direction := 1 if steps > 0 else -1
+	var next := levels.size() if direction > 0 else -1
+	for i in range(0 if direction > 0 else levels.size() - 1, levels.size() if direction > 0 else -1, direction):
+		if (cam_dist - levels[i]) * direction > 0.01:
+			next = i
+			break
+	cam_dist = levels[posmod(next + steps - direction, levels.size())]
 	_cam_dirty = true
 	_request_3d_render()
 
@@ -1069,6 +1082,28 @@ func _draw_3d_overlay() -> void:
 	var cz := int(_scene_snap.get("center_z", 0))
 	var pz := int(_scene_snap.get("player_z", 0))
 
+	# Adjacent action targets use the same CCB selection as the 2D map.
+	if pz == cz:
+		var origin: Vector2i = _world_snap.get("origin", Vector2i.ZERO)
+		var grid: Vector2i = _world_snap.get("size", Vector2i.ZERO)
+		var tiles: PackedByteArray = _world_snap.get("tiles", PackedByteArray())
+		var stride := int(_world_snap.get("tile_stride", 48))
+		if stride > 44 and tiles.size() >= grid.x * grid.y * stride:
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					var at := player + Vector2i(dx, dy) - origin
+					if at.x < 0 or at.y < 0 or at.x >= grid.x or at.y >= grid.y or tiles.decode_u8((at.y * grid.x + at.x) * stride + 44) != WorldEffects.OV_ADJACENT:
+						continue
+					var x := float(player.x + dx - center.x)
+					var y := float(player.y + dy - center.y)
+					var a := _project_ccb_to_screen(x + 0.14, y + 0.14, 0.05)
+					var b := _project_ccb_to_screen(x + 0.86, y + 0.14, 0.05)
+					var c := _project_ccb_to_screen(x + 0.86, y + 0.86, 0.05)
+					var d := _project_ccb_to_screen(x + 0.14, y + 0.86, 0.05)
+					if minf(minf(a.x, b.x), minf(c.x, d.x)) > -1000.0:
+						_overlay_2d.draw_colored_polygon(PackedVector2Array([a, b, c, d]), WorldEffects.ADJACENT_FILL)
+						_overlay_2d.draw_polyline(PackedVector2Array([a, b, c, d, a]), WorldEffects.ADJACENT_OUTLINE, 1.6, true)
+
 	# 1. Hover tile crisp 3D projected diamond/quad highlight (matches CCB mouse preselection box!)
 	if _hover_valid and not _orbit_dragging and not bool(_scene_snap.get("is_looking", false)):
 		var hx := float(_hover_tile.x - center.x)
@@ -1210,7 +1245,7 @@ func _draw_3d_overlay() -> void:
 	if _ui_font != null and size.x > 360.0:
 		var mode_tag := "3D 同层剖切" if same_level_only else "3D 多层全景"
 		var dither_tag := "开" if cursor_dither_enabled else "关"
-		var hint := "%s  |  右键拖动旋转 · 滚轮缩放 · z同层 · Z光标透视(%s) · F7切2D" % [mode_tag, dither_tag]
+		var hint := "%s  |  右键拖动旋转 · 滚轮或 z/Z 缩放 · 光标透视(%s) · F7切2D" % [mode_tag, dither_tag]
 		var tw := _ui_font.get_string_size(hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
 		var bx := size.x - tw - 16.0
 		var by := size.y - 22.0
