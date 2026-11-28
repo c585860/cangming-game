@@ -367,12 +367,12 @@ func set_cursor_dither(enabled: bool) -> void:
 	_request_3d_render()
 
 
-func note_mouse_global(global_pos: Vector2) -> void:
-	var lp := global_pos - get_global_rect().position
+func note_mouse_global(viewport_pos: Vector2) -> void:
+	var lp := make_canvas_position_local(viewport_pos)
 	if (lp - _last_mouse_local).length_squared() >= 1.0:
 		_last_mouse_local = lp
 		_hover_dirty = true
-		var wt := screen_to_world_tile(global_pos)
+		var wt := screen_to_world_tile(viewport_pos)
 		if wt != _hover_tile:
 			_hover_tile = wt
 			_hover_valid = (wt.x > -90000)
@@ -408,10 +408,10 @@ func get_view_center_tile() -> Vector2i:
 
 
 # Exact 3D ground-plane raycast onto the current view level (y = 0 in Godot space)
-func screen_to_world_tile(global_pos: Vector2) -> Vector2i:
+func screen_to_world_tile(viewport_pos: Vector2) -> Vector2i:
 	if not _has_scene or _camera == null or size.x <= 1.0 or size.y <= 1.0:
 		return Vector2i(-99999, -99999)
-	var lp := global_pos - get_global_rect().position
+	var lp := make_canvas_position_local(viewport_pos)
 	var vp_pt := Vector2(
 		lp.x * float(_subvp.size.x) / size.x,
 		lp.y * float(_subvp.size.y) / size.y
