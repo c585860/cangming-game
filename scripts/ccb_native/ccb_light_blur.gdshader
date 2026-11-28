@@ -66,23 +66,17 @@ void fragment() {
 		vec4 smooth_gi = acc / max(wsum, 0.001);
 		vec3 gi_hdr = smooth_gi.rgb * 2.0;
 
-		// Soft volumetric doorway/window shaft scatter (uses Pass 1's direct sun visibility & colored point lights!)
+		// Only the visible sunbeam contributes aerial scatter; bounced light stays in the surface lighting.
 		vec3 vol_scatter = vec3(0.0);
-		if (!is_underground && own_kind != 1) {
-			vec4 d_here = texture(direct_tex, UV);
-			vec3 direct_hdr = d_here.rgb * 2.0;
+		if (!is_underground && own_kind != 1 && sun_energy > 0.04) {
+			float sun_vis = texture(direct_tex, UV).a;
 			float phase = mix(1.45, 0.72, smoothstep(0.10, 0.85, sun_ray.z));
-			if (own_indoors && sun_energy > 0.04) {
-				// Golden sunlit dust column inside sunlit indoor window/door beams
-				vol_scatter += sun_color * (d_here.a * sun_energy * phase * 0.16);
-			} else if (!own_indoors && mist_level > 0.02 && sun_energy > 0.04) {
-				// Subtle outdoor Mie sun haze in morning mist / rain
-				vol_scatter += sun_color * (d_here.a * sun_energy * phase * mist_level * 0.055);
-			}
-			// Subtle colored Mie air scattering around strong artificial lights (fires, consoles, lamps)
-			vec3 art_glow = max(direct_hdr - sun_color * (d_here.a * sun_energy * 0.92), vec3(0.0));
 			if (own_indoors) {
-				vol_scatter += art_glow * 0.065;
+				// Golden sunlit dust column inside sunlit indoor window/door beams
+				vol_scatter += sun_color * (sun_vis * sun_energy * phase * 0.08);
+			} else if (mist_level > 0.02) {
+				// Subtle outdoor Mie sun haze in morning mist / rain
+				vol_scatter += sun_color * (sun_vis * sun_energy * phase * mist_level * 0.055);
 			}
 		}
 
