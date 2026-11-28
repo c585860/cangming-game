@@ -33,7 +33,8 @@ uniform float mist_level = 0.16;
 
 uniform int point_light_count = 0;
 uniform vec4 point_light_pos_rad[16];  // xy=world center, z=radius, w=energy
-uniform vec4 point_light_col_mode[16]; // rgb=true emitter color, a=flicker
+uniform vec4 point_light_col_mode[16]; // rgb=emitter color; a=flame flicker, or -1 odd / -2 even strobe
+uniform bool strobe_odd_phase = true;
 uniform vec4 point_light_cone[16];     // xy=unit dir, z=cone_cos (<= -0.5 = omni), w=volumetric_beam
 
 const float STORY_HEIGHT = 2.75;
@@ -201,7 +202,7 @@ float trace_sun_soft(vec2 local_p, float start_z, vec3 ray3, bool allow_self) {
 		+ trace_sun_single(local_p, start_z, r4, allow_self)) * 0.175;
 }
 
-float trace_point_ray(vec2 start_local, vec2 end_local, ivec2 target_cell, bool target_wall) {
+float trace_point_ray(vec2 start_local, vec2 end_local, ivec2 target_cell) {
 	vec2 delta = end_local - start_local;
 	float dist = length(delta);
 	if (dist < 0.08) {
@@ -238,7 +239,7 @@ float trace_point_ray(vec2 start_local, vec2 end_local, ivec2 target_cell, bool 
 		if (cell == start_cell) {
 			continue;
 		}
-		if (cell == target_cell && target_wall) {
+		if (cell == target_cell) {
 			return vis;
 		}
 		vec4 g = texelFetch(geom_tex, cell, 0);
@@ -304,7 +305,8 @@ void fragment() {
 			sun_origin = vec2(own) + vec2(0.5);
 			z_recv = 2.42;
 		} else if (kind >= 5) {
-			z_recv = clamp(geom.r * 1.4, 0.25, 1.35);
+			// Sample the visible top surface, not a point buried inside the caster.
+			z_recv = geom.r * 3.0 + 0.02;
 		}
 
 		// 1. Direct Sunlight & Moonlight (with wind-drifting overhead cloud shadows!)
@@ -321,7 +323,7 @@ void fragment() {
 		}
 
 		// World-space architectural parapet shading: calm shaded interior wall face, clean sunlit exterior wall face!
-		float wall_sun_scale = (kind == 1) ? mix(0.14, 0.50, wall_ext_grad) : 1.0;
+		float wall_sun_scale = (kind == 1) ? mix(0.10, 0.37, wall_ext_grad) : 1.0;
 		vec3 moon_col = vec3(0.46, 0.62, 0.92);
 		vec3 direct = sun_color * (sun_vis * sun_energy * 0.98 * wall_sun_scale)
 			+ moon_col * (moon_vis * moon_energy * 0.44 * wall_sun_scale);
@@ -346,6 +348,9 @@ void fragment() {
 				}
 				vec4 pr = point_light_pos_rad[i];
 				vec4 cm = point_light_col_mode[i];
+				if (cm.a < 0.0 && ((cm.a > -1.5) != strobe_odd_phase)) {
+					continue;
+				}
 				vec4 cn = point_light_cone[i];
 				float radius = pr.z;
 				float energy = pr.w;
@@ -374,13 +379,13 @@ void fragment() {
 					beam_vol = cone_shape * (1.0 - smoothstep(0.5, radius * 0.92, d2)) * fog_w * cn.w;
 				}
 				float phase = lpos.x * 1.73 + lpos.y * 2.41;
-				float wave = 1.0 + (sin(wind_time * 6.4 + phase) * 0.55 + sin(wind_time * 13.7 - phase) * 0.45) * (0.09 * cm.a);
+				float wave = 1.0 + (sin(wind_time * 6.4 + phase) * 0.55 + sin(wind_time * 13.7 - phase) * 0.45) * (0.09 * max(cm.a, 0.0));
 				vec2 l_local = lpos - grid_origin;
 				vec2 perp = vec2(-dir2.y, dir2.x) * (0.14 + 0.06 * smoothstep(0.5, 4.5, d2));
 
-				float vis = trace_point_ray(l_local, local_p, own, is_wall) * 0.50
-					+ trace_point_ray(l_local + perp, local_p, own, is_wall) * 0.25
-					+ trace_point_ray(l_local - perp, local_p, own, is_wall) * 0.25;
+				float vis = trace_point_ray(l_local, local_p, own) * 0.50
+					+ trace_point_ray(l_local + perp, local_p, own) * 0.25
+					+ trace_point_ray(l_local - perp, local_p, own) * 0.25;
 				if (vis <= 0.005) {
 					continue;
 				}
@@ -391,7 +396,9 @@ void fragment() {
 				float warm = clamp((cm.r - cm.b) * 1.5, 0.0, 1.0);
 				vec3 col = mix(cm.rgb, vec3(1.0, 0.94, 0.80), exp(-d2 * d2 * 1.6) * 0.42 * warm);
 				float raw_e = energy * wave * atten * vis * spot;
-				direct += col * ((1.0 - exp(-raw_e * 0.165)) * 1.28 + beam_vol * vis * 0.26);
+				float facing = clamp(0.5 - dot(fract(local_p) - vec2(0.5), dir2), 0.0, 1.0);
+				float surface_gain = (kind == 1) ? mix(0.22, 0.54, facing) : (is_wall ? 0.72 : 1.0);
+				direct += col * ((1.0 - exp(-raw_e * 0.165)) * 1.28 * surface_gain + (is_wall ? 0.0 : beam_vol * vis * 0.26));
 			}
 		}
 

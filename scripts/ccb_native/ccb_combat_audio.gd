@@ -7,7 +7,7 @@ extends Node
 #   * Seamless continuous cyclic firing cadence with subtle ±3.5ms organic bolt-cycle jitter
 #   * Tightened mid-burst body tails (0.58x) while letting the FINAL round of every burst ring out naturally!
 #   * 3 unique synthesized acoustic variations round-robined per firearm + pitch micro-drift (zero machine-gun roboticism!)
-#   * Delayed stereo brass shell-casing clinks (+280..410ms) & synchronized bullet impact hits
+#   * Delayed stereo brass shell-casing clinks (+280..410ms)
 
 const BUS_NAME := &"CcbCombat"
 const SAMPLE_RATE := 44100
@@ -15,10 +15,6 @@ const VOICE_POOL_SIZE := 28
 const MAX_WAV_CACHE := 96
 
 const SFX_GUNSHOT := 1
-const SFX_EXPLOSION := 2
-const SFX_PROJECTILE_HIT := 3
-const SFX_MELEE := 4
-const SFX_FOOTSTEP := 5
 const SFX_VARIANT := 6
 
 const VAR_SHELL_CASING := 10
@@ -45,7 +41,6 @@ var _rr_counter := 0
 # Telemetry for automated & visual verification
 var total_events_received := 0
 var total_gunshots_played := 0
-var total_explosions_played := 0
 var last_burst_shot_times: Array[float] = []
 var last_burst_id_seen := 0
 
@@ -154,6 +149,8 @@ func ingest_events(events: Array) -> void:
 		total_events_received += 1
 
 		var kind := int(ev.get("kind", 0))
+		if kind != SFX_GUNSHOT:
+			continue
 		var subtype := int(ev.get("subtype", 1))
 		var burst_id := int(ev.get("burst_id", 0))
 		var shot_index := int(ev.get("shot_index", 0))
@@ -201,8 +198,6 @@ func ingest_events(events: Array) -> void:
 					"shot_index": shot_index,
 					"eid": eid + 100000,
 				})
-		elif kind == SFX_PROJECTILE_HIT and burst_id > 0 and _burst_t0.has(burst_id):
-			due_t = float(_burst_t0[burst_id]) + delay_s
 
 		_pending.append({
 			"due": due_t,
@@ -254,8 +249,6 @@ func _fire_voice(item: Dictionary) -> void:
 				last_burst_id_seen = burst_id
 				last_burst_shot_times.clear()
 			last_burst_shot_times.append(_clock)
-	elif kind == SFX_EXPLOSION:
-		total_explosions_played += 1
 
 	if muted or _headless or _voices.is_empty():
 		return

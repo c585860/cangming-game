@@ -75,6 +75,7 @@ void worker_main() {
     auto &st = ccb_bridge::state();
     st.running.store(true, std::memory_order_release);
     st.set_status("initializing_runtime");
+    bool quit_from_menu = false;
 
     try {
         cata::init_allocator();
@@ -169,27 +170,8 @@ void worker_main() {
             main_menu menu;
             const bool start_game = menu.opening_screen();
             if (!start_game) {
-                if (st.shutdown_requested.load(std::memory_order_acquire)) {
-                    break;
-                }
-                // User chose Quit in CCB Main Menu -> park engine cleanly so Godot can return to Core Pack Launcher
-                // and re-entering CCB later is instant (0ms reload!).
-                st.waiting_resume.store(true, std::memory_order_release);
-                st.set_status("paused_in_launcher");
-                st.publish_frame();
-
-                std::unique_lock<std::mutex> lk(st.resume_mtx);
-                st.resume_cv.wait(lk, [&]() {
-                    return st.resume_signal.load(std::memory_order_acquire) ||
-                           st.shutdown_requested.load(std::memory_order_acquire);
-                });
-                st.resume_signal.store(false, std::memory_order_release);
-                st.waiting_resume.store(false, std::memory_order_release);
-                if (st.shutdown_requested.load(std::memory_order_acquire)) {
-                    break;
-                }
-                st.set_status("ready");
-                continue;
+                quit_from_menu = !st.shutdown_requested.load(std::memory_order_acquire);
+                break;
             }
 
             shared_ptr_fast<ui_adaptor> ui = g->create_or_get_main_ui_adaptor();
@@ -217,6 +199,9 @@ void worker_main() {
 
     st.waiting_resume.store(false, std::memory_order_release);
     st.running.store(false, std::memory_order_release);
+    if (quit_from_menu) {
+        st.set_status("quit_requested");
+    }
 }
 
 } // namespace
@@ -241,6 +226,7 @@ CCB_API int ccb_start(const char *base_dir, const char *user_dir, int cols, int 
     st.shutdown_requested.store(false, std::memory_order_release);
     st.waiting_resume.store(false, std::memory_order_release);
     st.resume_signal.store(false, std::memory_order_release);
+    st.map_zoom_steps.store(0, std::memory_order_relaxed);
     st.term_cols.store(cols > 0 ? cols : 160, std::memory_order_relaxed);
     st.term_rows.store(rows > 0 ? rows : 45, std::memory_order_relaxed);
     st.started.store(true, std::memory_order_release);
@@ -251,19 +237,19 @@ CCB_API int ccb_start(const char *base_dir, const char *user_dir, int cols, int 
 }
 
 CCB_API void ccb_shutdown(void) {
+    if (!g_worker_thread.joinable()) {
+        return;
+    }
     auto &st = ccb_bridge::state();
-    st.shutdown_requested.store(true, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lk(st.input_mtx);
+        st.shutdown_requested.store(true, std::memory_order_release);
         ccb_bridge::HostEvent ev{};
         ev.kind = ccb_bridge::HostEventKind::Shutdown;
         st.input_queue.push_back(ev);
     }
     st.input_cv.notify_all();
-    st.resume_cv.notify_all();
-    if (g_worker_thread.joinable()) {
-        g_worker_thread.join();
-    }
+    g_worker_thread.join();
 }
 
 CCB_API int ccb_is_running(void) {
@@ -433,6 +419,10 @@ CCB_API uint64_t ccb_get_generation(void) {
 
 CCB_API uint64_t ccb_get_world_generation(void) {
     return ccb_bridge::state().world_generation.load(std::memory_order_acquire);
+}
+
+CCB_API int ccb_take_map_zoom_steps(void) {
+    return ccb_bridge::state().map_zoom_steps.exchange(0, std::memory_order_relaxed);
 }
 
 CCB_API uint64_t ccb_get_scene3d_generation(void) {

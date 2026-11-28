@@ -16,12 +16,12 @@ const WorldEffects = preload("res://scripts/ccb_native/ccb_world_effects.gd")
 const WeatherFx = preload("res://scripts/weather_fx.gd")
 
 const ZOOMS := [20, 24, 32, 40, 48]
+const MAP_ZOOMS := [20, 32, 64, 128]
 const CRITTER_PLAYER := 0x01
 const CRITTER_HOSTILE := 0x02
 const CRITTER_NPC := 0x08
 const CRITTER_MALE := 0x10
 
-var zoom_idx := 2 # 32px default
 var tile_px := 32
 
 var _snapshot: Dictionary = {}
@@ -141,8 +141,33 @@ func has_high_fps_activity() -> bool:
 
 
 func adjust_zoom(delta_step: int) -> void:
-	zoom_idx = clampi(zoom_idx + delta_step, 0, ZOOMS.size() - 1)
-	tile_px = ZOOMS[zoom_idx]
+	var direction := 1 if delta_step > 0 else -1
+	var next := _next_zoom_index(ZOOMS, direction)
+	_set_tile_zoom(ZOOMS[clampi(next + delta_step - direction, 0, ZOOMS.size() - 1)])
+
+
+func cycle_map_zoom(steps: int) -> void:
+	var direction := 1 if steps > 0 else -1
+	var next := _next_zoom_index(MAP_ZOOMS, direction)
+	_set_tile_zoom(MAP_ZOOMS[posmod(next + steps - direction, MAP_ZOOMS.size())])
+
+
+func _next_zoom_index(levels: Array, direction: int) -> int:
+	if direction > 0:
+		for i in range(levels.size()):
+			if int(levels[i]) > tile_px:
+				return i
+		return levels.size()
+	for i in range(levels.size() - 1, -1, -1):
+		if int(levels[i]) < tile_px:
+			return i
+	return -1
+
+
+func _set_tile_zoom(pixels: int) -> void:
+	if pixels == tile_px:
+		return
+	tile_px = pixels
 	_emit_capture_radius_if_changed()
 	_sync_camera_and_lighting(true)
 	_trigger_redraw()

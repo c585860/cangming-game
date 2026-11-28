@@ -26,10 +26,14 @@ uniform vec3 sky_color = vec3(0.68, 0.82, 1.0);
 uniform float sky_energy = 0.75;
 uniform bool is_underground = false;
 
-vec3 sample_direct_hdr(ivec2 cell) {
-	vec2 hit_world = grid_origin + vec2(cell) + vec2(0.5);
+vec3 sample_direct_at(vec2 local_hit) {
+	vec2 hit_world = grid_origin + local_hit;
 	vec2 hit_uv = clamp((hit_world - light_world_min) / max(light_world_span, vec2(1.0)), vec2(0.002), vec2(0.998));
 	return texture(direct_tex, hit_uv).rgb * 2.0;
+}
+
+vec3 sample_direct_hdr(ivec2 cell) {
+	return sample_direct_at(vec2(cell) + vec2(0.5));
 }
 
 void fragment() {
@@ -103,7 +107,8 @@ void fragment() {
 				// Lazy texture sampling: ONLY sample `direct_tex` & `mat_tex` in branches that actually bounce light (~60% fewer taps!)
 				if (k == 1) {
 					vec3 albedo = texelFetch(mat_tex, cell, 0).rgb;
-					vec3 bounced = sample_direct_hdr(cell) * albedo * 1.48;
+					vec2 face = clamp(local_p + dir * dist - vec2(cell), vec2(0.14), vec2(0.86));
+					vec3 bounced = sample_direct_at(vec2(cell) + face) * albedo * 1.20;
 					float fall = 1.0 / (1.0 + 0.30 * dist * dist);
 					gi_accum += bounced * trans * fall;
 					trans = 0.0;

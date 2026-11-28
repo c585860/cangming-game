@@ -33,6 +33,9 @@ const LIGHT_WALL := 1
 const LIGHT_WIN_CLOSED := 2
 const LIGHT_DOOR_OPEN := 4
 const MAX_POINT_LIGHTS := 16
+const LIGHT_FLAG_STROBE_ODD := 0x04
+const LIGHT_FLAG_STROBE_EVEN := 0x08
+const STROBE_HALF_PERIOD := 0.5
 
 const DIRECT_TEXELS_PER_TILE := 8
 const GI_TEXELS_PER_TILE := 4
@@ -81,6 +84,9 @@ var _last_sight_eye := Vector2(-9999.0, -9999.0)
 var _last_z := 0
 var _smooth_init := false
 var _has_flicker_lights := false
+var _has_strobe_lights := false
+var _strobe_time := 0.0
+var _strobe_odd_phase := true
 var _has_water := false
 var _flicker_accum := 0.0
 var _astro_dirty := false
@@ -452,8 +458,18 @@ func tick(delta: float) -> void:
 			_astro_dirty = false
 			changed_astro = true
 
-	# Refresh decoupled world lightmaps when sun/dusk moves, fires flicker (~15Hz), or cloud shadows drift (~10Hz)!
-	if changed_astro:
+	# The beacons use render time, including while the game is waiting for input.
+	var strobe_changed := false
+	if _has_strobe_lights:
+		_strobe_time = fposmod(_strobe_time + delta, STROBE_HALF_PERIOD * 2.0)
+		var odd_phase := _strobe_time < STROBE_HALF_PERIOD
+		if odd_phase != _strobe_odd_phase:
+			_strobe_odd_phase = odd_phase
+			_direct_mat.set_shader_parameter("strobe_odd_phase", odd_phase)
+			strobe_changed = true
+
+	# Refresh Direct and GI together so the previous phase's bounce light goes out too.
+	if changed_astro or strobe_changed:
 		_direct_mat.set_shader_parameter("wind_time", _wind_time)
 		_schedule_world_light_passes()
 	elif _has_flicker_lights:
@@ -731,6 +747,7 @@ func _upload_point_lights(lights: Array, focus_pos: Vector2) -> void:
 	cone_arr.fill(Vector4(0.0, 0.0, -1.0, 0.0))
 
 	_has_flicker_lights = false
+	_has_strobe_lights = false
 	var idx := 0
 	# Give live gunfire muzzle flashes & explosions top priority slots in the 16-light HDR GPU pass!
 	for v_var in _transient_vfx_lights:
@@ -758,15 +775,21 @@ func _upload_point_lights(lights: Array, focus_pos: Vector2) -> void:
 		var cr := float(rgba & 0xFF) / 255.0
 		var cg := float((rgba >> 8) & 0xFF) / 255.0
 		var cb := float((rgba >> 16) & 0xFF) / 255.0
-		# Only true flames/lava/flares flicker; consoles (cyan), lamps (warm white), headlights & bioluminescence stay steady!
-		var is_fire := ((lflags & 1) != 0) or (cr > 0.85 and cb < 0.35 and cg < 0.72)
+		var strobe_mode := 0.0
+		if (lflags & LIGHT_FLAG_STROBE_ODD) != 0:
+			strobe_mode = -1.0
+		elif (lflags & LIGHT_FLAG_STROBE_EVEN) != 0:
+			strobe_mode = -2.0
+		var is_fire := strobe_mode == 0.0 and (((lflags & 1) != 0) or (cr > 0.85 and cb < 0.35 and cg < 0.72))
 		var is_spot := ((lflags & 2) != 0) or float(ld.get("cone_cos", -1.0)) > -0.5
 		if is_fire:
 			_has_flicker_lights = true
+		if strobe_mode != 0.0:
+			_has_strobe_lights = true
 		var radius := clampf(inten * (0.95 if is_spot else 0.72) + (5.2 if is_spot else 2.8), 3.6, 18.5 if is_spot else 13.5)
 		var energy := clampf(inten * (2.2 if is_spot else 1.85) + 4.5, 6.5, 28.0 if is_spot else 24.0)
 		pos_rad[idx] = Vector4(pos.x, pos.y, radius, energy)
-		col_mode[idx] = Vector4(cr, cg, cb, 0.75 if is_fire else 0.0)
+		col_mode[idx] = Vector4(cr, cg, cb, 0.75 if is_fire else strobe_mode)
 		if is_spot:
 			var sdir := Vector2(float(ld.get("dir_x", 1.0)), float(ld.get("dir_y", 0.0)))
 			sdir = sdir.normalized() if sdir.length_squared() > 0.001 else Vector2(1.0, 0.0)

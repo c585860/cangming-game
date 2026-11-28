@@ -1,4 +1,5 @@
 #include "bridge_state.hpp"
+#include "bridge_adjacent_targets.hpp"
 
 #include "avatar.h"
 #include "calendar.h"
@@ -451,22 +452,28 @@ uint64_t compute_world_state_sig(bool has_terrain, int rad_x, int rad_y) {
         mix(static_cast<uint64_t>(entry.getStep()) | (static_cast<uint64_t>(static_cast<uint32_t>(entry.getPosX())) << 16));
     }
     mix(st.next_vfx_id.load(std::memory_order_relaxed));
+    if (adjacent_targets != nullptr && !adjacent_targets->empty()) {
+        mix(adjacent_targets->size());
+        for (const tripoint_bub_ms &target : *adjacent_targets) {
+            mix(static_cast<uint32_t>(target.x()));
+            mix(static_cast<uint32_t>(target.y()));
+            mix(static_cast<uint32_t>(target.z()));
+        }
+    }
 
-    // Hash live unoccluded w_terrain cells in curses_layer so aim lines, cursor moves, hit flashes,
-    // explosions, destination 'X' previews, and debug map edits ALWAYS invalidate immediately,
-    // while scrolling inside ImGui/curses popups or sidebars skips redundant world captures 100%!
+    // Hash the same exposed terrain cells that supply world overlays.
     const int tx0 = std::max(0, st.work_terrain_x);
     const int ty0 = std::max(0, st.work_terrain_y);
     const int tx1 = std::min(st.work_cols, st.work_terrain_x + st.work_terrain_w);
     const int ty1 = std::min(st.work_rows, st.work_terrain_y + st.work_terrain_h);
     mix(static_cast<uint64_t>(tx0) | (static_cast<uint64_t>(ty0) << 16) |
         (static_cast<uint64_t>(tx1) << 32) | (static_cast<uint64_t>(ty1) << 48));
-    if (!st.curses_layer.empty() && st.work_cols > 0) {
+    if (!st.work_cells.empty() && st.work_cols > 0) {
         for (int y = ty0; y < ty1; ++y) {
             const size_t row = static_cast<size_t>(y) * static_cast<size_t>(st.work_cols);
             for (int x = tx0; x < tx1; ++x) {
-                const CcbTermCell &tc = st.curses_layer[row + static_cast<size_t>(x)];
-                if ((tc.flags & CCB_CELL_TERRAIN) == 0) {
+                const CcbTermCell &tc = st.work_cells[row + static_cast<size_t>(x)];
+                if ((tc.flags & (CCB_CELL_TERRAIN | CCB_CELL_CONT)) != CCB_CELL_TERRAIN) {
                     continue;
                 }
                 const uint64_t cell_pack = static_cast<uint64_t>(tc.codepoint)
@@ -612,9 +619,15 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
     const int tw_y = st.work_terrain_y;
     const int tw_w = st.work_terrain_w;
     const int tw_h = st.work_terrain_h;
+    const int tx0 = std::max(0, tw_x);
+    const int ty0 = std::max(0, tw_y);
+    const int tx1 = std::min(st.work_cols, tw_x + tw_w);
+    const int ty1 = std::min(st.work_rows, tw_y + tw_h);
     const int pos_cx = tw_w / 2;
     const int pos_cy = tw_h / 2;
     const uint32_t black_rgba = st.palette_rgba(0);
+    const uint32_t z_marker_fg = nc_color_to_rgba(c_green_cyan);
+    const uint32_t z_marker_bg = nc_color_bg_rgba(c_green_cyan);
 
     for (int ty = 0; ty < height; ++ty) {
         const int my = origin_y + ty;
@@ -730,13 +743,19 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                 }
             }
 
-            // Smart diff-based transient animation & overlay capture from w_terrain:
-            // Captures explosions, bullets, hit flashes, aiming/throw lines, zone rectangles,
-            // cursors, and unseen sound markers with ZERO false positives on rocks/flowers!
+            // Only sample exposed map cells; UI backgrounds are not world highlights.
             const int sx = tw_x + pos_cx + (mx - center.x());
             const int sy = tw_y + pos_cy + (my - center.y());
-            if (sx >= 0 && sx < st.work_cols && sy >= 0 && sy < st.work_rows) {
-                const CcbTermCell &tc = st.curses_layer[static_cast<size_t>(sy) * static_cast<size_t>(st.work_cols) + static_cast<size_t>(sx)];
+            const CcbTermCell *overlay_src = nullptr;
+            if (sx >= tx0 && sx < tx1 && sy >= ty0 && sy < ty1) {
+                const size_t idx = static_cast<size_t>(sy) * st.work_cols + sx;
+                const CcbTermCell &sample = st.work_cells[idx];
+                if ((sample.flags & (CCB_CELL_TERRAIN | CCB_CELL_CONT)) == CCB_CELL_TERRAIN) {
+                    overlay_src = &sample;
+                }
+            }
+            if (overlay_src != nullptr) {
+                const CcbTermCell &tc = *overlay_src;
                 const uint32_t bg_rgb = tc.bg_rgba & 0x00FFFFFFu;
                 const bool has_bg = (tc.bg_rgba != black_rgba && bg_rgb != 0u);
                 const uint8_t bg_r = static_cast<uint8_t>(tc.bg_rgba & 0xFFu);
@@ -751,7 +770,12 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                 const bool has_critter = (crit_it != critter_sym_at.end());
 
                 uint8_t ov_kind = CCB_OV_NONE;
-                if (!sees_tile && tc.codepoint == '?') {
+                if (is_adjacent_target(p)) {
+                    ov_kind = CCB_OV_ADJACENT;
+                } else if ((tc.codepoint == '^' || tc.codepoint == 'v') &&
+                           tc.fg_rgba == z_marker_fg && tc.bg_rgba == z_marker_bg) {
+                    ov_kind = CCB_OV_Z_CREATURE;
+                } else if (!sees_tile && tc.codepoint == '?') {
                     ov_kind = CCB_OV_SOUND;
                 } else if (tc.codepoint == 0x2199u || tc.codepoint == 0x2196u ||
                            tc.codepoint == 0x2198u || tc.codepoint == 0x2197u) {
@@ -1111,6 +1135,13 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                 dy = static_cast<float>(std::sin(rad));
                 cone_c = is_wide ? 0.48f : 0.78f; // ~61 deg wide floodlight vs ~39 deg focused headlight beam!
                 lflags |= CCB_LIGHT_FLAG_SPOTLIGHT;
+            } else if (vpi.has_flag(VPFLAG_CIRCLE_LIGHT) && !vpi.has_flag(VPFLAG_HALF_CIRCLE_LIGHT)) {
+                // Export both phases so the renderer can animate without advancing the simulation.
+                const bool odd = vpi.has_flag(VPFLAG_ODDTURN);
+                const bool even = vpi.has_flag(VPFLAG_EVENTURN);
+                if (odd != even) {
+                    lflags |= odd ? CCB_LIGHT_FLAG_STROBE_ODD : CCB_LIGHT_FLAG_STROBE_EVEN;
+                }
             }
             const float vlum = std::clamp(static_cast<float>(vpi.bonus) * (is_cone || is_wide ? 0.34f : 0.25f), 4.5f, 30.0f);
             out.lights.push_back(CcbWorldLight{

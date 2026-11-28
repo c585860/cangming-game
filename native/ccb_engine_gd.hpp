@@ -38,6 +38,7 @@ public:
 
     int64_t get_generation() const;
     int64_t get_world_generation() const;
+    int take_map_zoom_steps() const;
     int64_t get_scene3d_generation() const;
     int64_t get_audio_generation() const;
     void set_world_capture_radius(int rad_x, int rad_y);

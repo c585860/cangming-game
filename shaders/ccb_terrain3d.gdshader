@@ -384,7 +384,7 @@ void fragment() {
 						ao *= mix(0.72, 1.04, smoothstep(0.0, 0.42, h_norm));
 						if (!indoors && !is_under) {
 							// Exterior upper wall catches direct sun/sky cleanly even when base is shaded
-							float upper_sun = max(dot(n, sun_g), 0.0) * sun_energy * smoothstep(0.25, 0.85, h_norm) * 0.35;
+							float upper_sun = max(dot(n, sun_g), 0.0) * sun_energy * sun_vis * smoothstep(0.25, 0.85, h_norm) * 0.18;
 							direct_light += sun_col * upper_sun;
 						}
 					}
@@ -449,14 +449,14 @@ void fragment() {
 			float sky_day = clamp(sky_energy, 0.0, 1.0);
 			vec3 base_ambient;
 			if (is_under) {
-				base_ambient = vec3(0.06, 0.068, 0.088);
+				base_ambient = vec3(0.070, 0.075, 0.088);
 			} else if (indoors) {
-				base_ambient = mix(vec3(0.055, 0.064, 0.090), vec3(0.155, 0.152, 0.158), sky_day);
+				base_ambient = mix(vec3(0.075, 0.082, 0.100), vec3(0.218, 0.211, 0.207), sky_day);
 			} else {
 				base_ambient = mix(vec3(0.055, 0.078, 0.138), sky_col * 0.14, sky_day);
 			}
 
-			float gi_gain = is_vert_face ? 1.12 : (indoors ? 1.08 : 0.90);
+			float gi_gain = is_vert_face ? 0.75 : (indoors ? 1.21 : 0.90);
 			vec3 incident = (base_ambient + gi_light * gi_gain) * ao + direct_light;
 			if (is_creature_or_char) {
 				incident = max(incident, vec3(0.24, 0.26, 0.31));
@@ -473,7 +473,7 @@ void fragment() {
 					lit += sun_col * spec_m + sky_col * (sky_energy * 0.08 * (1.0 - max(dot(n, view_dir), 0.0)));
 				} else if (mat_id == 3) {
 					float fres = pow(1.0 - max(dot(n, view_dir), 0.0), 3.0);
-					lit += sun_col * (pow(ndh, 48.0) * sun_vis * sun_energy * 0.75) + sky_col * (fres * (0.25 + 0.45 * sky_energy));
+					lit += sun_col * (pow(ndh, 48.0) * sun_vis * sun_energy * 0.42) + sky_col * (fres * (0.06 + 0.24 * sky_energy));
 				} else if (mat_id == 4 && is_horiz_top) {
 					float blue_lead = (raw.b - raw.r) + 0.35 * (raw.g - raw.r);
 					float water_mask = smoothstep(0.015, 0.14, blue_lead) * smoothstep(0.04, 0.18, raw.b + raw.g);
@@ -519,7 +519,11 @@ void fragment() {
 			}
 
 			// Volumetric doorway bounce bloom & ACES filmic tone mapping
-			lit += gi_light * (indoors ? 0.14 : 0.04);
+			lit += gi_light * (is_vert_face ? 0.03 : (indoors ? 0.14 : 0.04));
+			if (is_vert_face) {
+				float peak = max(lit.r, max(lit.g, lit.b));
+				lit /= 1.0 + max(0.0, peak - 0.26) * 0.70;
+			}
 			out_rgb = filmic_tone_map(lit);
 
 			// ---- REAL 3D ATMOSPHERIC DISTANCE FOG / MIST ----

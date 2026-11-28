@@ -64,6 +64,9 @@ void BridgeState::push_audio_event(uint8_t kind, uint8_t subtype, int x, int y, 
                                    float volume, float pan, float radius,
                                    uint64_t burst_id, uint16_t rpm, uint16_t delay_ms,
                                    uint8_t shot_index, uint8_t flags) {
+    if (kind != CCB_SFX_GUNSHOT) {
+        return;
+    }
     CcbAudioEvent ev{};
     ev.id = next_audio_id.fetch_add(1, std::memory_order_relaxed);
     ev.burst_id = burst_id;

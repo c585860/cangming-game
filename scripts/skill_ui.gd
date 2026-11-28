@@ -335,7 +335,6 @@ static func exert_panel(game: Control, contents: VBoxContainer) -> void:
 		var cb := func():
 			var res: Dictionary = game.net_session.dispatch_action(world, {"type": "exert", "kind": kind})
 			game._note(str(res.get("message", "")))
-			game._play_sfx("meditate")
 			game._refresh()
 			game._reopen_overlay("exert")
 		var btn: Button = game._button(col, lbl, cb, ok)

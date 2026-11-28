@@ -54,7 +54,6 @@ static func open_panel(game: Control, contents: VBoxContainer, npc_pos: Vector2i
 			var cb := func():
 				var msg: String = world.bank_deposit(npc_pos, amt) if is_dep else world.bank_withdraw(npc_pos, amt)
 				game._note(msg)
-				game._play_sfx("coin")
 				game._refresh()
 				game._reopen_overlay("shop", npc_pos)
 			var btn: Button = game._button(box, label, cb, is_dep and coins > 0)
@@ -70,7 +69,6 @@ static func open_panel(game: Control, contents: VBoxContainer, npc_pos: Vector2i
 		var inn_txt := "[R] 悦来客栈二楼上房：已开房（卧榻恢复翻倍且驱寒）" if inn_active else "[R] 花费 5 文铜钱租下二楼上房（24时辰内卧榻恢复翻倍+驱寒）"
 		var rent_cb := func():
 			game._note(world.rent_inn_room_at(npc_pos))
-			game._play_sfx("coin")
 			game._refresh()
 			game._reopen_overlay("shop", npc_pos)
 		var rbtn: Button = game._button(inn_row, inn_txt, rent_cb, not inn_active)
@@ -123,7 +121,6 @@ static func open_panel(game: Control, contents: VBoxContainer, npc_pos: Vector2i
 			]
 			var buy_cb := func():
 				game._note(world.buy_item_from(npc_pos, item_id))
-				game._play_sfx("coin")
 				game._refresh()
 				game._reopen_overlay("shop", npc_pos)
 			var btn: Button = game._button(list_box, txt, buy_cb, afford)
@@ -148,7 +145,6 @@ static func open_panel(game: Control, contents: VBoxContainer, npc_pos: Vector2i
 			]
 			var sell_cb := func():
 				game._note(world.sell_item_to(npc_pos, item_id))
-				game._play_sfx("coin")
 				game._refresh()
 				game._reopen_overlay("shop", npc_pos)
 			var btn: Button = game._button(list_box, txt, sell_cb, true)

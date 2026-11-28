@@ -27,7 +27,6 @@ signal join_coop_requested(address: String, port: int, player_name: String)
 signal tileset_changed_requested(tileset_name: String)
 signal sidebar_style_changed_requested(style_name: String)
 signal toggle_roofs_requested()
-signal toggle_audio_requested()
 signal quit_requested()
 
 const PRIMARY_TABS := [
@@ -35,7 +34,7 @@ const PRIMARY_TABS := [
 	{"id": "coop",  "label": "联机合作 <O>", "key": "o", "hint": "主持或加入 ENet 多人合作会话。"},
 	{"id": "load",  "label": "载入 <A>",     "key": "a", "hint": "读取已有角色存档继续冒险。"},
 	{"id": "world", "label": "世界 <W>",     "key": "w", "hint": "创建、切换、重置或删除世界（支持大灾变 CCB 原版与沧溟修真核心包）。"},
-	{"id": "opts",  "label": "设置 <T>",     "key": "t", "hint": "原版材质包、侧边栏风格、小地图与音效选项。"},
+	{"id": "opts",  "label": "设置 <T>",     "key": "t", "hint": "原版材质包、侧边栏风格与小地图选项。"},
 	{"id": "other", "label": "其他 <E>",     "key": "e", "hint": "查看每日消息 (MOTD)、按键帮助与制作人员。"},
 	{"id": "quit",  "label": "退出 <Q>",     "key": "q", "hint": "退出游戏返回桌面。", "danger": true},
 ]
@@ -317,12 +316,10 @@ func _rebuild_submenu() -> void:
 						int(wi.get("seed", 0)), int(wi.get("city_size", 8)), int(wi.get("city_spacing", 4)), float(wi.get("monster_rate", 1.0))
 					], func(): _open_world_actions_modal(widx), VUI.C_LTCYAN if i == active_world_idx else VUI.C_LTGRAY)
 		"opts":
-			_add_sub("选项（材质包 / 侧边栏 / 音效）<o>", "o", "切换原版 gfx 材质包、侧边栏布局（classic/structured/compact）与环境音效。", func():
+			_add_sub("选项（材质包 / 侧边栏）<o>", "o", "切换原版 gfx 材质包与侧边栏布局（classic/structured/compact）。", func():
 				_open_options_modal())
 			_add_sub("键位一览 <y>", "y", "查看大灾变 CCB 完整原版键位表。", func():
 				_open_help_modal())
-			_add_sub("切换环境音效 <m>", "m", "静音或开启环境音效。", func():
-				toggle_audio_requested.emit())
 		"other":
 			_add_sub("每日消息 (MOTD) <m>", "m", "阅读原版 data/motd/zh_CN.motd 公告。", func():
 				_open_motd_modal())

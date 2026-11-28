@@ -22,7 +22,6 @@ const NetSession = preload("res://scripts/net_session.gd")
 const SkillUI = preload("res://scripts/skill_ui.gd")
 const ShopUI = preload("res://scripts/shop_ui.gd")
 const CraftUI = preload("res://scripts/craft_ui.gd")
-const AudioAmbience = preload("res://scripts/audio_ambience.gd")
 const MainMenu = preload("res://scripts/main_menu.gd")
 const CCBVanillaUI = preload("res://scripts/ccb_vanilla_ui.gd")
 const CCBVTheme = preload("res://scripts/ccb_vanilla_theme.gd")
@@ -35,7 +34,6 @@ var world := World.new()
 var weather := Weather.new()
 var move_input := MoveInput.new()
 var net_session := NetSession.new()
-var audio_ambience: Node
 var skill_tab := "wuxue"
 var selected_skill_id := ""
 var shop_mode := "buy"
@@ -99,9 +97,11 @@ var wait_timer: Timer
 var wait_remaining := 0
 var period_timer: Timer
 var period_key: Key = KEY_NONE
+var _quitting := false
 
 
 func _ready() -> void:
+	get_tree().auto_accept_quit = false
 	DisplayServer.window_set_title("Cataclysm:EmperorCOOP 2.0")
 	if FileAccess.file_exists("res://art/app_icon.png"):
 		var icon_bytes := FileAccess.get_file_as_bytes("res://art/app_icon.png")
@@ -115,11 +115,14 @@ func _ready() -> void:
 		if ff.load_dynamic_font("res://art/fonts/unifont.ttf") == OK:
 			ff.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
 			ff.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
-			ff.hinting = TextServer.HINTING_LIGHT
+			ff.hinting = TextServer.HINTING_NORMAL
 			ui_font = ff
 	if ui_font == null:
 		var fallback := SystemFont.new()
 		fallback.font_names = PackedStringArray(["Unifont", "Consolas", "Microsoft YaHei UI", "Noto Sans CJK SC", "monospace"])
+		fallback.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
+		fallback.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
+		fallback.hinting = TextServer.HINTING_NORMAL
 		ui_font = fallback
 	_ui_font = ui_font
 	theme = Theme.new()
@@ -142,8 +145,6 @@ func _ensure_legacy_pack_ready() -> void:
 	weather.sync(CanglingCalendar.at_minute(world.minutes), world.seed, true)
 	_build_ui()
 	_wire_net_session()
-	audio_ambience = AudioAmbience.new()
-	add_child(audio_ambience)
 	_build_main_menu()
 	if ccb_native_host != null and ccb_native_host.get_parent() == self:
 		move_child(ccb_native_host, get_child_count() - 1)
@@ -165,6 +166,7 @@ func _build_ccb_native_host(ui_font: Font) -> void:
 	add_child(ccb_native_host)
 	ccb_native_host.build(ui_font)
 	ccb_native_host.return_to_launcher_requested.connect(_on_ccb_native_returned_to_launcher)
+	ccb_native_host.quit_requested.connect(_quit_application)
 
 
 func launch_ccb_native() -> bool:
@@ -194,9 +196,17 @@ func _on_ccb_native_returned_to_launcher() -> void:
 
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
-		if ccb_native_host != null:
-			ccb_native_host.shutdown_engine()
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_quit_application.call_deferred()
+
+
+func _quit_application() -> void:
+	if _quitting or not is_inside_tree():
+		return
+	_quitting = true
+	if is_instance_valid(ccb_native_host):
+		ccb_native_host.shutdown_engine()
+	get_tree().quit()
 
 
 func _build_main_menu() -> void:
@@ -229,11 +239,7 @@ func _build_main_menu() -> void:
 		_refresh())
 	main_menu.toggle_roofs_requested.connect(func():
 		_debug_toggle_roofs())
-	main_menu.toggle_audio_requested.connect(func():
-		if audio_ambience != null and audio_ambience.has_method("toggle_mute"):
-			audio_ambience.toggle_mute())
-	main_menu.quit_requested.connect(func():
-		get_tree().quit())
+	main_menu.quit_requested.connect(_quit_application)
 	in_main_menu = true
 	main_menu.visible = true
 
@@ -481,7 +487,7 @@ func _process(delta: float) -> void:
 			if realtime_clock_accum >= 1.0:
 				var whole_mins := int(realtime_clock_accum)
 				realtime_clock_accum -= float(whole_mins)
-				_sync_env_and_audio()
+				_sync_environment()
 				world.advance_time(whole_mins)
 				_refresh()
 	# Active Real-Time Sparring Loop (classic Wuxia MUD 1.3s/round exchanges!)
@@ -495,7 +501,6 @@ func _process(delta: float) -> void:
 				var msg: String = str(r.get("message", ""))
 				if not msg.is_empty():
 					_note(msg)
-				_play_sfx("clash" if ("格" in msg or "架" in msg or "闪" in msg) else "hit")
 				if bool(r.get("finished", false)):
 					_set_prompt("")
 				else:
@@ -613,12 +618,7 @@ func _floor_name(z: int) -> String:
 	return "Z=%d" % z
 
 
-func _play_sfx(kind: String) -> void:
-	if audio_ambience != null and audio_ambience.has_method("play_sfx"):
-		audio_ambience.play_sfx(kind)
-
-
-func _sync_env_and_audio() -> void:
+func _sync_environment() -> void:
 	var sky := CanglingCalendar.at_minute(world.minutes)
 	var base_c := 16.0
 	match str(sky.get("season", "春")):
@@ -630,28 +630,12 @@ func _sync_env_and_audio() -> void:
 	var diurnal := -4.5 * cos((hr - 14.0) * PI / 12.0)
 	var weather_chill := -3.2 * float(weather.rain) - 5.5 * float(weather.snow)
 	world.sync_environment(base_c + diurnal + weather_chill, float(weather.rain))
-	if audio_ambience != null and audio_ambience.has_method("set_environment"):
-		var indoors := false
-		var p: Vector2i = world.pos
-		if board != null and board.cells.has(p):
-			indoors = (int(board.cells[p][3]) & 1) != 0
-		var near_w := 0.0
-		if world.floor == 0:
-			for dy in range(-3, 4):
-				for dx in range(-3, 4):
-					var t: String = world.terrain_at(p + Vector2i(dx, dy))
-					if t == "W" or t == "~":
-						near_w = 0.8
-						break
-				if near_w > 0.0:
-					break
-		audio_ambience.set_environment(float(weather.rain), near_w, indoors)
 
 
 func _refresh() -> void:
 	var sky := CanglingCalendar.at_minute(world.minutes)
 	weather.sync(sky, world.seed, false)
-	_sync_env_and_audio()
+	_sync_environment()
 	board.follow(world.pos if look_at == NONE else look_at)
 	if world.is_cataclysm_pack():
 		if ccb_sidebar != null:
@@ -773,12 +757,7 @@ func _move_one(next: Vector2i) -> bool:
 			_note("前方是关闭的雕花木窗（按 o 推开，或按 s 砸碎）。")
 		return false
 	if opens_door:
-		_play_sfx("door")
 		net_session.broadcast_world_mutation({"kind": "door_open", "pos": next, "floor": int(world.floor)})
-	elif weather != null and float(weather.wetness) > 0.35 and not bool(world.character_status().get("is_indoors", false)):
-		_play_sfx("step_puddle")
-	else:
-		_play_sfx("step_stone")
 	_drain_ccb_messages()
 	if opens_door or was_grabbing:
 		board.invalidate_lightmap()
@@ -1338,7 +1317,6 @@ func _finish_timed_task() -> void:
 		work_elapsed = 0.0
 		var r: Dictionary = world.dazuo_cycle()
 		_note(str(r.get("message", "")))
-		_play_sfx("meditate")
 		if not bool(r.get("continue", false)):
 			_cancel_workstation(false)
 		_refresh()
@@ -1350,15 +1328,12 @@ func _finish_timed_task() -> void:
 	if kind == "workstation":
 		var res: Dictionary = net_session.dispatch_action(world, {"type": "workstation", "target": target})
 		_note(str(res.get("message", "")))
-		_play_sfx("work")
 	elif kind == "craft":
 		var res: Dictionary = net_session.dispatch_action(world, {"type": "craft", "recipe_id": rid})
 		_note(str(res.get("message", "")))
-		_play_sfx("work")
 	elif kind == "study":
 		var res: Dictionary = net_session.dispatch_action(world, {"type": "study_book", "item_id": iid})
 		_note(str(res.get("message", "")))
-		_play_sfx("book")
 	_refresh()
 
 
@@ -1436,7 +1411,6 @@ func _start_dazuo() -> void:
 		board.work_progress = 0.02
 		board.work_label = work_label
 		board.markers.queue_redraw()
-	_play_sfx("meditate")
 	_set_prompt("盘膝打坐运周天中（满内力后可冲关提上限，移动或 Esc 收功）...")
 
 
@@ -1451,13 +1425,11 @@ func _perform_action(position: Vector2i, action: String) -> void:
 			_show_overlay("missions")
 		"bounty_turnin":
 			_note(world.turn_in_bounty(position))
-			_play_sfx("coin")
 		"spar":
 			var sr: Dictionary = world.start_spar(position)
 			_note(str(sr.get("message", "")))
 			if bool(sr.get("ok", false)):
 				spar_accum = 0.65
-				_play_sfx("clash")
 				_set_prompt("切磋开始！（每 1.3 秒交手一合，按 U 调加力，Esc 或走开收招）")
 		"workstation":
 			_start_workstation(position)
@@ -1671,10 +1643,6 @@ func _run_ccb_action(act_id: String) -> void:
 			if world.is_cataclysm_pack() and ccb_sidebar != null:
 				var on: bool = ccb_sidebar.toggle_pixel_minimap()
 				_note("像素小地图已%s。" % ("开启" if on else "关闭"))
-		"toggle_audio":
-			if audio_ambience != null and audio_ambience.has_method("toggle_mute"):
-				var is_m: bool = audio_ambience.toggle_mute()
-				_note("江南环境声景与交互音效已%s。" % ("静音" if is_m else "开启"))
 		"drop":
 			_show_overlay("inventory", world.pos)
 		"open", "close", "smash", "examine", "grab", "drop_dir", "peek", "chat":

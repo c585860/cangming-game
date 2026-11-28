@@ -39,6 +39,7 @@ struct BridgeFuncs {
     int (*ccb_get_loading_state)(CcbLoadingState *) = nullptr;
     uint64_t (*ccb_get_generation)(void) = nullptr;
     uint64_t (*ccb_get_world_generation)(void) = nullptr;
+    int (*ccb_take_map_zoom_steps)(void) = nullptr;
     uint64_t (*ccb_get_scene3d_generation)(void) = nullptr;
     uint64_t (*ccb_get_audio_generation)(void) = nullptr;
     void (*ccb_set_world_capture_radius)(int, int) = nullptr;
@@ -128,6 +129,7 @@ bool ensure_bridge_loaded(std::string &err_out) {
     ok &= resolve_sym(mod, "ccb_get_loading_state", g_bridge.ccb_get_loading_state);
     ok &= resolve_sym(mod, "ccb_get_generation", g_bridge.ccb_get_generation);
     ok &= resolve_sym(mod, "ccb_get_world_generation", g_bridge.ccb_get_world_generation);
+    resolve_sym(mod, "ccb_take_map_zoom_steps", g_bridge.ccb_take_map_zoom_steps);
     ok &= resolve_sym(mod, "ccb_get_scene3d_generation", g_bridge.ccb_get_scene3d_generation);
     ok &= resolve_sym(mod, "ccb_get_audio_generation", g_bridge.ccb_get_audio_generation);
     ok &= resolve_sym(mod, "ccb_set_world_capture_radius", g_bridge.ccb_set_world_capture_radius);
@@ -257,6 +259,10 @@ int64_t CcbEngine::get_generation() const {
 int64_t CcbEngine::get_world_generation() const {
     if (!g_bridge.loaded || !g_bridge.ccb_get_world_generation) return get_generation();
     return static_cast<int64_t>(g_bridge.ccb_get_world_generation());
+}
+
+int CcbEngine::take_map_zoom_steps() const {
+    return g_bridge.loaded && g_bridge.ccb_take_map_zoom_steps ? g_bridge.ccb_take_map_zoom_steps() : 0;
 }
 
 int64_t CcbEngine::get_scene3d_generation() const {
@@ -543,6 +549,7 @@ godot::Dictionary CcbEngine::poll_world_snapshot() {
         const auto &l = light_buf_[static_cast<size_t>(i)];
         fnv_mix(static_cast<uint64_t>(static_cast<uint32_t>(l.x)) | (static_cast<uint64_t>(static_cast<uint32_t>(l.y)) << 32));
         fnv_mix(static_cast<uint64_t>(l.color_rgba) | (static_cast<uint64_t>(static_cast<int>(l.intensity * 10.0f)) << 32));
+        fnv_mix(static_cast<uint64_t>(l.flags));
     }
 
     // Creatures
@@ -974,6 +981,7 @@ void CcbEngine::_bind_methods() {
     ClassDB::bind_method(D_METHOD("resize", "cols", "rows"), &CcbEngine::resize);
     ClassDB::bind_method(D_METHOD("get_generation"), &CcbEngine::get_generation);
     ClassDB::bind_method(D_METHOD("get_world_generation"), &CcbEngine::get_world_generation);
+    ClassDB::bind_method(D_METHOD("take_map_zoom_steps"), &CcbEngine::take_map_zoom_steps);
     ClassDB::bind_method(D_METHOD("get_scene3d_generation"), &CcbEngine::get_scene3d_generation);
     ClassDB::bind_method(D_METHOD("get_audio_generation"), &CcbEngine::get_audio_generation);
     ClassDB::bind_method(D_METHOD("set_world_capture_radius", "rad_x", "rad_y"), &CcbEngine::set_world_capture_radius);
