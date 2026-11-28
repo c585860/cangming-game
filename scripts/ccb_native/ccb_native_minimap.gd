@@ -4,6 +4,7 @@ extends PanelContainer
 
 var _tex_rect: TextureRect
 var _tex: ImageTexture
+var _last_seq := -1
 var enabled := true
 
 
@@ -31,17 +32,24 @@ func update_minimap(snap: Dictionary, terrain_rect_px: Rect2) -> void:
 		visible = false
 		return
 	var sz := int(snap.get("minimap_size", 0))
-	var rgba: PackedByteArray = snap.get("minimap_rgba", PackedByteArray())
-	if sz <= 0 or rgba.size() < sz * sz * 4:
+	if sz <= 0:
 		visible = false
 		return
-
-	var img := Image.create_from_data(sz, sz, false, Image.FORMAT_RGBA8, rgba)
-	if _tex == null or _tex.get_size() != Vector2(sz, sz):
-		_tex = ImageTexture.create_from_image(img)
-		_tex_rect.texture = _tex
-	else:
-		_tex.update(img)
+	var seq := int(snap.get("minimap_seq", -1))
+	var changed := bool(snap.get("minimap_changed", true)) or (_tex == null) or (seq != _last_seq)
+	if changed:
+		var rgba: PackedByteArray = snap.get("minimap_rgba", PackedByteArray())
+		if rgba.size() >= sz * sz * 4:
+			var img := Image.create_from_data(sz, sz, false, Image.FORMAT_RGBA8, rgba)
+			if _tex == null or _tex.get_size() != Vector2(sz, sz):
+				_tex = ImageTexture.create_from_image(img)
+				_tex_rect.texture = _tex
+			else:
+				_tex.update(img)
+			_last_seq = seq
+		elif _tex == null:
+			visible = false
+			return
 
 	# Dock cleanly in the bottom-left corner of the GPU map viewport so it NEVER overlaps CCB's sidebar or message log!
 	var box := clampf(minf(terrain_rect_px.size.x, terrain_rect_px.size.y) * 0.26, 128.0, 168.0)

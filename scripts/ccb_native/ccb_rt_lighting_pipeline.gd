@@ -69,7 +69,13 @@ var _light_world_min := Vector2(-9999.0, -9999.0)
 var _light_world_span := Vector2(36.0, 28.0)
 var _screen_px := Vector2(960.0, 640.0)
 var _wind_time := 0.0
+var _wind_dir := Vector2(0.85, 0.25)
+var _wind_speed := 4.0
+var _cloud_accum := 0.0
+var _last_season := 0
 var _player_world := Vector2.ZERO
+var _prev_player_tile := Vector2i(-99999, -99999)
+var _player_facing := Vector2(1.0, 0.0)
 var _player_light := 0.0
 var _last_sight_eye := Vector2(-9999.0, -9999.0)
 var _last_z := 0
@@ -81,6 +87,9 @@ var _astro_dirty := false
 var _last_world_light_sig := ""
 var _last_grid_origin := Vector2(-9999.0, -9999.0)
 var _last_vis_sig := -1
+var _base_world_lights: Array = []
+var _transient_vfx_lights: Array = []
+var _had_transient_lights := false
 var _weather := WeatherState.new()
 var world_light_dispatches := 0
 var sight_dispatches := 0
@@ -110,6 +119,8 @@ class WeatherState extends RefCounted:
 	var wetness := 0.0
 	var snow_cover := 0.0
 	var mist := 0.2
+	var special_tint := Vector3.ZERO
+	var special_strength := 0.0
 
 
 static func _upload(existing: ImageTexture, img: Image) -> ImageTexture:
@@ -257,6 +268,24 @@ func _schedule_world_light_passes() -> void:
 		blur_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
+# Lightweight Direct-Only refresh for slow-drifting cloud shadows (skips expensive 32-ray GI & bilateral blur!)
+func _schedule_direct_only_pass() -> void:
+	world_light_dispatches += 1
+	if direct_viewport != null:
+		direct_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+
+
+func is_actively_animating() -> bool:
+	if _had_transient_lights or not _transient_vfx_lights.is_empty():
+		return true
+	if _smooth_init:
+		var diff := absf(_cur_sun_energy - _tgt_sun_energy) + absf(_cur_sky_energy - _tgt_sky_energy) \
+			+ absf(_cur_moon_energy - _tgt_moon_energy) + _cur_sun_ray.distance_to(_tgt_sun_ray)
+		if diff > 0.004:
+			return true
+	return false
+
+
 func _schedule_sight_pass() -> void:
 	sight_dispatches += 1
 	if sight_viewport != null:
@@ -279,6 +308,42 @@ func get_weather_state() -> WeatherState:
 
 func get_daylight() -> float:
 	return _cur_daylight
+
+
+func get_3d_lighting_bundle() -> Dictionary:
+	return {
+		"valid": _area.has_area() and _tex_geom != null and direct_viewport != null and blur_viewport != null,
+		"dispatch_id": world_light_dispatches,
+		"direct_tex": direct_viewport.get_texture() if direct_viewport != null else null,
+		"gi_tex": blur_viewport.get_texture() if blur_viewport != null else null,
+		"geom_tex": _tex_geom,
+		"mat_tex": _tex_mat,
+		"light_min": _light_world_min,
+		"light_span": _light_world_span,
+		"grid_origin": Vector2(_area.position),
+		"grid_size": Vector2(_area.size),
+		"sun_ray": _cur_sun_ray,
+		"sun_color": _cur_sun_col,
+		"sun_energy": _cur_sun_energy,
+		"sky_color": _cur_sky_col,
+		"sky_energy": _cur_sky_energy,
+		"moon_energy": _cur_moon_energy,
+		"daylight": _cur_daylight,
+		"is_underground": _last_z < 0,
+		"wind_time": _wind_time,
+		"player_light": _player_light,
+		"player_world": _player_world,
+		"player_light_cone": _get_player_light_cone_vec4(),
+		"wind_dir": _wind_dir,
+		"wind_speed": _wind_speed,
+		"season": _last_season,
+		"rain": _weather.rain,
+		"snow": _weather.snow,
+		"cloud": _weather.cloud,
+		"wetness": _weather.wetness,
+		"snow_cover": _weather.snow_cover,
+		"mist": _weather.mist,
+	}
 
 
 func trigger_mask_redraw() -> void:
@@ -352,8 +417,9 @@ func sync_view(view_world_min: Vector2, view_span_tiles: Vector2, screen_px: Vec
 func tick(delta: float) -> void:
 	if not _area.has_area() or _comp_mat == null:
 		return
-	# Only mutate wind_time uniform when water, wet rain puddles, or flickering handheld light actually animate!
-	if _has_water or _weather.wetness > 0.04 or _player_light > 0.6 or _has_flicker_lights:
+	var clouds_moving := (_last_z >= 0) and (_cur_sun_energy > 0.02) and (_weather.cloud > 0.10)
+	# Only mutate wind_time uniform when water, wet rain puddles, moving cloud shadows, or active lights animate!
+	if _has_water or _weather.wetness > 0.04 or _player_light > 0.6 or _has_flicker_lights or clouds_moving:
 		_wind_time += delta
 		_comp_mat.set_shader_parameter("wind_time", _wind_time)
 
@@ -386,7 +452,7 @@ func tick(delta: float) -> void:
 			_astro_dirty = false
 			changed_astro = true
 
-	# Refresh decoupled world lightmaps ONLY when sun/dusk is actively moving OR flickering fires need ~15Hz update!
+	# Refresh decoupled world lightmaps when sun/dusk moves, fires flicker (~15Hz), or cloud shadows drift (~10Hz)!
 	if changed_astro:
 		_direct_mat.set_shader_parameter("wind_time", _wind_time)
 		_schedule_world_light_passes()
@@ -396,6 +462,12 @@ func tick(delta: float) -> void:
 			_flicker_accum = 0.0
 			_direct_mat.set_shader_parameter("wind_time", _wind_time)
 			_schedule_world_light_passes()
+	elif clouds_moving:
+		_cloud_accum += delta
+		if _cloud_accum >= 0.22: # ~4.5Hz smooth drifting cloud shadows; Pass 1 Direct ONLY (skips 32-ray GI!)
+			_cloud_accum = 0.0
+			_direct_mat.set_shader_parameter("wind_time", _wind_time)
+			_schedule_direct_only_pass()
 
 
 func update_from_snapshot(snap: Dictionary, view_world_min: Vector2, view_span_tiles: Vector2,
@@ -411,11 +483,26 @@ func update_from_snapshot(snap: Dictionary, view_world_min: Vector2, view_span_t
 	_area = Rect2i(origin, grid_sz)
 	var player_i: Vector2i = snap.get("player", origin + grid_sz / 2)
 	_player_world = Vector2(player_i)
+	if _prev_player_tile.x > -90000 and player_i != _prev_player_tile:
+		var step_v := Vector2(player_i - _prev_player_tile)
+		if step_v.length_squared() >= 0.5 and step_v.length_squared() <= 16.0:
+			_player_facing = step_v.normalized()
+	_prev_player_tile = player_i
+	if bool(snap.get("is_looking", false)):
+		var look_v := Vector2(snap.get("center", player_i) - player_i)
+		if look_v.length_squared() >= 0.5:
+			_player_facing = look_v.normalized()
 	var z: int = int(snap.get("z", 0))
 	var is_under: bool = bool(snap.get("is_underground", false)) or z < 0
 	_has_water = bool(snap.get("has_water", false))
+	_last_season = clampi(int(snap.get("season", 0)), 0, 3)
+	var wx := float(snap.get("wind_x", 0.85))
+	var wy := float(snap.get("wind_y", 0.25))
+	var wv := Vector2(wx, wy)
+	_wind_dir = wv.normalized() if wv.length_squared() > 0.001 else Vector2(0.85, 0.25)
+	_wind_speed = maxf(0.0, float(snap.get("wind_speed", 4.0)))
 
-	_update_weather_state(str(snap.get("weather", "clear")), int(snap.get("season", 0)), is_under)
+	_update_weather_state(str(snap.get("weather", "clear")), _last_season, is_under)
 
 	# 1. Astronomical Sun / Moon / Sky parameters from genuine CCB time, season & continuous daylight_level
 	var season_i := clampi(int(snap.get("season", 0)), 0, 3)
@@ -450,6 +537,9 @@ func update_from_snapshot(snap: Dictionary, view_world_min: Vector2, view_span_t
 	_direct_mat.set_shader_parameter("is_underground", is_under)
 	_direct_mat.set_shader_parameter("cloud_cover", _weather.cloud)
 	_direct_mat.set_shader_parameter("wind_time", _wind_time)
+	_direct_mat.set_shader_parameter("wind_dir", _wind_dir)
+	_direct_mat.set_shader_parameter("wind_speed", _wind_speed)
+	_direct_mat.set_shader_parameter("mist_level", _weather.mist)
 
 	_gi_mat.set_shader_parameter("geom_tex", _tex_geom)
 	_gi_mat.set_shader_parameter("mat_tex", _tex_mat)
@@ -499,8 +589,9 @@ func update_from_snapshot(snap: Dictionary, view_world_min: Vector2, view_span_t
 			_astro_dirty = true
 	_push_astro_uniforms()
 
-	# 4. Upload up to 16 nearest genuine world-space CCB physical emitters
-	_upload_point_lights(snap.get("lights", []), _player_world)
+	# 4. Upload up to 16 nearest genuine world-space CCB physical emitters (+ live transient gunfire/explosion flashes!)
+	_base_world_lights = snap.get("lights", [])
+	_upload_point_lights(_base_world_lights, _player_world)
 	var light_rect_changed := sync_view(view_world_min, view_span_tiles, screen_px, tile_px)
 
 	# 5. Smart Dirty Scheduling: skip Pass 1/2/2B completely when walking within the 4-tile coarse lightmap box
@@ -573,6 +664,9 @@ func _compute_astro_targets(sky: Dictionary, is_under: bool, ccb_daylight: float
 	base_sky = base_sky.lerp(Vector3(0.76, 0.83, 0.89), _weather.cloud * 0.42)
 	base_sky = base_sky.lerp(Vector3(0.70, 0.79, 0.86), _weather.rain * 0.42)
 	base_sky = base_sky.lerp(Vector3(0.86, 0.92, 0.98), _weather.snow * 0.45)
+	if _weather.special_strength > 0.01:
+		base_sky = base_sky.lerp(_weather.special_tint, _weather.special_strength)
+		_tgt_sun_col = _tgt_sun_col.lerp(_weather.special_tint, _weather.special_strength * 0.72)
 	_tgt_sky_col = base_sky
 
 	var s_name := str(sky.season)
@@ -606,6 +700,17 @@ func _push_astro_uniforms() -> void:
 	_comp_mat.set_shader_parameter("sky_energy", _cur_sky_energy)
 
 
+func set_transient_vfx_lights(vfx_lights: Array) -> void:
+	var has_now := not vfx_lights.is_empty()
+	if not has_now and not _had_transient_lights:
+		return
+	_transient_vfx_lights = vfx_lights
+	_had_transient_lights = has_now
+	if _area.has_area() and _direct_mat != null:
+		_upload_point_lights(_base_world_lights, _player_world)
+		_schedule_world_light_passes()
+
+
 func _upload_point_lights(lights: Array, focus_pos: Vector2) -> void:
 	var ranked: Array = []
 	for l_var in lights:
@@ -617,46 +722,98 @@ func _upload_point_lights(lights: Array, focus_pos: Vector2) -> void:
 
 	var pos_rad: Array[Vector4] = []
 	var col_mode: Array[Vector4] = []
+	var cone_arr: Array[Vector4] = []
 	pos_rad.resize(MAX_POINT_LIGHTS)
 	col_mode.resize(MAX_POINT_LIGHTS)
+	cone_arr.resize(MAX_POINT_LIGHTS)
 	pos_rad.fill(Vector4.ZERO)
 	col_mode.fill(Vector4.ZERO)
+	cone_arr.fill(Vector4(0.0, 0.0, -1.0, 0.0))
 
 	_has_flicker_lights = false
-	var count := mini(ranked.size(), MAX_POINT_LIGHTS)
-	for i in range(count):
+	var idx := 0
+	# Give live gunfire muzzle flashes & explosions top priority slots in the 16-light HDR GPU pass!
+	for v_var in _transient_vfx_lights:
+		if idx >= MAX_POINT_LIGHTS:
+			break
+		var vd: Dictionary = v_var
+		var vp: Vector2 = vd.get("pos", focus_pos)
+		var vcol: Color = vd.get("color", Color(1.0, 0.72, 0.28))
+		var vrad: float = float(vd.get("radius", 8.0))
+		var veng: float = float(vd.get("energy", 18.0))
+		if veng <= 0.15:
+			continue
+		pos_rad[idx] = Vector4(vp.x, vp.y, vrad, veng)
+		col_mode[idx] = Vector4(vcol.r, vcol.g, vcol.b, 0.0)
+		cone_arr[idx] = Vector4(0.0, 0.0, -1.0, 0.0)
+		idx += 1
+
+	var rem := mini(ranked.size(), MAX_POINT_LIGHTS - idx)
+	for i in range(rem):
 		var ld: Dictionary = ranked[i][1]
 		var pos: Vector2 = ranked[i][2]
 		var inten := float(ld.get("intensity", 4.0))
 		var rgba := int(ld.get("rgba", 0xFF9CD4FF))
+		var lflags := int(ld.get("flags", 0))
 		var cr := float(rgba & 0xFF) / 255.0
 		var cg := float((rgba >> 8) & 0xFF) / 255.0
 		var cb := float((rgba >> 16) & 0xFF) / 255.0
 		# Only true flames/lava/flares flicker; consoles (cyan), lamps (warm white), headlights & bioluminescence stay steady!
-		var is_fire := cr > 0.85 and cb < 0.35 and cg < 0.72
+		var is_fire := ((lflags & 1) != 0) or (cr > 0.85 and cb < 0.35 and cg < 0.72)
+		var is_spot := ((lflags & 2) != 0) or float(ld.get("cone_cos", -1.0)) > -0.5
 		if is_fire:
 			_has_flicker_lights = true
-		var radius := clampf(inten * 0.72 + 2.8, 3.6, 13.5)
-		var energy := clampf(inten * 1.85 + 4.5, 6.5, 24.0)
-		pos_rad[i] = Vector4(pos.x, pos.y, radius, energy)
-		col_mode[i] = Vector4(cr, cg, cb, 0.75 if is_fire else 0.0)
+		var radius := clampf(inten * (0.95 if is_spot else 0.72) + (5.2 if is_spot else 2.8), 3.6, 18.5 if is_spot else 13.5)
+		var energy := clampf(inten * (2.2 if is_spot else 1.85) + 4.5, 6.5, 28.0 if is_spot else 24.0)
+		pos_rad[idx] = Vector4(pos.x, pos.y, radius, energy)
+		col_mode[idx] = Vector4(cr, cg, cb, 0.75 if is_fire else 0.0)
+		if is_spot:
+			var sdir := Vector2(float(ld.get("dir_x", 1.0)), float(ld.get("dir_y", 0.0)))
+			sdir = sdir.normalized() if sdir.length_squared() > 0.001 else Vector2(1.0, 0.0)
+			cone_arr[idx] = Vector4(sdir.x, sdir.y, float(ld.get("cone_cos", 0.76)), 0.90)
+		else:
+			cone_arr[idx] = Vector4(0.0, 0.0, -1.0, 0.0)
+		idx += 1
 
-	_direct_mat.set_shader_parameter("point_light_count", count)
+	_direct_mat.set_shader_parameter("point_light_count", idx)
 	_direct_mat.set_shader_parameter("point_light_pos_rad", pos_rad)
 	_direct_mat.set_shader_parameter("point_light_col_mode", col_mode)
+	_direct_mat.set_shader_parameter("point_light_cone", cone_arr)
+
+
+func set_player_aim_dir(dir: Vector2) -> void:
+	if dir.length_squared() < 0.04:
+		return
+	var nd := dir.normalized()
+	if nd.dot(_player_facing) < 0.9995:
+		_player_facing = _player_facing.lerp(nd, 0.32).normalized()
+		if _player_light >= 12.0 and _comp_mat != null:
+			_comp_mat.set_shader_parameter("player_light_cone", _get_player_light_cone_vec4())
+
+
+func _get_player_light_cone_vec4() -> Vector4:
+	# Electric flashlights/headlamps (plight >= 12) cast a crisp directional cone + volumetric mist beam;
+	# flames/torches/oil lamps (< 12) radiate 360 degrees omnidirectionally!
+	if _player_light >= 12.0:
+		var dark_w := clampf(1.0 - _cur_sky_energy * 0.95, 0.0, 1.0)
+		var vol := clampf(_weather.mist * 0.95 + dark_w * 0.65 + (0.75 if _last_z < 0 else 0.0), 0.12, 1.15)
+		return Vector4(_player_facing.x, _player_facing.y, 0.68, vol)
+	return Vector4(_player_facing.x, _player_facing.y, -1.0, 0.0)
 
 
 func _sync_player_portable_light(plight: float) -> void:
 	if plight <= 0.6 or not _area.has_area():
 		_comp_mat.set_shader_parameter("player_light_pos_rad", Vector4(-999.0, -999.0, 5.0, 0.0))
+		_comp_mat.set_shader_parameter("player_light_cone", Vector4(1.0, 0.0, -1.0, 0.0))
 		return
 	var hand_pos := _player_world + Vector2(0.54, 0.52)
-	var radius := clampf(plight * 0.80 + 3.0, 4.0, 13.0)
-	var energy := clampf(plight * 1.9 + 9.0, 11.0, 28.0)
-	var is_electric := plight >= 18.0
+	var is_electric := plight >= 12.0
+	var radius := clampf(plight * (0.92 if is_electric else 0.78) + (4.2 if is_electric else 3.0), 4.0, 16.5 if is_electric else 12.0)
+	var energy := clampf(plight * 2.1 + 10.0, 11.0, 32.0)
 	_comp_mat.set_shader_parameter("player_light_pos_rad", Vector4(hand_pos.x, hand_pos.y, radius, energy))
 	_comp_mat.set_shader_parameter("player_light_col_mode",
-		Vector4(0.95, 0.97, 1.0, 0.04) if is_electric else Vector4(1.0, 0.72, 0.36, 0.65))
+		Vector4(0.95, 0.97, 1.0, 0.03) if is_electric else Vector4(1.0, 0.72, 0.36, 0.65))
+	_comp_mat.set_shader_parameter("player_light_cone", _get_player_light_cone_vec4())
 
 
 func _update_weather_state(weather_id: String, season_i: int, is_under: bool) -> void:
@@ -667,10 +824,25 @@ func _update_weather_state(weather_id: String, season_i: int, is_under: bool) ->
 	_weather.wetness = 0.0
 	_weather.snow_cover = 0.68 if (season_i == 3 and not is_under) else 0.0
 	_weather.mist = 0.16
+	_weather.special_tint = Vector3.ZERO
+	_weather.special_strength = 0.0
 	if is_under:
 		_weather.mist = 0.0
 		return
-	if ("thunder" in wid or "lightning" in wid or "storm" in wid) and not ("snow" in wid or "portal" in wid):
+	if "portal_storm" in wid:
+		_weather.cloud = 0.86
+		_weather.mist = 0.58 if "close" in wid or wid == "portal_storm" else 0.38
+		_weather.special_tint = Vector3(0.58, 0.28, 0.86)
+		_weather.special_strength = 0.68 if "close" in wid or wid == "portal_storm" else 0.40
+	elif "scarlet" in wid:
+		var is_storm := "storm" in wid
+		_weather.rain = 0.82 if is_storm else 0.0
+		_weather.wetness = 0.85 if is_storm else 0.0
+		_weather.cloud = 0.88 if is_storm else 0.42
+		_weather.mist = 0.56 if is_storm else 0.30
+		_weather.special_tint = Vector3(0.95, 0.24, 0.20)
+		_weather.special_strength = 0.65 if is_storm else 0.42
+	elif ("thunder" in wid or "lightning" in wid or "storm" in wid) and not ("snow" in wid or "portal" in wid):
 		_weather.rain = 0.92
 		_weather.cloud = 0.94
 		_weather.wetness = 0.92

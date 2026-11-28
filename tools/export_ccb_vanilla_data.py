@@ -16,7 +16,7 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(r"d:\Project\CDDA-COOP\ccb\Cataclysm-Cleanwater-Bomb")
+ROOT = Path(__file__).resolve().parent.parent / "Cataclysm-Cleanwater-Bomb"
 OUT_DIR = Path(r"d:\Project\CDDA-COOP\ccb\cangling-city\packs\cataclysm\vanilla")
 MO_PATH = ROOT / "lang" / "mo" / "zh_CN" / "LC_MESSAGES" / "cataclysm-dda.mo"
 TILE_CONFIG = ROOT / "gfx" / "MSX++UndeadPeopleEdition" / "tile_config.json"

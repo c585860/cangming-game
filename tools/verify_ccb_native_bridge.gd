@@ -70,6 +70,11 @@ func _send_code(eng: RefCounted, code: int, txt: String, prev_gen: int, wait_s :
 	return await _wait_for_gen_change(eng, prev_gen, wait_s)
 
 
+func _send_key_shift(eng: RefCounted, ch: String, prev_gen: int, wait_s := 5.0) -> int:
+	eng.send_key(ch.unicode_at(0), ch, false, false, true)
+	return await _wait_for_gen_change(eng, prev_gen, wait_s)
+
+
 func _dismiss_debugmsg_if_any(eng: RefCounted) -> int:
 	var gen := int(eng.get_generation())
 	for _k in range(5):
@@ -109,6 +114,16 @@ func _run() -> void:
 	if host == null:
 		quit(1)
 		return
+
+	# Temporarily bind '`' to CCB Debug Menu in test user_dir so we can verify wishitem, Chinese IME, fd_blood & gunfire!
+	var kb_path := ProjectSettings.globalize_path("user://ccb_native_user/config/keybindings.json")
+	DirAccess.make_dir_recursive_absolute(kb_path.get_base_dir())
+	var kb_had_orig := FileAccess.file_exists(kb_path)
+	var kb_orig_text := FileAccess.get_file_as_string(kb_path) if kb_had_orig else ""
+	var kb_f := FileAccess.open(kb_path, FileAccess.WRITE)
+	if kb_f != null:
+		kb_f.store_string('[{"type":"keybinding","category":"DEFAULTMODE","id":"debug","bindings":[{"input_method":"keyboard_char","key":"`"},{"input_method":"keyboard_code","key":"`"}]}]')
+		kb_f.close()
 
 	if not host.active:
 		host.activate()
@@ -242,12 +257,28 @@ func _run() -> void:
 		if not bool(eng.poll_terminal_frame().get("has_terrain", false)):
 			gen = await _send_code(eng, 10, "\n", gen, 6.0)
 
-	# Wait up to 35s for real CCB overmap + mapgen + spawn to finish
+	# Wait up to 35s for real CCB overmap + mapgen + spawn to finish (and capture authentic Loading Screen!)
 	var t_spawn := Time.get_ticks_msec()
 	var in_game_ok := false
+	var saw_loading_ui := false
+	var loading_shot_taken := false
 	var last_nudge := 0
 	while (Time.get_ticks_msec() - t_spawn) < 35000:
-		await _wait_frames(4)
+		await _wait_frames(2)
+		var lstate: Dictionary = eng.get_loading_state() if eng.has_method("get_loading_state") else {}
+		if bool(lstate.get("active", false)):
+			var lctx := str(lstate.get("context", ""))
+			var lstp := str(lstate.get("step", ""))
+			var limg := str(lstate.get("image_path", ""))
+			if not saw_loading_ui:
+				saw_loading_ui = true
+				print("[INFO] Loading UI active: img=%s tip_len=%d msg=%s %s tex_ok=%s" % [
+					limg.get_file(), str(lstate.get("tip", "")).length(), lctx, lstp,
+					str(host._loading_tex_rect != null and host._loading_tex_rect.texture != null)
+				])
+			if not loading_shot_taken and host._loading_overlay.visible and host._loading_tex_rect != null and host._loading_tex_rect.texture != null:
+				loading_shot_taken = true
+				await _shot("verify_native_02d_loading_screen.png")
 		var tf: Dictionary = eng.poll_terminal_frame()
 		if bool(tf.get("has_terrain", false)):
 			var ws: Dictionary = eng.poll_world_snapshot()
@@ -258,7 +289,7 @@ func _run() -> void:
 		if elapsed > 2000 and (elapsed - last_nudge) > 2000:
 			last_nudge = elapsed
 			var cur_txt := _extract_screen_text(tf)
-			print("[INFO] Spawn wait t=%dms tail=%s" % [elapsed, cur_txt.substr(maxi(0, cur_txt.length() - 140)).replace("\n", " | ")])
+			print("[INFO] Spawn wait t=%dms loading=%s tail=%s" % [elapsed, str(bool(lstate.get("active", false))), cur_txt.substr(maxi(0, cur_txt.length() - 140)).replace("\n", " | ")])
 			if "游戏出错了" in cur_txt or "DEBUG :" in cur_txt:
 				eng.send_key(ord("i"), "i", false, false, false)
 			elif "[Y]" in cur_txt:
@@ -269,6 +300,8 @@ func _run() -> void:
 				eng.send_key(10, "\n", false, false, false)
 			elif "按" in cur_txt or "Space" in cur_txt or "空格" in cur_txt:
 				eng.send_key(32, " ", false, false, false)
+
+	_check(saw_loading_ui, "Vanilla CCB loading screen with artwork & live progress displayed during world/character load")
 
 	await _wait_frames(8)
 	# Dismiss any stray modal (e.g. Action Menu) if opened during spawn transition
@@ -559,6 +592,324 @@ func _run() -> void:
 		await _shot("verify_native_07_look_around.png")
 		gen = await _send_code(eng, 27, "", gen, 3.0)
 
+		# 8b. Verify fd_blood multitile resolution (unconnected/edge/corner/center -> NEVER solid red square!)
+		var blood_id := TilesCls.resolve_field_tile_id("fd_blood", 1, "spring")
+		var blood_ent := TilesCls.get_tile_entry(blood_id)
+		var blood_joins: Dictionary = blood_ent.get("joins", {})
+		print("[INFO] fd_blood resolved=%s joins=%s" % [blood_id, str(blood_joins.keys())])
+		_check(not blood_id.is_empty() and blood_joins.has("unconnected"), "fd_blood resolves with genuine multitile unconnected/connection sprites")
+
+		# 8c. Open Debug Menu ('`') -> Spawning ('s') -> Wish Item ('w'):
+		#     Verifies (a) full-height multi-row ImGui uilist + right info pane (NOT 4 rows!),
+		#     (b) Chinese IME text input ('格洛克') inside ImGui filter popup,
+		#     (c) Spawning a loaded Glock pistol -> Bleed self (real fd_blood) -> Real gunfire muzzle flash + tracer + HDR light!
+		gen = await _send_char(eng, "`", int(eng.get_generation()), 4.0)
+		await _wait_frames(4)
+		var dbg_txt := _extract_screen_text(eng.poll_terminal_frame())
+		print("[INFO] Debug menu opened len=%d has_spawn=%s" % [dbg_txt.length(), str("生成" in dbg_txt or "Spawning" in dbg_txt)])
+		if "生成" in dbg_txt or "Spawning" in dbg_txt or "玩家" in dbg_txt:
+			gen = await _send_char(eng, "s", gen, 4.0)
+			await _wait_frames(4)
+			gen = await _send_char(eng, "w", gen, 5.0)
+			await _wait_frames(6)
+			var wish_txt := _extract_screen_text(eng.poll_terminal_frame())
+			var wish_lines := wish_txt.split("\n", false)
+			# Verify non-input wishitem screen does NOT wrongly auto-activate IME!
+			var wish_ime_before := bool(eng.poll_terminal_frame().get("want_text_input", false))
+			print("[INFO] Wishitem full-screen menu lines=%d len=%d ime_before_filter=%s" % [wish_lines.size(), wish_txt.length(), str(wish_ime_before)])
+			_check(wish_lines.size() >= 18, "Debug wishitem uilist renders full screen height (%d rows, NOT truncated to 4 rows)" % wish_lines.size())
+			_check(not wish_ime_before, "OS IME stays off on non-text menus so hotkeys never collide")
+			await _shot("verify_native_09_debug_wishitem.png")
+
+			# Test Chinese IME input inside wishitem filter ('/')!
+			gen = await _send_char(eng, "/", gen, 4.0)
+			await _wait_frames(5)
+			var tf_ime: Dictionary = eng.poll_terminal_frame()
+			var want_ime := bool(tf_ime.get("want_text_input", false))
+			eng.send_text_input("突击步枪")
+			await _wait_frames(8)
+			var ime_txt := _extract_screen_text(eng.poll_terminal_frame())
+			print("[INFO] Chinese IME filter check: want_text_input=%s has_cn=%s" % [str(want_ime), str("突击步枪" in ime_txt)])
+			_check(want_ime and ("突击步枪" in ime_txt), "Chinese IME text input works inside CCB ImGui filter popup ('突击步枪')")
+			await _shot("verify_native_09b_wishitem_chinese_ime.png")
+			# Dismiss wishitem cleanly back to gameplay before running blood test (so spawned gear stays at our feet later!)
+			for _esc in range(4):
+				var tfe: Dictionary = eng.poll_terminal_frame()
+				var txte := _extract_screen_text(tfe)
+				if bool(tfe.get("has_terrain", false)) and not ("查找" in txte or "Find" in txte or "容器" in txte):
+					break
+				gen = await _send_code(eng, 27, "", int(eng.get_generation()), 3.0)
+				await _wait_frames(4)
+			gen = await _dismiss_debugmsg_if_any(eng)
+
+			# Trigger real fd_blood via Debug -> Player ('p') -> Bleed self ('b') -> Torso ('q') -> wait turns & step right!
+			gen = await _send_char(eng, "`", int(eng.get_generation()), 4.0)
+			await _wait_frames(4)
+			gen = await _send_char(eng, "p", gen, 4.0)
+			await _wait_frames(4)
+			gen = await _send_char(eng, "b", gen, 4.0)
+			await _wait_frames(4)
+			gen = await _send_char(eng, "q", gen, 4.0) # Torso
+			await _wait_frames(4)
+			var bld_tf: Dictionary = eng.poll_terminal_frame()
+			var bld_prompt := _extract_screen_text(bld_tf)
+			if not bool(bld_tf.get("has_terrain", false)) or bool(bld_tf.get("want_text_input", false)) or "强度" in bld_prompt or "intensity" in bld_prompt:
+				eng.send_key(ord("2"), "2", false, false, false)
+				eng.send_key(ord("5"), "5", false, false, false)
+				await _wait_frames(3)
+				gen = await _send_code(eng, 10, "\n", int(eng.get_generation()), 3.0)
+				await _wait_frames(4)
+			for _besc in range(3):
+				var btfe: Dictionary = eng.poll_terminal_frame()
+				if bool(btfe.get("has_terrain", false)) and not ("主菜单" in _extract_screen_text(btfe)):
+					break
+				gen = await _send_code(eng, 27, "", int(eng.get_generation()), 2.0)
+				await _wait_frames(3)
+			# Wait 10 turns ('.') + step right so severe bleeding drips visible fd_blood pools onto adjacent tiles!
+			for _bt in range(10):
+				gen = await _send_char(eng, ".", int(eng.get_generation()), 2.0)
+				gen = await _dismiss_debugmsg_if_any(eng)
+			gen = await _send_char(eng, "l", int(eng.get_generation()), 3.0)
+			for _bt2 in range(4):
+				gen = await _send_char(eng, ".", int(eng.get_generation()), 2.0)
+			gen = await _send_char(eng, "l", int(eng.get_generation()), 3.0)
+			await _wait_frames(8)
+			var ws_bld: Dictionary = eng.poll_world_snapshot()
+			var bld_strs: PackedStringArray = ws_bld.get("strings", PackedStringArray())
+			var has_blood_tile := false
+			for s in bld_strs:
+				if "fd_blood" in s:
+					has_blood_tile = true
+					break
+			print("[INFO] Real fd_blood on map=%s" % str(has_blood_tile))
+			_check(has_blood_tile, "Real fd_blood field spawned on map with autotile splatter rendering")
+			await _shot("verify_native_10_blood_splatter.png")
+
+			# 8d. Verify 44.1 kHz Stereo C++ Physical Acoustic Synthesizer across gunshots, spaces, hits & explosions!
+			var pcm_t0 := Time.get_ticks_usec()
+			var pcm_rifle: PackedByteArray = eng.synthesize_combat_pcm(1, 3, 0, 0, false, 1.0)
+			var pcm_burst_mid: PackedByteArray = eng.synthesize_combat_pcm(1, 3, 1, 1, false, 0.6)
+			var pcm_expl: PackedByteArray = eng.synthesize_combat_pcm(2, 3, 0, 2, false, 1.0)
+			var pcm_us := Time.get_ticks_usec() - pcm_t0
+			var peak_rifle := 0
+			for bi in range(0, mini(pcm_rifle.size() - 2, 16000), 2):
+				peak_rifle = maxi(peak_rifle, absi(pcm_rifle.decode_s16(bi)))
+			var peak_expl := 0
+			for bi in range(0, mini(pcm_expl.size() - 2, 32000), 2):
+				peak_expl = maxi(peak_expl, absi(pcm_expl.decode_s16(bi)))
+			print("[INFO] C++ 44.1kHz Stereo Acoustic Synth: rifle=%dB(peak=%d) mid=%dB expl=%dB(peak=%d) time=%.2fms" % [
+				pcm_rifle.size(), peak_rifle, pcm_burst_mid.size(), pcm_expl.size(), peak_expl, float(pcm_us) * 0.001
+			])
+			_check(pcm_rifle.size() > 80000 and peak_rifle > 12000 and pcm_expl.size() > 200000 and peak_expl > 14000,
+				"44.1kHz stereo physical acoustic synth produces realistic high-dynamic-range gunshot & explosion PCM")
+
+			# Now spawn M4A1 carbine + loaded STANAG mag + frag grenade right at our current tile (fresh wishitem per item = 0 filter residue!)
+			var wish_specs := [
+				{"query": "M4A1", "expect_id": "modular_m4_carbine", "container": true},
+				{"query": "STANAG 30", "expect_id": "stanag30", "container": true},
+				{"query": "frag grenade", "expect_id": "grenade", "container": false},
+			]
+			for spec in wish_specs:
+				gen = await _send_char(eng, "`", int(eng.get_generation()), 4.0)
+				await _wait_frames(3)
+				gen = await _send_char(eng, "s", gen, 4.0)
+				await _wait_frames(3)
+				gen = await _send_char(eng, "w", gen, 5.0)
+				await _wait_frames(5)
+				if bool(spec["container"]):
+					gen = await _send_char(eng, "f", int(eng.get_generation()), 3.0) # [f] Container (spawn loaded!)
+					await _wait_frames(3)
+				gen = await _send_char(eng, "/", int(eng.get_generation()), 4.0)
+				await _wait_frames(4)
+				eng.send_text_input(str(spec["query"]))
+				await _wait_frames(5)
+				gen = await _send_code(eng, 10, "\n", int(eng.get_generation()), 4.0)
+				await _wait_frames(5)
+				var eid: String = spec["expect_id"]
+				for _sk in range(16):
+					var fhead := _extract_screen_text(eng.poll_terminal_frame())
+					if (": " + eid + "\n") in fhead or (": " + eid + " ") in fhead or (": " + eid + " (") in fhead:
+						break
+					gen = await _send_code(eng, 0x102, "", int(eng.get_generation()), 2.0)
+					await _wait_frames(2)
+				var sel_txt := _extract_screen_text(eng.poll_terminal_frame())
+				var first_ln := sel_txt.split("\n")[0] if not sel_txt.is_empty() else ""
+				print("[INFO] Wishitem spawning q='%s' expect='%s' -> head='%s'" % [str(spec["query"]), eid, first_ln])
+				gen = await _send_code(eng, 10, "\n", int(eng.get_generation()), 4.0) # select item
+				await _wait_frames(4)
+				gen = await _send_code(eng, 10, "\n", int(eng.get_generation()), 4.0) # How many? -> 1
+				await _wait_frames(4)
+				for _esw in range(3):
+					var tfe: Dictionary = eng.poll_terminal_frame()
+					if bool(tfe.get("has_terrain", false)) and not ("容器" in _extract_screen_text(tfe)):
+						break
+					gen = await _send_code(eng, 27, "", int(eng.get_generation()), 3.0)
+					await _wait_frames(3)
+				gen = await _dismiss_debugmsg_if_any(eng)
+
+			# 8e. Wield M4A1 ('w') -> Reload ('r') -> Switch to Burst/Auto ('F') -> Fire Burst ('f' -> aim east -> 'f')!
+			gen = await _send_char(eng, "w", int(eng.get_generation()), 4.0)
+			await _wait_frames(5)
+			var wtxt := _extract_screen_text(eng.poll_terminal_frame())
+			var gun_invlet := ""
+			for wline in wtxt.split("\n", false):
+				if "M4A1" in wline or "carbine" in wline.to_lower() or "卡宾枪" in wline:
+					var trimmed := wline.strip_edges()
+					if trimmed.length() >= 3 and trimmed[1] == " ":
+						gun_invlet = trimmed[0]
+						break
+			print("[INFO] Wield menu M4A1 invlet='%s' sample=%s" % [gun_invlet, wtxt.substr(0, mini(260, wtxt.length())).replace("\n", " | ")])
+			if not gun_invlet.is_empty():
+				gen = await _send_char(eng, gun_invlet, int(eng.get_generation()), 4.0)
+				await _wait_frames(5)
+			for _esc2 in range(3):
+				var ws_w: Dictionary = eng.poll_world_snapshot()
+				var wid_now := str(ws_w.get("wielded", ""))
+				if bool(eng.poll_terminal_frame().get("has_terrain", false)) and ("m4" in wid_now or "carbine" in wid_now):
+					break
+				gen = await _send_code(eng, 27, "", int(eng.get_generation()), 2.0)
+				await _wait_frames(3)
+			var ws_gun: Dictionary = eng.poll_world_snapshot()
+			var wielded_gun := str(ws_gun.get("wielded", ""))
+			print("[INFO] Wielded weapon for burst gunfire test: '%s'" % wielded_gun)
+			if "m4" in wielded_gun or "carbine" in wielded_gun:
+				# Reload M4A1 with the spawned loaded STANAG magazine ('r' + confirm if menu opens)
+				gen = await _send_char(eng, "r", int(eng.get_generation()), 4.0)
+				await _wait_frames(5)
+				var rtxt := _extract_screen_text(eng.poll_terminal_frame())
+				if "弹匣" in rtxt or "STANAG" in rtxt or "Reload" in rtxt or "选择" in rtxt or not bool(eng.poll_terminal_frame().get("has_terrain", false)):
+					gen = await _send_code(eng, 10, "\n", int(eng.get_generation()), 4.0)
+					await _wait_frames(6)
+				# Wait out reload activity
+				for _rw in range(30):
+					await _wait_frames(2)
+					if bool(eng.poll_terminal_frame().get("has_terrain", false)):
+						var rltxt := _extract_screen_text(eng.poll_terminal_frame())
+						if not ("装填" in rltxt and "%" in rltxt):
+							break
+				# Switch firing mode from semi -> burst/auto ('F') so we verify REAL burst cadence & continuous burst audio!
+				gen = await _send_key_shift(eng, "F", int(eng.get_generation()), 3.0)
+				await _wait_frames(4)
+				# Open Aim ('f'), aim 6 tiles east, and fire burst ('f')!
+				gen = await _send_char(eng, "f", int(eng.get_generation()), 4.0)
+				await _wait_frames(4)
+				for _aim in range(6):
+					gen = await _send_char(eng, "l", int(eng.get_generation()), 2.0)
+				var guns_before: int = int(host._combat_audio.total_gunshots_played)
+				eng.send_key(ord("f"), "f", false, false, false)
+				# Poll over 50 frames (~800ms) to capture live photorealistic muzzle flash + burst audio continuity!
+				var saw_vfx_types: Array[int] = []
+				var saw_vfx_light := false
+				var gun_shot_taken := false
+				var burst_delays: Array[int] = []
+				for _f in range(50):
+					await process_frame
+					var ws_v: Dictionary = eng.poll_world_snapshot()
+					for ve_var in ws_v.get("vfx_events", []):
+						var vd: Dictionary = ve_var
+						var vk := int(vd.get("kind", 0))
+						if not saw_vfx_types.has(vk):
+							saw_vfx_types.append(vk)
+						if vk == 1:
+							var dms := int(vd.get("delay_ms", 0))
+							if not burst_delays.has(dms):
+								burst_delays.append(dms)
+					var fx_lights: Array = host._gpu_view._effects.get_active_vfx_lights()
+					if not fx_lights.is_empty():
+						saw_vfx_light = true
+						if not gun_shot_taken:
+							gun_shot_taken = true
+							var img_g := root.get_texture().get_image()
+							img_g.save_png(ART_DIR.path_join("verify_native_11_gunfire_muzzle_flash.png"))
+							print("[SHOT] verify_native_11_gunfire_muzzle_flash.png -> lights=%d vfx=%s" % [fx_lights.size(), str(saw_vfx_types)])
+				var guns_played: int = int(host._combat_audio.total_gunshots_played) - guns_before
+				var btimes: Array = host._combat_audio.last_burst_shot_times
+				var intervals_ms: Array[int] = []
+				for bi in range(1, btimes.size()):
+					intervals_ms.append(int(round((float(btimes[bi]) - float(btimes[bi - 1])) * 1000.0)))
+				print("[INFO] Burst Gunfire VFX & Audio telemetry: vfx=%s delays_ms=%s hdr_light=%s shots_played=%d burst_intervals_ms=%s" % [
+					str(saw_vfx_types), str(burst_delays), str(saw_vfx_light), guns_played, str(intervals_ms)
+				])
+				_check(saw_vfx_types.has(1) and saw_vfx_light, "Weapon burst emits photorealistic muzzle flash, tracer VFX & live HDR GPU muzzle light")
+				_check(guns_played >= 2 and intervals_ms.size() >= 1 and intervals_ms[0] >= 40 and intervals_ms[0] <= 260,
+					"Burst gunfire plays continuous polyphonic gunshot audio with authentic cyclic RPM intervals (%s ms)" % str(intervals_ms))
+			else:
+				_check(false, "Failed to wield M4A1 for burst gunfire test (wielded='%s')" % wielded_gun)
+
+			# 8f. Real CCB Grenade Explosion test: activate ('a') frag grenade -> throw ('t') 7 tiles east -> wait for detonation!
+			gen = await _dismiss_debugmsg_if_any(eng)
+			var blasts_before: int = int(host._gpu_view._effects.total_blasts)
+			var expl_sfx_before: int = int(host._combat_audio.total_explosions_played)
+			gen = await _send_char(eng, "a", int(eng.get_generation()), 4.0)
+			await _wait_frames(5)
+			var atxt := _extract_screen_text(eng.poll_terminal_frame())
+			var gren_invlet := ""
+			for aline in atxt.split("\n", false):
+				if "手榴弹" in aline or "grenade" in aline.to_lower() or "M67" in aline:
+					var tr := aline.strip_edges()
+					if tr.length() >= 3 and tr[1] == " ":
+						gren_invlet = tr[0]
+						break
+			print("[INFO] Activate menu grenade invlet='%s' sample=%s" % [gren_invlet, atxt.substr(0, mini(240, atxt.length())).replace("\n", " | ")])
+			if not gren_invlet.is_empty():
+				gen = await _send_char(eng, gren_invlet, int(eng.get_generation()), 4.0)
+				await _wait_frames(4)
+				var ptxt := _extract_screen_text(eng.poll_terminal_frame())
+				if "Y" in ptxt or "拔" in ptxt or "引爆" in ptxt or "pull" in ptxt.to_lower() or "扔" in ptxt:
+					gen = await _send_char(eng, "y", int(eng.get_generation()), 3.0)
+					await _wait_frames(4)
+				# If pulling the pin immediately opened throwing target mode ('Throw where?'), aim 7 tiles east and Enter; else press 't'!
+				var tmode_txt := _extract_screen_text(eng.poll_terminal_frame())
+				if not ("扔" in tmode_txt or "投掷" in tmode_txt or "Throw" in tmode_txt):
+					gen = await _send_char(eng, "t", int(eng.get_generation()), 4.0)
+					await _wait_frames(5)
+					var ttxt := _extract_screen_text(eng.poll_terminal_frame())
+					var act_invlet := ""
+					for tline in ttxt.split("\n", false):
+						if "手榴弹" in tline or "grenade" in tline.to_lower() or "M67" in tline:
+							var tr := tline.strip_edges()
+							if tr.length() >= 3 and tr[1] == " ":
+								act_invlet = tr[0]
+								break
+					if not act_invlet.is_empty():
+						gen = await _send_char(eng, act_invlet, int(eng.get_generation()), 4.0)
+						await _wait_frames(4)
+				for _th in range(6):
+					gen = await _send_char(eng, "l", int(eng.get_generation()), 2.0)
+				gen = await _send_code(eng, 10, "\n", int(eng.get_generation()), 4.0)
+				await _wait_frames(4)
+				# Step back 2 tiles west ('h') and wait '.' turn by turn until the grenade detonates!
+				gen = await _send_char(eng, "h", int(eng.get_generation()), 3.0)
+				gen = await _send_char(eng, "h", int(eng.get_generation()), 3.0)
+				var expl_shot_taken := false
+				for _fuse in range(10):
+					eng.send_key(ord("."), ".", false, false, false)
+					for _pf in range(14):
+						await process_frame
+						if int(host._gpu_view._effects.total_blasts) > blasts_before:
+							# Advance 4 frames (~65ms) so turbulent fireballs + shockwave + billowing smoke + flying embers are at peak drama!
+							await _wait_frames(4)
+							if not expl_shot_taken:
+								expl_shot_taken = true
+								var img_e := root.get_texture().get_image()
+								img_e.save_png(ART_DIR.path_join("verify_native_12_explosion_vfx.png"))
+								print("[SHOT] verify_native_12_explosion_vfx.png -> blasts=%d expl_sfx=%d" % [
+									int(host._gpu_view._effects.total_blasts) - blasts_before,
+									int(host._combat_audio.total_explosions_played) - expl_sfx_before
+								])
+							break
+					if expl_shot_taken:
+						break
+					gen = await _dismiss_debugmsg_if_any(eng)
+				var blasts_seen: int = int(host._gpu_view._effects.total_blasts) - blasts_before
+				var expl_sfx_seen: int = int(host._combat_audio.total_explosions_played) - expl_sfx_before
+				print("[INFO] Real Grenade Explosion telemetry: blasts=%d expl_sfx=%d" % [blasts_seen, expl_sfx_seen])
+				_check(blasts_seen >= 1 and expl_sfx_seen >= 1, "Real CCB grenade detonation triggers photorealistic fireball/smoke/shockwave VFX + explosion audio")
+			else:
+				_check(false, "Failed to find spawned frag grenade in activate menu")
+		else:
+			_check(false, "Debug menu failed to open via temporary test keybind")
+
 	# 9. Switch back to Launcher -> enter Cangming (zero regression check!)
 	host.deactivate_to_launcher()
 	await _wait_frames(4)
@@ -567,10 +918,17 @@ func _run() -> void:
 	_check(not main.world.is_cataclysm_pack() and main.sidebar.visible, "Cangming core pack works cleanly with zero regression")
 	await _shot("verify_native_08_cangming_ok.png")
 
-	# Clean shutdown of CCB worker thread
+	# Clean shutdown of CCB worker thread & restore user keybindings.json
 	host.shutdown_engine()
 	await _wait_frames(3)
 	_check(not eng.is_running(), "CCB worker thread shut down cleanly")
+	if kb_had_orig:
+		var rf := FileAccess.open(kb_path, FileAccess.WRITE)
+		if rf != null:
+			rf.store_string(kb_orig_text)
+			rf.close()
+	elif FileAccess.file_exists(kb_path):
+		DirAccess.remove_absolute(kb_path)
 
 	if _failures == 0:
 		print("ALL_NATIVE_CCB_CHECKS_PASSED")

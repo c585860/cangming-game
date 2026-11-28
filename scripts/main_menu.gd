@@ -157,6 +157,15 @@ func build(world: RefCounted) -> void:
 	_tip_lbl = VUI.mk_lbl(root, TIPS[0], 12, VUI.C_LTCYAN)
 	_tip_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
+	# --- COMMUNITY CREDITS FOOTER ---
+	var credits_lbl := VUI.mk_lbl(
+		root,
+		"本项目灵感来源于CCB，本项目QQ群：1001568760\nCCB群：552610319\n感谢所有玩家的奉献",
+		12,
+		Color(0.76, 0.86, 0.96)
+	)
+	credits_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+
 	# --- COMPACT BUTTON-ANCHORED FLOATING SUBMENU (w_sub, exact main_menu.cpp!) ---
 	_popup_panel = PanelContainer.new()
 	_popup_panel.add_theme_stylebox_override("panel", VUI.box(VUI.BG_BLACK, VUI.BORDER_BRIGHT, 6, 5, 1))

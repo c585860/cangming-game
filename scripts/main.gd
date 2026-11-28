@@ -56,6 +56,8 @@ var realtime_clock_accum := 0.0
 var main_menu: Control
 var ccb_native_host: CcbNativeHost
 var in_main_menu := true
+var _legacy_initialized := false
+var _ui_font: Font = null
 var ccb_inv_tab := "bag"
 var ccb_inv_sel := 0
 var ccb_pickup_sel: Dictionary = {}
@@ -100,9 +102,13 @@ var period_key: Key = KEY_NONE
 
 
 func _ready() -> void:
-	Board.Tiles.prewarm_game_sprites()
-	world.setup(randi())
-	weather.sync(CanglingCalendar.at_minute(world.minutes), world.seed, true)
+	DisplayServer.window_set_title("Cataclysm:EmperorCOOP 2.0")
+	if FileAccess.file_exists("res://art/app_icon.png"):
+		var icon_bytes := FileAccess.get_file_as_bytes("res://art/app_icon.png")
+		if not icon_bytes.is_empty():
+			var icon_img := Image.new()
+			if icon_img.load_png_from_buffer(icon_bytes) == OK:
+				DisplayServer.set_icon(icon_img)
 	var ui_font: Font = null
 	if ResourceLoader.exists("res://art/fonts/unifont.ttf"):
 		var ff := FontFile.new()
@@ -115,18 +121,33 @@ func _ready() -> void:
 		var fallback := SystemFont.new()
 		fallback.font_names = PackedStringArray(["Unifont", "Consolas", "Microsoft YaHei UI", "Noto Sans CJK SC", "monospace"])
 		ui_font = fallback
+	_ui_font = ui_font
 	theme = Theme.new()
 	theme.default_font = ui_font
 	theme.default_font_size = 14
+	_build_ccb_native_host(ui_font)
+	if _should_auto_launch_ccb_native():
+		# Lazy-load legacy Cangming world, Board SubViewports, and prewarmed tiles ONLY if user switches core pack (saves ~120+ MB RAM & startup time!)
+		call_deferred("launch_ccb_native")
+	else:
+		_ensure_legacy_pack_ready()
+
+
+func _ensure_legacy_pack_ready() -> void:
+	if _legacy_initialized:
+		return
+	_legacy_initialized = true
+	Board.Tiles.prewarm_game_sprites()
+	world.setup(randi())
+	weather.sync(CanglingCalendar.at_minute(world.minutes), world.seed, true)
 	_build_ui()
 	_wire_net_session()
 	audio_ambience = AudioAmbience.new()
 	add_child(audio_ambience)
 	_build_main_menu()
-	_build_ccb_native_host(ui_font)
+	if ccb_native_host != null and ccb_native_host.get_parent() == self:
+		move_child(ccb_native_host, get_child_count() - 1)
 	_refresh()
-	if _should_auto_launch_ccb_native():
-		call_deferred("launch_ccb_native")
 
 
 func _should_auto_launch_ccb_native() -> bool:
@@ -149,20 +170,23 @@ func _build_ccb_native_host(ui_font: Font) -> void:
 func launch_ccb_native() -> bool:
 	if ccb_native_host == null:
 		return false
-	_stop()
-	_close_overlay()
-	_cancel_workstation(false)
+	if _legacy_initialized:
+		_stop()
+		_close_overlay()
+		_cancel_workstation(false)
 	in_main_menu = true
 	if main_menu != null:
 		main_menu.visible = false
 	if ccb_native_host.activate():
 		return true
+	_ensure_legacy_pack_ready()
 	if main_menu != null:
 		main_menu.visible = true
 	return false
 
 
 func _on_ccb_native_returned_to_launcher() -> void:
+	_ensure_legacy_pack_ready()
 	if main_menu != null:
 		in_main_menu = true
 		main_menu.visible = true
@@ -236,6 +260,7 @@ func _sync_active_sidebar() -> void:
 
 
 func open_main_menu() -> void:
+	_ensure_legacy_pack_ready()
 	_stop()
 	_close_overlay()
 	_cancel_workstation(false)
@@ -247,6 +272,7 @@ func open_main_menu() -> void:
 
 
 func enter_ccb_game(world_cfg: Dictionary, char_cfg: Dictionary) -> void:
+	_ensure_legacy_pack_ready()
 	_stop()
 	_close_overlay()
 	_cancel_workstation(false)
@@ -277,6 +303,7 @@ func enter_ccb_game(world_cfg: Dictionary, char_cfg: Dictionary) -> void:
 
 
 func enter_pack(pack_id: String, seed_val: int, scenario_id := "evacuee", pname := "") -> void:
+	_ensure_legacy_pack_ready()
 	_stop()
 	_close_overlay()
 	_cancel_workstation(false)
@@ -311,6 +338,7 @@ func enter_pack(pack_id: String, seed_val: int, scenario_id := "evacuee", pname 
 
 
 func load_save_path(path: String) -> bool:
+	_ensure_legacy_pack_ready()
 	_stop()
 	_close_overlay()
 	if world.load_game(path):
@@ -439,7 +467,7 @@ func _build_ui() -> void:
 
 
 func _process(delta: float) -> void:
-	if ccb_native_host != null and ccb_native_host.active:
+	if not _legacy_initialized or (ccb_native_host != null and ccb_native_host.active):
 		return
 	# Always poll ENet multiplayer session so packets flow even while menus are open
 	net_session.tick(delta, world, board.motion.facing_x if board != null else 1,
@@ -653,15 +681,18 @@ func _note(text: String) -> void:
 
 
 func _stop() -> void:
-	period_timer.stop()
-	walker.stop()
+	if period_timer != null:
+		period_timer.stop()
+	if walker != null:
+		walker.stop()
 	if wait_timer != null and wait_timer.time_left > 0.0:
 		wait_timer.stop()
 		wait_remaining = 0
 		_set_prompt("")
 		_note("等待已中止。")
-	board.route.clear()
-	board.route_head = 0
+	if board != null:
+		board.route.clear()
+		board.route_head = 0
 	pending_site = NONE
 	pending_action = ""
 
@@ -1720,7 +1751,7 @@ func _travel_from_overview(destination: Vector2i) -> void:
 
 
 func _input(event: InputEvent) -> void:
-	if ccb_native_host != null and ccb_native_host.active:
+	if not _legacy_initialized or (ccb_native_host != null and ccb_native_host.active):
 		return
 	if event is InputEventKey and not event.pressed:
 		move_input.handle_key_release(event)

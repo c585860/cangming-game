@@ -2,6 +2,7 @@
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/variant/variant.hpp>
 #include <mutex>
 
@@ -218,7 +219,12 @@ int find_monster_species_index(std::string_view species_id) {
 Array list_core_packs_array() {
     Array out;
     const auto &all = all_core_packs();
-    const bool ccb_repo_detected = DirAccess::dir_exists_absolute("res://../Cataclysm-Cleanwater-Bomb/data/json");
+    const String exe_dir = OS::get_singleton()->get_executable_path().get_base_dir();
+    const bool ccb_repo_detected =
+        DirAccess::dir_exists_absolute(exe_dir.path_join("ccb_data/data/json")) ||
+        DirAccess::dir_exists_absolute(exe_dir.path_join("../ccb_data/data/json")) ||
+        DirAccess::dir_exists_absolute("res://Cataclysm-Cleanwater-Bomb/data/json") ||
+        DirAccess::dir_exists_absolute("res://../Cataclysm-Cleanwater-Bomb/data/json");
     for (const auto &p : all) {
         Dictionary d;
         d["id"] = String::utf8(p.slug.c_str());

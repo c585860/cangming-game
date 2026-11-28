@@ -38,9 +38,11 @@ namespace {
 
 class StringInterner {
 public:
-    StringInterner(std::vector<char> &buf) : buf_(buf) {
+    StringInterner(std::vector<char> &buf, std::unordered_map<std::string, uint16_t> &map)
+        : buf_(buf), map_(map) {
         buf_.clear();
         buf_.push_back('\0'); // index 0 = empty string
+        map_.clear();
         count_ = 1;
     }
 
@@ -66,7 +68,7 @@ public:
 
 private:
     std::vector<char> &buf_;
-    std::unordered_map<std::string, uint16_t> map_;
+    std::unordered_map<std::string, uint16_t> &map_;
     int32_t count_ = 0;
 };
 
@@ -237,7 +239,8 @@ void classify_tile_lighting(
     const bool is_door = t.has_flag(ter_furn_flag::TFLAG_DOOR) || tid.find("door") != std::string::npos;
     const bool is_tree = t.has_flag(ter_furn_flag::TFLAG_TREE) || tid.find("t_tree") == 0;
     const bool is_shrub = t.has_flag(ter_furn_flag::TFLAG_SHRUB) || tid.find("t_shrub") == 0 || tid.find("t_underbrush") == 0 || tid.find("fence") != std::string::npos;
-    const bool is_water = t.has_flag(ter_furn_flag::TFLAG_SWIMMABLE) || t.has_flag(ter_furn_flag::TFLAG_SHALLOW_WATER) || t.has_flag(ter_furn_flag::TFLAG_DEEP_WATER);
+    const bool is_puddle = (tid == "t_puddle" || tid == "t_puddle_underground");
+    const bool is_water = !is_puddle && (t.has_flag(ter_furn_flag::TFLAG_SWIMMABLE) || t.has_flag(ter_furn_flag::TFLAG_SHALLOW_WATER) || t.has_flag(ter_furn_flag::TFLAG_DEEP_WATER));
 
     if (is_water) {
         cell.flags |= CCB_TILE_IS_WATER;
@@ -381,6 +384,103 @@ void classify_tile_lighting(
 
 } // namespace
 
+uint64_t compute_world_state_sig(bool has_terrain, int rad_x, int rad_y) {
+    if (!has_terrain || g == nullptr || !g->w_terrain) {
+        return 0ULL;
+    }
+    map &here = get_map();
+    avatar &u = get_avatar();
+    const tripoint_bub_ms center = g->ter_view_p;
+    if (!here.inbounds(center)) {
+        return 0ULL;
+    }
+    const tripoint_bub_ms player_pos = u.pos_bub(here);
+    const auto &st = state();
+
+    uint64_t h = 14695981039346656037ULL;
+    auto mix = [&](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ULL;
+    };
+    auto mix_str = [&](const std::string &s) {
+        mix(static_cast<uint64_t>(s.size()));
+        for (unsigned char ch : s) {
+            mix(static_cast<uint64_t>(ch));
+        }
+    };
+
+    mix(static_cast<uint64_t>(to_turns<int>(calendar::turn - calendar::turn_zero)));
+    mix(static_cast<uint64_t>(static_cast<uint32_t>(center.x())) | (static_cast<uint64_t>(static_cast<uint32_t>(center.y())) << 32));
+    mix(static_cast<uint64_t>(static_cast<uint32_t>(center.z())));
+    mix(static_cast<uint64_t>(static_cast<uint32_t>(player_pos.x())) | (static_cast<uint64_t>(static_cast<uint32_t>(player_pos.y())) << 32));
+    mix(static_cast<uint64_t>(static_cast<uint32_t>(player_pos.z())));
+    mix(static_cast<uint64_t>(static_cast<uint32_t>(u.view_offset.x())) | (static_cast<uint64_t>(static_cast<uint32_t>(u.view_offset.y())) << 32));
+    mix(static_cast<uint64_t>(static_cast<uint32_t>(u.view_offset.z())));
+    mix(static_cast<uint64_t>(std::lround(u.active_light() * 100.0f)));
+    mix(static_cast<uint64_t>((u.is_running() ? 1u : 0u) | (u.is_crouching() ? 2u : 0u) |
+                              (u.get_gender() ? 4u : 0u) | (u.controlling_vehicle ? 8u : 0u)));
+    mix(static_cast<uint64_t>(static_cast<uint32_t>(rad_x)) | (static_cast<uint64_t>(static_cast<uint32_t>(rad_y)) << 32));
+
+    const weather_manager &wman = get_weather_const();
+    mix_str(wman.weather_id.str());
+    mix(static_cast<uint64_t>(wman.windspeed) | (static_cast<uint64_t>(wman.winddirection) << 16));
+    mix(static_cast<uint64_t>(std::lround(g->natural_light_level(center.z()) * 100.0f)));
+
+    if (const item_location wielded = u.get_wielded_item()) {
+        mix_str(wielded->typeId().str());
+    } else {
+        mix(0x55AAULL);
+    }
+    const auto vis_worn = u.worn.get_visible_worn_items(u);
+    mix(static_cast<uint64_t>(vis_worn.size()));
+    for (const item_location &loc : vis_worn) {
+        if (loc) {
+            mix_str(loc->typeId().str());
+        }
+    }
+
+    const auto &auto_route = u.get_auto_move_route();
+    mix(static_cast<uint64_t>(auto_route.size()));
+    if (!auto_route.empty()) {
+        const auto &b = auto_route.back();
+        mix(static_cast<uint64_t>(static_cast<uint32_t>(b.x())) | (static_cast<uint64_t>(static_cast<uint32_t>(b.y())) << 32));
+    }
+
+    mix(static_cast<uint64_t>(SCT.vSCT.size()));
+    for (const scrollingcombattext::cSCT &entry : SCT.vSCT) {
+        mix(static_cast<uint64_t>(entry.getStep()) | (static_cast<uint64_t>(static_cast<uint32_t>(entry.getPosX())) << 16));
+    }
+    mix(st.next_vfx_id.load(std::memory_order_relaxed));
+
+    // Hash live unoccluded w_terrain cells in curses_layer so aim lines, cursor moves, hit flashes,
+    // explosions, destination 'X' previews, and debug map edits ALWAYS invalidate immediately,
+    // while scrolling inside ImGui/curses popups or sidebars skips redundant world captures 100%!
+    const int tx0 = std::max(0, st.work_terrain_x);
+    const int ty0 = std::max(0, st.work_terrain_y);
+    const int tx1 = std::min(st.work_cols, st.work_terrain_x + st.work_terrain_w);
+    const int ty1 = std::min(st.work_rows, st.work_terrain_y + st.work_terrain_h);
+    mix(static_cast<uint64_t>(tx0) | (static_cast<uint64_t>(ty0) << 16) |
+        (static_cast<uint64_t>(tx1) << 32) | (static_cast<uint64_t>(ty1) << 48));
+    if (!st.curses_layer.empty() && st.work_cols > 0) {
+        for (int y = ty0; y < ty1; ++y) {
+            const size_t row = static_cast<size_t>(y) * static_cast<size_t>(st.work_cols);
+            for (int x = tx0; x < tx1; ++x) {
+                const CcbTermCell &tc = st.curses_layer[row + static_cast<size_t>(x)];
+                if ((tc.flags & CCB_CELL_TERRAIN) == 0) {
+                    continue;
+                }
+                const uint64_t cell_pack = static_cast<uint64_t>(tc.codepoint)
+                    ^ (static_cast<uint64_t>(tc.fg_rgba) << 17)
+                    ^ (static_cast<uint64_t>(tc.bg_rgba) << 33)
+                    ^ (static_cast<uint64_t>((y << 10) | x) << 49);
+                mix(cell_pack);
+            }
+        }
+    }
+
+    return h ? h : 1ULL;
+}
+
 void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) {
     out.header = CcbWorldHeader{};
     out.header.generation = gen;
@@ -400,13 +500,18 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
         return;
     }
 
-    // Viewport capture radius around center (supports zoom-out up to 61x41 tiles smoothly)
-    constexpr int RAD_X = 30;
-    constexpr int RAD_Y = 20;
-    const int width = RAD_X * 2 + 1;
-    const int height = RAD_Y * 2 + 1;
-    const int origin_x = center.x() - RAD_X;
-    const int origin_y = center.y() - RAD_Y;
+    auto &st_mut = state();
+    // Dynamic viewport capture radius (clamped 16..34 x 12..24; ensures 3D mode gets >= 24x20 lighting coverage!)
+    int rad_x = std::clamp(st_mut.capture_rad_x.load(std::memory_order_relaxed), 16, 34);
+    int rad_y = std::clamp(st_mut.capture_rad_y.load(std::memory_order_relaxed), 12, 24);
+    if (st_mut.render3d_enabled.load(std::memory_order_relaxed)) {
+        rad_x = std::max(rad_x, 24);
+        rad_y = std::max(rad_y, 20);
+    }
+    const int width = rad_x * 2 + 1;
+    const int height = rad_y * 2 + 1;
+    const int origin_x = center.x() - rad_x;
+    const int origin_y = center.y() - rad_y;
 
     out.header.origin_x = origin_x;
     out.header.origin_y = origin_y;
@@ -428,8 +533,19 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
     const bool is_looking = (u.view_offset != tripoint_rel_ms::zero);
     out.header.is_looking = is_looking ? 1 : 0;
     out.header.is_underground = (z < 0) ? 1 : 0;
+    out.header.player_indoors = here.is_outside(player_pos) ? 0 : 1;
+    out.header.player_move_mode = u.is_running() ? 2 : (u.is_crouching() ? 0 : 1);
+    out.header.player_mat_id = 6;
+    out.header.tree_density_u8 = 0;
 
-    const std::string wid = get_weather().weather_id.str();
+    const weather_manager &wman = get_weather_const();
+    const rl_vec2d wdir = convert_wind_to_coord(wman.winddirection);
+    const float wlen = std::sqrt(static_cast<float>(wdir.x * wdir.x + wdir.y * wdir.y));
+    out.header.wind_x = (wlen > 0.001f) ? static_cast<float>(wdir.x) / wlen : 0.85f;
+    out.header.wind_y = (wlen > 0.001f) ? static_cast<float>(wdir.y) / wlen : 0.25f;
+    out.header.wind_speed = static_cast<float>(wman.windspeed);
+
+    const std::string wid = wman.weather_id.str();
     std::strncpy(out.header.weather_id, wid.c_str(), sizeof(out.header.weather_id) - 1);
 
     if (const item_location wielded = u.get_wielded_item()) {
@@ -454,16 +570,23 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
         std::min(MAPSIZE_Y - 1, origin_y + height - 1), z));
     u.prepare_map_memory_region(abs_min, abs_max);
 
-    StringInterner intern(out.strings);
-    out.tiles.assign(static_cast<size_t>(width) * static_cast<size_t>(height), CcbWorldTile{});
+    static std::unordered_map<std::string, uint16_t> s_intern_map;
+    StringInterner intern(out.strings, s_intern_map);
+    const size_t tile_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    out.tiles.resize(tile_count);
+    if (tile_count > 0) {
+        std::memset(out.tiles.data(), 0, tile_count * sizeof(CcbWorldTile));
+    }
     out.lights.clear();
     out.path_points.clear();
     out.sct_entries.clear();
 
     // Pre-index visible creatures in the viewport so transient hit/explosion overlays can classify cleanly
     // and natural monster curses backgrounds (magenta/blue/purple/red mtype colors & status hilites) NEVER draw boxes!
-    std::unordered_map<int64_t, uint32_t> critter_sym_at;
-    std::unordered_map<int64_t, uint32_t> critter_bg_at;
+    static std::unordered_map<int64_t, uint32_t> critter_sym_at;
+    static std::unordered_map<int64_t, uint32_t> critter_bg_at;
+    critter_sym_at.clear();
+    critter_bg_at.clear();
     for (const Creature &critter : g->all_creatures()) {
         const tripoint_bub_ms cp = critter.pos_bub(here);
         if (cp.z() != z) continue;
@@ -500,6 +623,9 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
             CcbWorldTile &cell = out.tiles[static_cast<size_t>(ty) * static_cast<size_t>(width) + static_cast<size_t>(tx)];
             cell.ter_subtile = 0xFF;
             cell.furn_subtile = 0xFF;
+            cell.field_subtile = 0xFF;
+            cell.field_rot = 0;
+            cell.trap_sub_rot = 0;
 
             const tripoint_bub_ms p(mx, my, z);
             if (!here.inbounds(p)) {
@@ -536,9 +662,17 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
             if (out.lights.size() < 96) {
                 float best_lum = 0.0f;
                 uint32_t best_rgba = 0xFFD0ECFFu; // warm-neutral incandescent default
+                uint8_t best_flags = 0u;
+                auto is_fire_id = [](const std::string &sid) -> bool {
+                    return sid.find("fire") != std::string::npos || sid.find("flame") != std::string::npos ||
+                           sid.find("lava") != std::string::npos || sid.find("brazier") != std::string::npos ||
+                           sid.find("hearth") != std::string::npos || sid.find("forge") != std::string::npos ||
+                           sid.find("kiln") != std::string::npos || sid.find("campfire") != std::string::npos;
+                };
                 if (real_tobj.light_emitted > 0) {
                     best_lum = std::max(best_lum, static_cast<float>(real_tobj.light_emitted));
                     best_rgba = classify_emitter_rgba(real_tobj.id.str(), real_tobj.light_color, 0xFFD0ECFFu);
+                    if (is_fire_id(real_tobj.id.str())) best_flags |= CCB_LIGHT_FLAG_FIRE;
                 } else if (real_tobj.id.str().find("console") != std::string::npos &&
                            real_tobj.id.str().find("broken") == std::string::npos) {
                     best_lum = std::max(best_lum, 4.5f);
@@ -551,11 +685,13 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                         if (fl > best_lum) {
                             best_lum = fl;
                             best_rgba = classify_emitter_rgba(fid_s, real_fobj->light_color, 0xFFD0ECFFu);
+                            best_flags = is_fire_id(fid_s) ? CCB_LIGHT_FLAG_FIRE : 0u;
                         }
                     } else if (fid_s.find("console") != std::string::npos &&
                                fid_s.find("broken") == std::string::npos && 4.5f > best_lum) {
                         best_lum = 4.5f;
                         best_rgba = 0xFFFFDC5Cu;
+                        best_flags = 0u;
                     }
                 }
                 const field &wfld = here.field_at(p);
@@ -566,8 +702,10 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                             const float fl = static_cast<float>(fil.light_emitted);
                             if (fl > best_lum) {
                                 best_lum = fl;
-                                const uint32_t fld_def = (fe.first == fd_fire) ? 0xFF348AFFu : 0xFFFFD080u;
+                                const bool is_f = (fe.first == fd_fire);
+                                const uint32_t fld_def = is_f ? 0xFF348AFFu : 0xFFFFD080u;
                                 best_rgba = classify_emitter_rgba(fe.first.id().str(), fil.light_color, fld_def);
+                                best_flags = is_f ? CCB_LIGHT_FLAG_FIRE : 0u;
                             }
                         }
                     }
@@ -579,12 +717,16 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                         if (it.getlight(ilum, iw, id) && ilum > best_lum) {
                             best_lum = ilum;
                             const uint32_t it_def = (ilum >= 25.0f) ? 0xFFFFF6EAu : 0xFF348AFFu;
-                            best_rgba = classify_emitter_rgba(it.typeId().str(), light_color_rgb{}, it_def);
+                            const std::string it_s = it.typeId().str();
+                            best_rgba = classify_emitter_rgba(it_s, light_color_rgb{}, it_def);
+                            best_flags = is_fire_id(it_s) ? CCB_LIGHT_FLAG_FIRE : 0u;
                         }
                     }
                 }
                 if (best_lum > 0.5f) {
-                    out.lights.push_back(CcbWorldLight{mx, my, best_lum, best_rgba});
+                    out.lights.push_back(CcbWorldLight{
+                        mx, my, best_lum, best_rgba, 0.0f, 0.0f, -1.0f, best_flags, {0, 0, 0}
+                    });
                 }
             }
 
@@ -630,9 +772,10 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                     } else if (tc.codepoint == 'X' && bg_g > 110) {
                         ov_kind = CCB_OV_CURSOR;
                     } else {
-                        // Exclude CCB's ASCII item-on-tile background highlight (blue/brown/yellow hilite() on ground items & containers)
-                        const bool is_item_hilite_bg = !is_looking && here.has_items(p);
-                        if (!is_item_hilite_bg &&
+                        // Exclude look-around center cursor tile (drawn cleanly via corner reticle) & ASCII ground-item hilite bg
+                        const bool is_look_center = is_looking && (mx == center.x() && my == center.y());
+                        const bool is_item_hilite_bg = here.has_items(p);
+                        if (!is_look_center && !is_item_hilite_bg &&
                             !tile_naturally_has_bg(here, p, real_tobj, real_fobj, real_vp, tc.bg_rgba, black_rgba)) {
                             ov_kind = CCB_OV_HIGHLIGHT;
                         }
@@ -730,18 +873,46 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                     cell.furn_rot = static_cast<uint8_t>(frot & 15);
                 }
 
-                // Trap
+                // Trap with REAL CCB 4-neighbor multitile connection & rotation!
                 const trap &tr = here.tr_at(p);
                 if (!tr.is_null() && tr.can_see(p, u)) {
                     cell.trap_str = intern.intern(tr.id.str());
+                    const std::array<int, 4> tnb = {
+                        static_cast<int>(here.tr_at(p + point::south).loadid),
+                        static_cast<int>(here.tr_at(p + point::east).loadid),
+                        static_cast<int>(here.tr_at(p + point::west).loadid),
+                        static_cast<int>(here.tr_at(p + point::north).loadid)
+                    };
+                    int tsub = 0;
+                    int trot = 0;
+                    map::get_tile_values(tr.loadid.to_i(), tnb, tsub, trot, 0);
+                    const uint8_t packed_sub = static_cast<uint8_t>(std::clamp(tsub, 0, 7) + 1);
+                    cell.trap_sub_rot = static_cast<uint8_t>((trot & 0xF) | ((packed_sub & 0xF) << 4));
                 }
 
-                // Field (fire, blood, smoke, acid, electricity)
+                // Field (blood, gibs, acid, bile, fire, smoke, electricity) with REAL CCB 4-neighbor autotile subtile & rotation!
+                // Fixes fd_blood & 25+ multitile fields rendering as opaque full-tile squares instead of realistic splatters/connections!
                 const field &fld = here.field_at(p);
                 const field_type_id disp_fld = fld.displayed_field_type();
                 if (disp_fld) {
                     cell.field_str = intern.intern(disp_fld.id().str());
                     cell.field_intensity = static_cast<uint8_t>(std::clamp(fld.displayed_intensity(), 1, 3));
+                    auto nb_fld_id = [&](const tripoint_bub_ms &q) -> int {
+                        if (!here.inbounds(q)) return 0;
+                        const field &nf = here.field_at(q);
+                        return nf.find_field(disp_fld) != nullptr ? disp_fld.to_i() : 0;
+                    };
+                    const std::array<int, 4> fnb = {
+                        nb_fld_id(p + point::south),
+                        nb_fld_id(p + point::east),
+                        nb_fld_id(p + point::west),
+                        nb_fld_id(p + point::north)
+                    };
+                    int fsub = 0;
+                    int frot = 0;
+                    map::get_tile_values(disp_fld.to_i(), fnb, fsub, frot, 0);
+                    cell.field_subtile = static_cast<uint8_t>(std::clamp(fsub, 0, 7));
+                    cell.field_rot = static_cast<uint8_t>(frot & 15);
                 }
 
                 // Vehicle part (exact CCB parity: keep pure vp_<id>[#<variant>] and pack open/broken subtile in high nibble!)
@@ -885,7 +1056,38 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
         }
     }
 
-    // Active vehicle headlights / aisle / dome lights (world-space, never pops on movement)
+    // Compute nearby tree canopy density (for forest wind rustle & daytime birds) & player underfoot material ID
+    {
+        int tree_cnt = 0;
+        for (int ty = 0; ty < height; ++ty) {
+            const int dy = (origin_y + ty) - player_pos.y();
+            if (std::abs(dy) > 14) continue;
+            for (int tx = 0; tx < width; ++tx) {
+                const int dx = (origin_x + tx) - player_pos.x();
+                if (std::abs(dx) > 14) continue;
+                const CcbWorldTile &tc = out.tiles[static_cast<size_t>(ty) * static_cast<size_t>(width) + static_cast<size_t>(tx)];
+                if (tc.light_kind == CCB_LIGHT_TREE) {
+                    ++tree_cnt;
+                }
+            }
+        }
+        out.header.tree_density_u8 = static_cast<uint8_t>(std::clamp(tree_cnt * 7, 0, 255));
+
+        const int ptx = player_pos.x() - origin_x;
+        const int pty = player_pos.y() - origin_y;
+        if (ptx >= 0 && ptx < width && pty >= 0 && pty < height) {
+            const CcbWorldTile &pc = out.tiles[static_cast<size_t>(pty) * static_cast<size_t>(width) + static_cast<size_t>(ptx)];
+            uint8_t pmat = static_cast<uint8_t>(std::min(6, static_cast<int>(pc.surface_hold_u8) / 36));
+            const ter_t &pt_obj = here.ter(player_pos).obj();
+            if ((pc.flags & CCB_TILE_IS_WATER) != 0 ||
+                ((pt_obj.id.str() == "t_puddle" || pt_obj.id.str() == "t_puddle_underground") && here.has_items(player_pos))) {
+                pmat = 4; // water splash
+            }
+            out.header.player_mat_id = pmat;
+        }
+    }
+
+    // Active vehicle headlights / aisle / dome lights (world-space, with true directional spotlight cones!)
     for (wrapped_vehicle &vv : here.get_vehicles()) {
         vehicle *v = vv.v;
         if (!v) continue;
@@ -898,9 +1100,22 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
                 continue;
             }
             const vpart_info &vpi = pt->info();
-            const float vlum = std::clamp(static_cast<float>(vpi.bonus) * 0.25f, 3.5f, 24.0f);
+            const std::string &vpid = vpi.id.str();
+            const bool is_cone = vpi.has_flag(VPFLAG_CONE_LIGHT) || vpid.find("headlight") != std::string::npos || vpid.find("searchlight") != std::string::npos;
+            const bool is_wide = vpi.has_flag(VPFLAG_WIDE_CONE_LIGHT) || vpid.find("floodlight") != std::string::npos;
+            float dx = 0.0f, dy = 0.0f, cone_c = -1.0f;
+            uint8_t lflags = 0u;
+            if (is_cone || is_wide) {
+                const double rad = units::to_radians(v->face.dir() + pt->direction);
+                dx = static_cast<float>(std::cos(rad));
+                dy = static_cast<float>(std::sin(rad));
+                cone_c = is_wide ? 0.48f : 0.78f; // ~61 deg wide floodlight vs ~39 deg focused headlight beam!
+                lflags |= CCB_LIGHT_FLAG_SPOTLIGHT;
+            }
+            const float vlum = std::clamp(static_cast<float>(vpi.bonus) * (is_cone || is_wide ? 0.34f : 0.25f), 4.5f, 30.0f);
             out.lights.push_back(CcbWorldLight{
-                src.x(), src.y(), vlum, classify_emitter_rgba(vpi.id.str(), vpi.light_color, 0xFFFFF4E4u)
+                src.x(), src.y(), vlum, classify_emitter_rgba(vpid, vpi.light_color, 0xFFFFF4E4u),
+                dx, dy, cone_c, lflags, {0, 0, 0}
             });
         }
     }
@@ -1017,7 +1232,17 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
         s_mm_py = player_pos.y();
         s_mm_pz = z;
     }
-    out.minimap_rgba = s_mm_base_cache;
+    out.minimap_rgba.resize(MM_BYTES);
+    std::memcpy(out.minimap_rgba.data(), s_mm_base_cache.data(), MM_BYTES);
+
+    uint64_t mm_sig = 14695981039346656037ULL;
+    auto mm_mix = [&](uint64_t v) {
+        mm_sig ^= v;
+        mm_sig *= 1099511628211ULL;
+    };
+    mm_mix(static_cast<uint64_t>(s_mm_turn));
+    mm_mix(static_cast<uint64_t>(static_cast<uint32_t>(s_mm_px)) | (static_cast<uint64_t>(static_cast<uint32_t>(s_mm_py)) << 32));
+    mm_mix(static_cast<uint64_t>(static_cast<uint32_t>(s_mm_pz)));
 
     // Stamp visible creatures & player onto pixel minimap
     for (const Creature &critter : g->all_creatures()) {
@@ -1052,12 +1277,19 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
         };
         const int cx = dx + MM_RAD;
         const int cy = dy + MM_RAD;
+        mm_mix(static_cast<uint64_t>(cx) | (static_cast<uint64_t>(cy) << 12) |
+               (static_cast<uint64_t>(r) << 24) | (static_cast<uint64_t>(g8) << 32) | (static_cast<uint64_t>(b) << 40));
         plot(cx, cy);
         if (is_player) {
             plot(cx - 1, cy); plot(cx + 1, cy);
             plot(cx, cy - 1); plot(cx, cy + 1);
         }
     }
+    if (st_mut.minimap_seq_counter == 0 || mm_sig != st_mut.last_minimap_sig) {
+        st_mut.last_minimap_sig = mm_sig;
+        ++st_mut.minimap_seq_counter;
+    }
+    out.header.minimap_seq = st_mut.minimap_seq_counter;
 
     // Capture active auto-move route from u.get_auto_move_route(), OR synthesize preview route
     // from CCB's highlighted destination_preview / draw_line tiles on w_terrain!

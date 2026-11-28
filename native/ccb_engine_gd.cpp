@@ -1,4 +1,5 @@
 #include "ccb_engine_gd.hpp"
+#include "ccb_audio_synth.hpp"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -31,17 +32,30 @@ struct BridgeFuncs {
     void (*ccb_resume_session)(void) = nullptr;
     int (*ccb_get_status_message)(char *, int) = nullptr;
     void (*ccb_push_key)(int, const char *, int, int, int) = nullptr;
+    void (*ccb_push_text_input)(const char *) = nullptr;
+    void (*ccb_push_ime_edit)(const char *) = nullptr;
     void (*ccb_push_mouse)(int, int, int, int) = nullptr;
     void (*ccb_push_resize)(int, int) = nullptr;
+    int (*ccb_get_loading_state)(CcbLoadingState *) = nullptr;
     uint64_t (*ccb_get_generation)(void) = nullptr;
+    uint64_t (*ccb_get_world_generation)(void) = nullptr;
+    uint64_t (*ccb_get_scene3d_generation)(void) = nullptr;
+    uint64_t (*ccb_get_audio_generation)(void) = nullptr;
+    void (*ccb_set_world_capture_radius)(int, int) = nullptr;
     int (*ccb_copy_terminal_frame)(CcbTermHeader *, CcbTermCell *, int) = nullptr;
     int (*ccb_copy_world_snapshot)(
         CcbWorldHeader *, CcbWorldTile *, int, char *, int,
         CcbWorldCreature *, int, CcbWorldLight *, int,
         char *, int, uint8_t *, int) = nullptr;
     int (*ccb_copy_world_effects)(CcbWorldPathPoint *, int, CcbWorldSct *, int) = nullptr;
+    int (*ccb_copy_world_vfx)(CcbWorldVfx *, int) = nullptr;
+    int (*ccb_copy_audio_events)(CcbAudioEvent *, int) = nullptr;
     int (*ccb_get_tileset_config)(char *, int, char *, int, char *, int, int *) = nullptr;
     int (*ccb_copy_looks_like_table)(char *, int) = nullptr;
+    void (*ccb_set_render3d_mode)(int, int) = nullptr;
+    int (*ccb_copy_scene3d_snapshot)(
+        CcbScene3DHeader *, CcbScene3DItem *, int,
+        char *, int, CcbScene3DLight *, int) = nullptr;
     bool loaded = false;
 };
 
@@ -107,14 +121,25 @@ bool ensure_bridge_loaded(std::string &err_out) {
     ok &= resolve_sym(mod, "ccb_resume_session", g_bridge.ccb_resume_session);
     ok &= resolve_sym(mod, "ccb_get_status_message", g_bridge.ccb_get_status_message);
     ok &= resolve_sym(mod, "ccb_push_key", g_bridge.ccb_push_key);
+    ok &= resolve_sym(mod, "ccb_push_text_input", g_bridge.ccb_push_text_input);
+    ok &= resolve_sym(mod, "ccb_push_ime_edit", g_bridge.ccb_push_ime_edit);
     ok &= resolve_sym(mod, "ccb_push_mouse", g_bridge.ccb_push_mouse);
     ok &= resolve_sym(mod, "ccb_push_resize", g_bridge.ccb_push_resize);
+    ok &= resolve_sym(mod, "ccb_get_loading_state", g_bridge.ccb_get_loading_state);
     ok &= resolve_sym(mod, "ccb_get_generation", g_bridge.ccb_get_generation);
+    ok &= resolve_sym(mod, "ccb_get_world_generation", g_bridge.ccb_get_world_generation);
+    ok &= resolve_sym(mod, "ccb_get_scene3d_generation", g_bridge.ccb_get_scene3d_generation);
+    ok &= resolve_sym(mod, "ccb_get_audio_generation", g_bridge.ccb_get_audio_generation);
+    ok &= resolve_sym(mod, "ccb_set_world_capture_radius", g_bridge.ccb_set_world_capture_radius);
     ok &= resolve_sym(mod, "ccb_copy_terminal_frame", g_bridge.ccb_copy_terminal_frame);
     ok &= resolve_sym(mod, "ccb_copy_world_snapshot", g_bridge.ccb_copy_world_snapshot);
     ok &= resolve_sym(mod, "ccb_copy_world_effects", g_bridge.ccb_copy_world_effects);
+    ok &= resolve_sym(mod, "ccb_copy_world_vfx", g_bridge.ccb_copy_world_vfx);
+    ok &= resolve_sym(mod, "ccb_copy_audio_events", g_bridge.ccb_copy_audio_events);
     ok &= resolve_sym(mod, "ccb_get_tileset_config", g_bridge.ccb_get_tileset_config);
     ok &= resolve_sym(mod, "ccb_copy_looks_like_table", g_bridge.ccb_copy_looks_like_table);
+    ok &= resolve_sym(mod, "ccb_set_render3d_mode", g_bridge.ccb_set_render3d_mode);
+    ok &= resolve_sym(mod, "ccb_copy_scene3d_snapshot", g_bridge.ccb_copy_scene3d_snapshot);
     if (!ok) {
         FreeLibrary(mod);
         err_out = "Missing exported symbol(s) in ccb_bridge.dll";
@@ -202,6 +227,18 @@ void CcbEngine::send_key(int key_code, const godot::String &utf8_text, bool ctrl
     g_bridge.ccb_push_key(key_code, u.get_data(), ctrl ? 1 : 0, alt ? 1 : 0, shift ? 1 : 0);
 }
 
+void CcbEngine::send_text_input(const godot::String &utf8_text) {
+    if (!g_bridge.loaded || !g_bridge.ccb_push_text_input || utf8_text.is_empty()) return;
+    const godot::CharString u = utf8_text.utf8();
+    g_bridge.ccb_push_text_input(u.get_data());
+}
+
+void CcbEngine::send_ime_edit(const godot::String &utf8_edit) {
+    if (!g_bridge.loaded || !g_bridge.ccb_push_ime_edit) return;
+    const godot::CharString u = utf8_edit.utf8();
+    g_bridge.ccb_push_ime_edit(u.get_data());
+}
+
 void CcbEngine::send_mouse(int action, int cell_x, int cell_y, int wheel) {
     if (!g_bridge.loaded || !g_bridge.ccb_push_mouse) return;
     g_bridge.ccb_push_mouse(action, cell_x, cell_y, wheel);
@@ -215,6 +252,48 @@ void CcbEngine::resize(int cols, int rows) {
 int64_t CcbEngine::get_generation() const {
     if (!g_bridge.loaded || !g_bridge.ccb_get_generation) return 0;
     return static_cast<int64_t>(g_bridge.ccb_get_generation());
+}
+
+int64_t CcbEngine::get_world_generation() const {
+    if (!g_bridge.loaded || !g_bridge.ccb_get_world_generation) return get_generation();
+    return static_cast<int64_t>(g_bridge.ccb_get_world_generation());
+}
+
+int64_t CcbEngine::get_scene3d_generation() const {
+    if (!g_bridge.loaded || !g_bridge.ccb_get_scene3d_generation) return get_generation();
+    return static_cast<int64_t>(g_bridge.ccb_get_scene3d_generation());
+}
+
+int64_t CcbEngine::get_audio_generation() const {
+    if (!g_bridge.loaded || !g_bridge.ccb_get_audio_generation) return 0;
+    return static_cast<int64_t>(g_bridge.ccb_get_audio_generation());
+}
+
+void CcbEngine::set_world_capture_radius(int rad_x, int rad_y) {
+    if (!g_bridge.loaded || !g_bridge.ccb_set_world_capture_radius) return;
+    g_bridge.ccb_set_world_capture_radius(rad_x, rad_y);
+}
+
+godot::Dictionary CcbEngine::get_loading_state() const {
+    godot::Dictionary res;
+    res["active"] = false;
+    res["seq"] = static_cast<int64_t>(0);
+    res["image_path"] = godot::String();
+    res["tip"] = godot::String();
+    res["context"] = godot::String();
+    res["step"] = godot::String();
+    if (!g_bridge.loaded || !g_bridge.ccb_get_loading_state) {
+        return res;
+    }
+    CcbLoadingState ls{};
+    g_bridge.ccb_get_loading_state(&ls);
+    res["active"] = ls.active != 0;
+    res["seq"] = static_cast<int64_t>(ls.seq);
+    res["image_path"] = godot::String::utf8(ls.image_path);
+    res["tip"] = godot::String::utf8(ls.tip);
+    res["context"] = godot::String::utf8(ls.context);
+    res["step"] = godot::String::utf8(ls.step);
+    return res;
 }
 
 godot::Dictionary CcbEngine::poll_terminal_frame() {
@@ -253,6 +332,7 @@ godot::Dictionary CcbEngine::poll_terminal_frame() {
     res["in_game"] = hdr.in_game != 0;
     res["is_looking"] = hdr.is_looking != 0;
     res["paused"] = hdr.paused != 0;
+    res["want_text_input"] = hdr.want_text_input != 0;
     res["cells"] = bytes;
     return res;
 }
@@ -349,7 +429,8 @@ godot::Dictionary CcbEngine::poll_world_snapshot() {
         uint8_t *vp = vis_rgba.ptrw();
         uint8_t *rp = rain_mask.ptrw();
 
-        std::vector<uint8_t> surf_cls(static_cast<size_t>(tile_count), 0);
+        surf_cls_buf_.assign(static_cast<size_t>(tile_count), 0);
+        auto &surf_cls = surf_cls_buf_;
         static constexpr uint8_t A_LUT[4] = { 0, 85, 170, 255 };
         static constexpr uint8_t MAT_A_LUT[7] = { 0, 36, 73, 109, 146, 182, 219 };
 
@@ -490,7 +571,7 @@ godot::Dictionary CcbEngine::poll_world_snapshot() {
         creatures.push_back(cd);
     }
 
-    // Dynamic light emitters
+    // Dynamic light emitters (including vehicle directional headlight cones & fire flags)
     godot::Array lights;
     for (int i = 0; i < hdr.light_count; ++i) {
         const auto &l = light_buf_[static_cast<size_t>(i)];
@@ -499,6 +580,10 @@ godot::Dictionary CcbEngine::poll_world_snapshot() {
         ld["y"] = l.y;
         ld["intensity"] = l.intensity;
         ld["rgba"] = static_cast<int64_t>(l.color_rgba);
+        ld["dir_x"] = l.dir_x;
+        ld["dir_y"] = l.dir_y;
+        ld["cone_cos"] = l.cone_cos;
+        ld["flags"] = static_cast<int>(l.flags);
         lights.push_back(ld);
     }
 
@@ -509,12 +594,16 @@ godot::Dictionary CcbEngine::poll_world_snapshot() {
         worn_ids = worn_str.split(",", false);
     }
 
-    // Pixel minimap RGBA bytes
+    // Pixel minimap RGBA bytes (skip 58 KB memcpy + allocation when minimap_seq is unchanged!)
+    const bool minimap_changed = (hdr.minimap_seq == 0 || hdr.minimap_seq != last_polled_minimap_seq_);
     godot::PackedByteArray mm_arr;
-    const int actual_mm_bytes = hdr.minimap_size * hdr.minimap_size * 4;
-    mm_arr.resize(actual_mm_bytes);
-    if (actual_mm_bytes > 0) {
-        std::memcpy(mm_arr.ptrw(), minimap_buf_.data(), static_cast<size_t>(actual_mm_bytes));
+    if (minimap_changed) {
+        const int actual_mm_bytes = hdr.minimap_size * hdr.minimap_size * 4;
+        mm_arr.resize(actual_mm_bytes);
+        if (actual_mm_bytes > 0) {
+            std::memcpy(mm_arr.ptrw(), minimap_buf_.data(), static_cast<size_t>(actual_mm_bytes));
+        }
+        last_polled_minimap_seq_ = hdr.minimap_seq;
     }
 
     res["valid"] = true;
@@ -534,6 +623,13 @@ godot::Dictionary CcbEngine::poll_world_snapshot() {
     res["player_male"] = hdr.player_male != 0;
     res["is_looking"] = hdr.is_looking != 0;
     res["is_underground"] = hdr.is_underground != 0;
+    res["wind_x"] = hdr.wind_x;
+    res["wind_y"] = hdr.wind_y;
+    res["wind_speed"] = hdr.wind_speed;
+    res["player_indoors"] = hdr.player_indoors != 0;
+    res["player_move_mode"] = static_cast<int>(hdr.player_move_mode);
+    res["player_mat_id"] = static_cast<int>(hdr.player_mat_id);
+    res["tree_density"] = static_cast<float>(hdr.tree_density_u8) / 255.0f;
     res["weather"] = godot::String::utf8(hdr.weather_id);
     res["wielded"] = godot::String::utf8(hdr.wielded_id);
     res["worn"] = worn_ids;
@@ -578,13 +674,231 @@ godot::Dictionary CcbEngine::poll_world_snapshot() {
         }
     }
 
+    // Transient combat & gunfire VFX events (muzzle flashes, tracers, laser/plasma/lightning beams, impact sparks, blasts)
+    godot::Array vfx_events;
+    if (g_bridge.ccb_copy_world_vfx) {
+        const int vcount = g_bridge.ccb_copy_world_vfx(nullptr, 0);
+        if (vcount > 0) {
+            vfx_buf_.resize(static_cast<size_t>(vcount));
+            const int copied_v = g_bridge.ccb_copy_world_vfx(vfx_buf_.data(), vcount);
+            for (int i = 0; i < copied_v; ++i) {
+                const auto &vf = vfx_buf_[static_cast<size_t>(i)];
+                if (vf.z != hdr.z) continue;
+                godot::Dictionary vd;
+                vd["id"] = static_cast<int64_t>(vf.id);
+                vd["kind"] = static_cast<int>(vf.kind);
+                vd["ox"] = vf.ox;
+                vd["oy"] = vf.oy;
+                vd["tx"] = vf.tx;
+                vd["ty"] = vf.ty;
+                vd["radius"] = vf.radius;
+                vd["light_intensity"] = vf.light_intensity;
+                vd["rgba"] = static_cast<int64_t>(vf.color_rgba);
+                vd["arc_deg"] = static_cast<int>(vf.arc_deg);
+                vd["delay_ms"] = static_cast<int>(vf.delay_ms);
+                vd["caliber"] = static_cast<int>(vf.caliber_class);
+                vd["shot_index"] = static_cast<int>(vf.shot_index);
+                vd["flags"] = static_cast<int>(vf.flags);
+                vfx_events.push_back(vd);
+            }
+        }
+    }
+
     res["creatures"] = creatures;
     res["lights"] = lights;
     res["path_points"] = path_points;
     res["sct"] = sct_entries;
+    res["vfx_events"] = vfx_events;
+    res["audio_events"] = poll_audio_events();
     res["minimap_size"] = hdr.minimap_size;
+    res["minimap_seq"] = static_cast<int64_t>(hdr.minimap_seq);
+    res["minimap_changed"] = minimap_changed;
     res["minimap_rgba"] = mm_arr;
     return res;
+}
+
+void CcbEngine::set_render3d_mode(bool enabled, bool same_level_only) {
+    if (!g_bridge.loaded || !g_bridge.ccb_set_render3d_mode) {
+        return;
+    }
+    g_bridge.ccb_set_render3d_mode(enabled ? 1 : 0, same_level_only ? 1 : 0);
+}
+
+godot::Dictionary CcbEngine::poll_scene3d_snapshot() {
+    godot::Dictionary res;
+    if (!g_bridge.loaded || !g_bridge.ccb_copy_scene3d_snapshot) {
+        res["valid"] = false;
+        return res;
+    }
+
+    CcbScene3DHeader hdr{};
+    if (!g_bridge.ccb_copy_scene3d_snapshot(&hdr, nullptr, 0, nullptr, 0, nullptr, 0) || !hdr.valid) {
+        res["valid"] = false;
+        return res;
+    }
+
+    const int item_count = std::max(0, hdr.item_count);
+    const int str_bytes = std::max(1, hdr.string_bytes);
+    const int light_count = std::max(0, hdr.light_count);
+
+    scene3d_items_buf_.resize(static_cast<size_t>(std::max(1, item_count)));
+    scene3d_str_buf_.resize(static_cast<size_t>(str_bytes));
+    scene3d_lights_buf_.resize(static_cast<size_t>(std::max(1, light_count)));
+
+    if (!g_bridge.ccb_copy_scene3d_snapshot(
+            &hdr,
+            scene3d_items_buf_.data(), static_cast<int>(scene3d_items_buf_.size()),
+            scene3d_str_buf_.data(), static_cast<int>(scene3d_str_buf_.size()),
+            scene3d_lights_buf_.data(), static_cast<int>(scene3d_lights_buf_.size())) || !hdr.valid) {
+        res["valid"] = false;
+        return res;
+    }
+
+    godot::PackedStringArray strings;
+    strings.resize(hdr.string_count);
+    int s_idx = 0;
+    int off = 0;
+    while (s_idx < hdr.string_count && off < hdr.string_bytes) {
+        const char *p = scene3d_str_buf_.data() + off;
+        const size_t slen = std::strlen(p);
+        strings.set(s_idx++, godot::String::utf8(p, static_cast<int64_t>(slen)));
+        off += static_cast<int>(slen) + 1;
+    }
+
+    godot::PackedByteArray items_bytes;
+    const int64_t item_byte_len = static_cast<int64_t>(item_count) * static_cast<int64_t>(sizeof(CcbScene3DItem));
+    items_bytes.resize(item_byte_len);
+    if (item_byte_len > 0) {
+        std::memcpy(items_bytes.ptrw(), scene3d_items_buf_.data(), static_cast<size_t>(item_byte_len));
+    }
+
+    godot::Array lights;
+    for (int i = 0; i < light_count; ++i) {
+        const auto &lt = scene3d_lights_buf_[static_cast<size_t>(i)];
+        godot::Dictionary ld;
+        ld["px"] = lt.px;
+        ld["py"] = lt.py;
+        ld["pz"] = lt.pz;
+        ld["radius"] = lt.radius;
+        ld["r"] = lt.r;
+        ld["g"] = lt.g;
+        ld["b"] = lt.b;
+        ld["intensity"] = lt.intensity;
+        lights.push_back(ld);
+    }
+
+    res["valid"] = true;
+    res["generation"] = static_cast<int64_t>(hdr.generation);
+    res["center"] = godot::Vector2i(hdr.center_x, hdr.center_y);
+    res["center_z"] = hdr.center_z;
+    res["player"] = godot::Vector2i(hdr.player_x, hdr.player_y);
+    res["player_z"] = hdr.player_z;
+    res["season"] = hdr.season;
+    res["turn"] = hdr.turn;
+    res["daylight"] = hdr.daylight;
+    res["sun_x"] = hdr.sun_x;
+    res["sun_y"] = hdr.sun_y;
+    res["sun_z"] = hdr.sun_z;
+    res["sun_up"] = hdr.sun_up;
+    res["cloudiness"] = hdr.cloudiness;
+    res["wind_x"] = hdr.wind_x;
+    res["wind_y"] = hdr.wind_y;
+    res["nv_active"] = hdr.nv_active;
+    res["nv_floor"] = hdr.nv_floor;
+    res["nv_overexpose"] = hdr.nv_overexpose;
+    res["memory_preset"] = hdr.memory_preset;
+    res["same_level_only"] = hdr.same_level_only != 0;
+    res["controlling_vehicle"] = hdr.controlling_vehicle != 0;
+    res["is_looking"] = hdr.is_looking != 0;
+    res["veh_ind_x"] = hdr.veh_ind_x;
+    res["veh_ind_y"] = hdr.veh_ind_y;
+    res["item_count"] = item_count;
+    res["item_stride"] = static_cast<int>(sizeof(CcbScene3DItem));
+    res["items"] = items_bytes;
+    res["strings"] = strings;
+    res["lights"] = lights;
+    return res;
+}
+
+godot::Array CcbEngine::poll_audio_events() {
+    godot::Array out;
+    if (!g_bridge.loaded || !g_bridge.ccb_copy_audio_events) {
+        return out;
+    }
+    const int acount = g_bridge.ccb_copy_audio_events(nullptr, 0);
+    if (acount <= 0) {
+        return out;
+    }
+    audio_buf_.resize(static_cast<size_t>(acount));
+    const int copied = g_bridge.ccb_copy_audio_events(audio_buf_.data(), acount);
+    for (int i = 0; i < copied; ++i) {
+        const auto &ae = audio_buf_[static_cast<size_t>(i)];
+        godot::Dictionary ad;
+        ad["id"] = static_cast<int64_t>(ae.id);
+        ad["burst_id"] = static_cast<int64_t>(ae.burst_id);
+        ad["x"] = ae.x;
+        ad["y"] = ae.y;
+        ad["z"] = ae.z;
+        ad["rpm"] = static_cast<int>(ae.rpm);
+        ad["delay_ms"] = static_cast<int>(ae.delay_ms);
+        ad["volume"] = ae.volume;
+        ad["pan"] = ae.pan;
+        ad["radius"] = ae.radius;
+        ad["kind"] = static_cast<int>(ae.kind);
+        ad["subtype"] = static_cast<int>(ae.subtype);
+        ad["shot_index"] = static_cast<int>(ae.shot_index);
+        ad["flags"] = static_cast<int>(ae.flags);
+        out.push_back(ad);
+    }
+    return out;
+}
+
+godot::Dictionary CcbEngine::synthesize_combat_audio(int kind, int subtype, int variant, int space_mode, bool distant, float tail_scale) {
+    const SynthAudioResult r = synthesize_ccb_combat_audio(kind, subtype, variant, space_mode, distant, tail_scale);
+    godot::PackedByteArray out;
+    out.resize(static_cast<int64_t>(r.pcm.size()));
+    if (!r.pcm.empty()) {
+        std::memcpy(out.ptrw(), r.pcm.data(), r.pcm.size());
+    }
+    godot::Dictionary d;
+    d["pcm"] = out;
+    d["mix_rate"] = r.sample_rate;
+    d["stereo"] = r.stereo;
+    return d;
+}
+
+godot::Dictionary CcbEngine::synthesize_ambience_loop(int layer_id) {
+    const SynthAudioResult r = synthesize_ccb_ambience_loop_audio(layer_id);
+    godot::PackedByteArray out;
+    out.resize(static_cast<int64_t>(r.pcm.size()));
+    if (!r.pcm.empty()) {
+        std::memcpy(out.ptrw(), r.pcm.data(), r.pcm.size());
+    }
+    godot::Dictionary d;
+    d["pcm"] = out;
+    d["mix_rate"] = r.sample_rate;
+    d["stereo"] = r.stereo;
+    return d;
+}
+
+godot::PackedByteArray CcbEngine::synthesize_combat_pcm(int kind, int subtype, int variant, int space_mode, bool distant, float tail_scale) {
+    const std::vector<uint8_t> pcm = synthesize_ccb_combat_pcm(kind, subtype, variant, space_mode, distant, tail_scale);
+    godot::PackedByteArray out;
+    out.resize(static_cast<int64_t>(pcm.size()));
+    if (!pcm.empty()) {
+        std::memcpy(out.ptrw(), pcm.data(), pcm.size());
+    }
+    return out;
+}
+
+godot::PackedByteArray CcbEngine::synthesize_ambience_loop_pcm(int layer_id) {
+    const std::vector<uint8_t> pcm = synthesize_ccb_ambience_loop_pcm(layer_id);
+    godot::PackedByteArray out;
+    out.resize(static_cast<int64_t>(pcm.size()));
+    if (!pcm.empty()) {
+        std::memcpy(out.ptrw(), pcm.data(), pcm.size());
+    }
+    return out;
 }
 
 godot::Dictionary CcbEngine::get_tileset_config() const {
@@ -654,11 +968,25 @@ void CcbEngine::_bind_methods() {
     ClassDB::bind_method(D_METHOD("is_waiting_resume"), &CcbEngine::is_waiting_resume);
     ClassDB::bind_method(D_METHOD("get_status"), &CcbEngine::get_status);
     ClassDB::bind_method(D_METHOD("send_key", "key_code", "utf8_text", "ctrl", "alt", "shift"), &CcbEngine::send_key);
+    ClassDB::bind_method(D_METHOD("send_text_input", "utf8_text"), &CcbEngine::send_text_input);
+    ClassDB::bind_method(D_METHOD("send_ime_edit", "utf8_edit"), &CcbEngine::send_ime_edit);
     ClassDB::bind_method(D_METHOD("send_mouse", "action", "cell_x", "cell_y", "wheel"), &CcbEngine::send_mouse);
     ClassDB::bind_method(D_METHOD("resize", "cols", "rows"), &CcbEngine::resize);
     ClassDB::bind_method(D_METHOD("get_generation"), &CcbEngine::get_generation);
+    ClassDB::bind_method(D_METHOD("get_world_generation"), &CcbEngine::get_world_generation);
+    ClassDB::bind_method(D_METHOD("get_scene3d_generation"), &CcbEngine::get_scene3d_generation);
+    ClassDB::bind_method(D_METHOD("get_audio_generation"), &CcbEngine::get_audio_generation);
+    ClassDB::bind_method(D_METHOD("set_world_capture_radius", "rad_x", "rad_y"), &CcbEngine::set_world_capture_radius);
+    ClassDB::bind_method(D_METHOD("get_loading_state"), &CcbEngine::get_loading_state);
     ClassDB::bind_method(D_METHOD("poll_terminal_frame"), &CcbEngine::poll_terminal_frame);
     ClassDB::bind_method(D_METHOD("poll_world_snapshot"), &CcbEngine::poll_world_snapshot);
+    ClassDB::bind_method(D_METHOD("set_render3d_mode", "enabled", "same_level_only"), &CcbEngine::set_render3d_mode);
+    ClassDB::bind_method(D_METHOD("poll_scene3d_snapshot"), &CcbEngine::poll_scene3d_snapshot);
+    ClassDB::bind_method(D_METHOD("poll_audio_events"), &CcbEngine::poll_audio_events);
+    ClassDB::bind_method(D_METHOD("synthesize_combat_audio", "kind", "subtype", "variant", "space_mode", "distant", "tail_scale"), &CcbEngine::synthesize_combat_audio);
+    ClassDB::bind_method(D_METHOD("synthesize_ambience_loop", "layer_id"), &CcbEngine::synthesize_ambience_loop);
+    ClassDB::bind_method(D_METHOD("synthesize_combat_pcm", "kind", "subtype", "variant", "space_mode", "distant", "tail_scale"), &CcbEngine::synthesize_combat_pcm);
+    ClassDB::bind_method(D_METHOD("synthesize_ambience_loop_pcm", "layer_id"), &CcbEngine::synthesize_ambience_loop_pcm);
     ClassDB::bind_method(D_METHOD("get_tileset_config"), &CcbEngine::get_tileset_config);
     ClassDB::bind_method(D_METHOD("get_looks_like_map"), &CcbEngine::get_looks_like_map);
 }

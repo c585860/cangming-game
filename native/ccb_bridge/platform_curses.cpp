@@ -7,6 +7,7 @@
 #include "cursesdef.h"
 #include "game.h"
 #include "game_ui.h"
+#include "imgui/imgui.h"
 #include "output.h"
 #include "point.h"
 #include "ui_manager.h"
@@ -230,6 +231,7 @@ void blit_window_to_curses_layer(const catacurses::window &win) {
         st.work_terrain_y = w->pos.y;
         st.work_terrain_w = w->width;
         st.work_terrain_h = w->height;
+        st.work_cursor_active = false;
     }
 
     for (int wy = 0; wy < w->height; ++wy) {
@@ -370,8 +372,10 @@ void catacurses::wmove(const window &win, const point &p) {
         w->cursor = p;
     }
     if (win == newscr) {
-        ccb_bridge::state().work_cursor_x = p.x;
-        ccb_bridge::state().work_cursor_y = p.y;
+        auto &st = ccb_bridge::state();
+        st.work_cursor_x = p.x;
+        st.work_cursor_y = p.y;
+        st.work_cursor_active = (p.x > 0 || p.y > 0);
     }
 }
 
@@ -496,6 +500,13 @@ void catacurses::resizeterm() {
     stdscr = newwin(TERMY, TERMX, point::zero);
     newscr = newwin(TERMY, TERMX, point::zero);
     st.resize_work_buffers(TERMX, TERMY);
+    st.work_cursor_active = false;
+    if (ImGui::GetCurrentContext() != nullptr) {
+        ImGui::GetIO().DisplaySize = ImVec2(static_cast<float>(TERMX), static_cast<float>(TERMY));
+        if (ImGuiViewport *vp = ImGui::GetMainViewport()) {
+            vp->Size = ImVec2(static_cast<float>(TERMX), static_cast<float>(TERMY));
+        }
+    }
     game_ui::init_ui();
     ui_manager::screen_resized();
     refresh_display();

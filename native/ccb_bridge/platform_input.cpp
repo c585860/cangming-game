@@ -2,6 +2,7 @@
 
 #include "cached_options.h"
 #include "cata_imgui.h"
+#include "catacharset.h"
 #include "cursesdef.h"
 #include "input.h"
 #include "input_replay.h"
@@ -31,6 +32,31 @@ input_event convert_host_event(const ccb_bridge::HostEvent &ev) {
         return out;
     }
 
+    if (ev.kind == ccb_bridge::HostEventKind::ImeEdit) {
+        out.type = input_event_t::keyboard_char;
+        out.edit = ev.utf8_text;
+        out.edit_refresh = true;
+        return out;
+    }
+
+    if (ev.kind == ccb_bridge::HostEventKind::TextInput) {
+        out.type = input_event_t::keyboard_char;
+        out.text = ev.utf8_text;
+        int k = ev.key_code;
+        if (k == 0 && !ev.utf8_text.empty()) {
+            const char *ptr = ev.utf8_text.c_str();
+            int len = static_cast<int>(ev.utf8_text.size());
+            const uint32_t cp = UTF8_getch(&ptr, &len);
+            if (cp != UNKNOWN_UNICODE && cp != 0) {
+                k = static_cast<int>(cp);
+            }
+        }
+        if (k != 0) {
+            out.add_input(k);
+        }
+        return out;
+    }
+
     // CCB's `keyboard_char` events represent already-translated characters ('!', '@', 'A', '|', Ctrl+A..Z=1..26, KEY_BTAB)
     // and NEVER carry `keymod_t::shift/ctrl/alt` in `out.modifiers` (matching CCB's SDL keychar & curses backends).
     // Inserting `keymod_t::shift` here caused Shift+1 ('!') to become "SHIFT-!", breaking Safe Mode ('!') and all Shift bindings!
@@ -39,7 +65,10 @@ input_event convert_host_event(const ccb_bridge::HostEvent &ev) {
 
     int k = ev.key_code;
     if (k == 0 && !ev.utf8_text.empty()) {
-        k = static_cast<unsigned char>(ev.utf8_text[0]);
+        const char *ptr = ev.utf8_text.c_str();
+        int len = static_cast<int>(ev.utf8_text.size());
+        const uint32_t cp = UTF8_getch(&ptr, &len);
+        k = (cp != UNKNOWN_UNICODE && cp != 0) ? static_cast<int>(cp) : static_cast<unsigned char>(ev.utf8_text[0]);
     }
     if (k != 0) {
         out.add_input(k);
@@ -141,6 +170,17 @@ input_event input_manager::get_input_event(const keyboard_mode /*preferred_keybo
 
         if (ev.kind == ccb_bridge::HostEventKind::Shutdown) {
             throw ccb_bridge::ShutdownException();
+        }
+        if (ev.kind == ccb_bridge::HostEventKind::Refresh3D) {
+            st.publish_frame();
+            if (input_timeout == 0) {
+                previously_pressed_key = 0;
+                input_event timeout_ev;
+                timeout_ev.type = input_event_t::timeout;
+                input_replay::on_record(timeout_ev);
+                return timeout_ev;
+            }
+            continue;
         }
         if (ev.kind == ccb_bridge::HostEventKind::Resize) {
             ccb_bridge::apply_host_resize(ev.cols, ev.rows);
