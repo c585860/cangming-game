@@ -26,7 +26,7 @@
 
 ## 开发依赖
 
-Godot 与 godot-cpp 为外部依赖，不随本次源码上传打包。其作者、许可及源码见各自项目：
+Godot 引擎是外部依赖。随仓库附带的 `third_party/godot-cpp/` 来自提交 `e83fd0904c13356ed1d4c3d09f8bb9132bdc6b77`，保留原始 MIT 许可 `LICENSE.md`。其作者、许可及源码见各自项目：
 
 - https://github.com/godotengine/godot
 - https://github.com/godotengine/godot-cpp

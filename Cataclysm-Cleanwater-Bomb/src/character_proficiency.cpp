@@ -1,0 +1,182 @@
+#include <cmath>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "cached_options.h"
+#include "calendar.h"
+#include "character.h"
+#include "character_action_guard.h"
+#include "enums.h"
+#include "event.h"
+#include "event_bus.h"
+#include "pimpl.h"
+#include "json.h"
+#include "skill.h"
+#include "proficiency.h"
+#include "recipe_dictionary.h"
+#include "translations.h"
+#include "type_id.h"
+
+bool Character::has_proficiency( const proficiency_id &prof ) const
+{
+    return _proficiencies->has_learned( prof );
+}
+
+float Character::get_proficiency_practice( const proficiency_id &prof ) const
+{
+    return _proficiencies->pct_practiced( prof );
+}
+
+time_duration Character::get_proficiency_practiced_time( const proficiency_id &prof ) const
+{
+    return _proficiencies->pct_practiced_time( prof );
+}
+
+void Character::set_proficiency_practiced_time( const proficiency_id &prof, int turns )
+{
+    if( turns < 0 ) {
+        _proficiencies->remove( prof );
+        return;
+    }
+    _proficiencies->set_time_practiced( prof, time_duration::from_turns( turns ) );
+}
+
+bool Character::has_prof_prereqs( const proficiency_id &prof ) const
+{
+    return _proficiencies->has_prereqs( prof );
+}
+
+void Character::add_proficiency( const proficiency_id &prof, bool ignore_requirements,
+                                 bool recursive )
+{
+    if( ignore_requirements ) {
+        _proficiencies->direct_learn( prof );
+        return;
+    }
+    _proficiencies->learn( prof, recursive );
+}
+
+void Character::lose_proficiency( const proficiency_id &prof, bool ignore_requirements )
+{
+    if( ignore_requirements ) {
+        _proficiencies->direct_remove( prof );
+        return;
+    }
+    _proficiencies->remove( prof );
+}
+
+std::vector<display_proficiency> Character::display_proficiencies() const
+{
+    return _proficiencies->display();
+}
+
+bool Character::practice_proficiency( const proficiency_id &prof, const time_duration &amount,
+                                      const std::optional<time_duration> &max )
+{
+    // Proficiencies can ignore focus using the `ignore_focus` JSON property
+    const bool ignore_focus = prof->ignore_focus();
+    float focus_adjusted = adjust_for_focus( to_seconds<float>( amount ) );
+    const time_duration &focused_amount = ignore_focus ? amount : time_duration::from_seconds(
+            focus_adjusted );
+
+    const float pct_before = _proficiencies->pct_practiced( prof );
+    const bool learned = _proficiencies->practice( prof, focused_amount,
+                         ignore_focus ? 0.f : std::fmod( focus_adjusted, 1.f ), max );
+    const float pct_after = _proficiencies->pct_practiced( prof );
+
+    // Drain focus if necessary
+    if( !ignore_focus && pct_after > pct_before ) {
+        focus_pool -= focus_pool / 100;
+    }
+
+    if( learned ) {
+        const character_action_guard lifetime( *this );
+        get_event_bus().send<event_type::gains_proficiency>( getID(), prof );
+        if( !lifetime ) {
+            return learned;
+        }
+        add_msg_if_player( m_good, _( "You are now proficient in %s!" ), prof->name() );
+    }
+    return learned;
+}
+
+time_duration Character::proficiency_training_needed( const proficiency_id &prof ) const
+{
+    return _proficiencies->training_time_needed( prof );
+}
+
+std::vector<proficiency_id> Character::known_proficiencies() const
+{
+    return _proficiencies->known_profs();
+}
+
+std::vector<proficiency_id> Character::learning_proficiencies() const
+{
+    return _proficiencies->learning_profs();
+}
+
+int Character::get_proficiency_bonus( const std::string &category,
+                                      proficiency_bonus_type prof_bonus ) const
+{
+    return _proficiencies->get_proficiency_bonus( category, prof_bonus );
+}
+
+void Character::set_proficiency_practice( const proficiency_id &id, const time_duration &amount )
+{
+    if( !test_mode ) {
+        return;
+    }
+
+    _proficiencies->set_time_practiced( id, amount );
+}
+
+std::vector<proficiency_id> Character::proficiencies_offered_to( const Character *guy ) const
+{
+    std::vector<proficiency_id> ret;
+    for( const proficiency_id &known : known_proficiencies() ) {
+        if( known->is_teachable() && ( !guy || !guy->has_proficiency( known ) ) ) {
+            ret.push_back( known );
+        }
+    }
+    return ret;
+}
+
+void Character::store_practice_state( JsonOut &out, bool include_recipes ) const
+{
+    out.start_object();
+    out.member( "skills" );
+    out.start_object();
+    for( const auto &entry : get_all_skills() ) {
+        out.member( entry.first.str(), entry.second );
+    }
+    out.end_object();
+    out.member( "proficiencies", *_proficiencies );
+    if( include_recipes ) {
+        out.member( "recipes", *learned_recipes );
+        out.member( "items_identified", items_identified );
+        out.member( "book_chapters", book_chapters );
+    }
+    out.end_object();
+}
+
+void Character::load_practice_state( const JsonObject &data )
+{
+    SkillLevelMap skills;
+    for( const JsonMember &entry : data.get_object( "skills" ) ) {
+        const skill_id id( entry.name() );
+        if( !id.is_valid() ) {
+            data.throw_error_at( "skills", "Unknown skill in activity result" );
+        }
+        skills[id].deserialize( entry.get_object() );
+    }
+    proficiency_set proficiencies;
+    proficiencies.deserialize( data.get_object( "proficiencies" ) );
+    *_skills = std::move( skills );
+    *_proficiencies = std::move( proficiencies );
+    data.read( "recipes", *learned_recipes );
+    data.read( "items_identified", items_identified );
+    data.read( "book_chapters", book_chapters );
+}

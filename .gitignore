@@ -1,7 +1,7 @@
 .godot/
 build/
 release/
-Cataclysm-Cleanwater-Bomb/
+/Cataclysm-Cleanwater-Bomb/objwin-lua/
 playtest/
 bin/
 .vs/

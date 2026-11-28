@@ -1,0 +1,35 @@
+#pragma once
+#ifndef CATA_SRC_MELEE_H
+#define CATA_SRC_MELEE_H
+
+#include "coordinates.h"
+
+class item;
+class map;
+
+/*
+ * statistics data for melee attacks, used for test purposes
+ */
+struct melee_statistic_data {
+    int attack_count = 0;
+    int hit_count = 0;
+    int double_crit_count = 0;
+    int crit_count = 0;
+    int actual_crit_count = 0;
+    double double_crit_chance = 0.0;
+    double crit_chance = 0.0;
+    int damage_amount = 0;
+};
+
+namespace melee
+{
+
+bool has_revivable_corpse( map &here, const tripoint_bub_ms &target );
+float melee_hit_range( float accuracy );
+melee_statistic_data get_stats();
+void clear_stats();
+int blocking_ability( const item &shield );
+extern melee_statistic_data melee_stats;
+} // namespace melee
+
+#endif // CATA_SRC_MELEE_H

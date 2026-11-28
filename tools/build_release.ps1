@@ -1,8 +1,9 @@
 ﻿param(
     [switch]$BuildOnly,
-    [switch]$SyncCcb,
-    [int]$Jobs = 8,
-    [string]$LangPackDir = "d:\Project\ccb-windows-with-graphics-x64-2026-11-25-1727\lang"
+    [ValidateRange(1, 256)][int]$Jobs = 8,
+    [string]$GodotExe = $env:GODOT_EXE,
+    [string]$LangPackDir = $env:LANG_PACK_DIR,
+    [string]$ToolchainDir = $env:UCRT64_BIN
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,20 +15,37 @@ $CcbBuild = Join-Path $BuildRoot "ccb_bridge"
 $NativeBuild = Join-Path $BuildRoot "native"
 $BinDir = Join-Path $Root "bin"
 $ReleaseDir = Join-Path $Root "release"
-$GodotDir = "C:\Users\ASUS\AppData\Local\CodexTools\Godot-4.5.1"
-$GodotGui = Join-Path $GodotDir "Godot_v4.5.1-stable_win64.exe"
-$GodotConsole = Join-Path $GodotDir "Godot_v4.5.1-stable_win64_console.exe"
-
-# Ensure MSYS2 UCRT64 toolchain & ccache incremental settings are active
-$env:PATH = "C:\msys64\ucrt64\bin;" + $env:PATH
+# Prefer UCRT64 tools over other compilers on PATH.
+if (-not $ToolchainDir) { $ToolchainDir = "C:\msys64\ucrt64\bin" }
+if (Test-Path -LiteralPath $ToolchainDir -PathType Container) {
+    $env:PATH = "$ToolchainDir;" + $env:PATH
+}
 $env:CCACHE_SLOPPINESS = "pch_defines,time_macros,include_file_mtime"
 $env:CCACHE_NOHASHDIR = "1"
 
-if ($SyncCcb) {
-    Write-Host "=== [1/5] Syncing upstream Cataclysm-Cleanwater-Bomb (git pull --ff-only) ===" -ForegroundColor Cyan
-    git -C $CcbDir pull --ff-only
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+foreach ($tool in @('cmake.exe', 'ninja.exe', 'gcc.exe', 'g++.exe')) {
+    if (-not (Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue)) {
+        throw "Missing $tool. Install the MSYS2 UCRT64 build dependencies listed in README.md."
+    }
 }
+if (-not $BuildOnly) {
+    if (-not $GodotExe) {
+        $godot = Get-Command godot.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($godot) { $GodotExe = $godot.Source }
+    }
+    if (-not $GodotExe -or -not (Test-Path -LiteralPath $GodotExe -PathType Leaf)) {
+        throw 'Set GODOT_EXE to the Windows Godot 4.5.1 executable to package release/.'
+    }
+    $GodotGui = (Resolve-Path -LiteralPath $GodotExe).Path
+    if ($GodotGui -like '*_console.exe') { $GodotGui = $GodotGui -replace '_console\.exe$', '.exe' }
+    if (-not (Test-Path -LiteralPath $GodotGui -PathType Leaf)) {
+        throw "Missing Godot GUI executable: $GodotGui"
+    }
+    $GodotConsole = $GodotGui -replace '\.exe$', '_console.exe'
+    if (-not (Test-Path -LiteralPath $GodotConsole -PathType Leaf)) { $GodotConsole = $GodotGui }
+}
+New-Item -ItemType Directory -Force -Path $BuildRoot | Out-Null
+Set-Content -Path (Join-Path $BuildRoot '.gdignore') -Value '' -NoNewline
 
 # Safe DLL hot-move helper (prevents linker Permission Denied if an older game window is still running)
 function Safe-MoveLockedDll([string]$DllPath, [string]$BackupDir) {
@@ -46,24 +64,16 @@ function Safe-MoveLockedDll([string]$DllPath, [string]$BackupDir) {
 
 Write-Host "=== [2/5] Incremental build: libccb_core.a + ccb_bridge.dll ===" -ForegroundColor Cyan
 Safe-MoveLockedDll (Join-Path $BinDir "ccb_bridge.dll") (Join-Path $BuildRoot "ccb_bridge")
-if (-not (Test-Path (Join-Path $CcbBuild "build.ninja"))) {
-    cmake -S (Join-Path $Root "native\ccb_bridge") -B $CcbBuild -G Ninja -DCMAKE_BUILD_TYPE=Release
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-} else {
-    # Check if CCB_ROOT changed (e.g. after moving repo into cangling-city/)
-    $cache = Get-Content (Join-Path $CcbBuild "CMakeCache.txt") -Raw -ErrorAction SilentlyContinue
-    if ($cache -and ($cache -notmatch [regex]::Escape($CcbDir.Replace('\', '/')))) {
-        Write-Host "Detected moved CCB_ROOT; reconfiguring $CcbBuild cleanly..." -ForegroundColor Yellow
-        Remove-Item -Recurse -Force $CcbBuild
-        cmake -S (Join-Path $Root "native\ccb_bridge") -B $CcbBuild -G Ninja -DCMAKE_BUILD_TYPE=Release
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    }
-}
+cmake -S (Join-Path $Root "native\ccb_bridge") -B $CcbBuild -G Ninja -DCMAKE_BUILD_TYPE=Release
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 cmake --build $CcbBuild --target ccb_bridge -j $Jobs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "=== [3/5] Incremental build: cangling.dll ===" -ForegroundColor Cyan
 Safe-MoveLockedDll (Join-Path $BinDir "cangling.dll") (Join-Path $BuildRoot "cangling_prev")
+$GodotCpp = Join-Path $Root 'third_party/godot-cpp'
+cmake -S $Root -B $NativeBuild -G Ninja -DCMAKE_BUILD_TYPE=Release "-DGODOT_CPP_DIR=$GodotCpp"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 cmake --build $NativeBuild --target cangling -j $Jobs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -148,17 +158,35 @@ if ((-not (Test-Path $RuntimeDst)) -or ((Get-Item $RuntimeSrc).Length -ne (Get-I
 }
 
 # 4d. Pack runtime game scripts/shaders/scenes/fonts into Cataclysm-EmperorCOOP2.0.pck via Godot native PCKPacker
+& $GodotConsole --headless --path $Root --editor --import
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $GodotConsole --headless --path $Root --script "res://tools/pack_release.gd"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 4e. Mirror ONLY minimal runtime CCB data (data/, gfx/, lang/mo/) — ZERO src/, tests/, doc/, .git/, scripts!
 # Prefer the full Chinese localization pack in $LangPackDir\mo if present, falling back cleanly to $CcbDir\lang\mo.
-$LangMoSrc = Join-Path $LangPackDir "mo"
-if (Test-Path $LangMoSrc) {
+$LangMoSrc = if ($LangPackDir) { Join-Path $LangPackDir "mo" }
+if ($LangMoSrc -and (Test-Path $LangMoSrc)) {
     Write-Host "  [Lang] Bundling localization pack from: $LangMoSrc" -ForegroundColor Green
 } else {
     $LangMoSrc = Join-Path $CcbDir "lang\mo"
     Write-Host "  [Lang] External lang pack not found; falling back to: $LangMoSrc" -ForegroundColor Yellow
+}
+if (-not (Test-Path -LiteralPath $LangMoSrc -PathType Container)) {
+    # A clean source checkout has .po files, not compiled .mo files.
+    $LangMoSrc = Join-Path $BuildRoot 'lang/mo'
+    $Msgfmt = Get-Command msgfmt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $msgfmtExe = if ($Msgfmt) { $Msgfmt.Source } else { Join-Path $ToolchainDir '../../usr/bin/msgfmt.exe' }
+    if (-not (Test-Path -LiteralPath $msgfmtExe -PathType Leaf)) { throw 'Missing msgfmt.exe (MSYS2 gettext).' }
+    foreach ($po in Get-ChildItem -LiteralPath (Join-Path $CcbDir 'lang/po') -Filter '*.po' -File) {
+        $localeDir = Join-Path (Join-Path $LangMoSrc $po.BaseName) 'LC_MESSAGES'
+        New-Item -ItemType Directory -Force -Path $localeDir | Out-Null
+        $mo = Join-Path $localeDir 'cataclysm-dda.mo'
+        if (-not (Test-Path -LiteralPath $mo) -or (Get-Item -LiteralPath $mo).LastWriteTimeUtc -lt $po.LastWriteTimeUtc) {
+            & $msgfmtExe -o $mo $po.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+    }
 }
 $mirrorPairs = @(
     @{ Src = (Join-Path $CcbDir "data"); Dst = (Join-Path $ReleaseDir "ccb_data\data") },
@@ -175,6 +203,9 @@ foreach ($mp in $mirrorPairs) {
         }
     }
 }
+Copy-Item -LiteralPath (Join-Path $Root 'THIRD_PARTY.md') -Destination (Join-Path $ReleaseDir 'THIRD_PARTY.md') -Force
+Copy-Item -LiteralPath (Join-Path $CcbDir 'LICENSE.txt') -Destination (Join-Path $ReleaseDir 'CCB-LICENSE.txt') -Force
+Copy-Item -LiteralPath (Join-Path $GodotCpp 'LICENSE.md') -Destination (Join-Path $ReleaseDir 'godot-cpp-LICENSE.md') -Force
 
 Write-Host "=== [5/5] Verifying zero source leakage in release/ ===" -ForegroundColor Cyan
 $leaks = Get-ChildItem $ReleaseDir -Recurse -File -Include *.cpp,*.hpp,*.h,*.c,*.py,*.ps1 -ErrorAction SilentlyContinue
