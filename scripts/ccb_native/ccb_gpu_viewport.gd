@@ -173,19 +173,19 @@ func _set_tile_zoom(pixels: int) -> void:
 	_trigger_redraw()
 
 
-func screen_to_world_tile(global_pos: Vector2) -> Vector2i:
-	var local_p := global_pos - get_global_rect().position
+func screen_to_world_tile(viewport_pos: Vector2) -> Vector2i:
+	var local_p := make_canvas_position_local(viewport_pos)
 	var wx := int(floor(_view_origin_world.x + local_p.x / float(tile_px)))
 	var wy := int(floor(_view_origin_world.y + local_p.y / float(tile_px)))
 	return Vector2i(wx, wy)
 
 
-func note_mouse_global(global_pos: Vector2) -> void:
+func note_mouse_global(viewport_pos: Vector2) -> void:
 	if not _has_world or _lighting == null or not visible:
 		return
 	if float(_snapshot.get("player_light", 0.0)) < 12.0:
 		return
-	var local_p := global_pos - get_global_rect().position
+	var local_p := make_canvas_position_local(viewport_pos)
 	var wp := Vector2(_view_origin_world.x + local_p.x / float(tile_px), _view_origin_world.y + local_p.y / float(tile_px))
 	var p_center := Vector2(_snapshot.get("player", Vector2i.ZERO)) + Vector2(0.5, 0.5)
 	_lighting.set_player_aim_dir(wp - p_center)

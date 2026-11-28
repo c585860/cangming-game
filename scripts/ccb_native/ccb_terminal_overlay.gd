@@ -115,6 +115,19 @@ func update_frame(frame: Dictionary) -> void:
 	queue_redraw()
 
 
+func cell_at_viewport_position(viewport_pos: Vector2) -> Vector2i:
+	var local := make_canvas_position_local(viewport_pos)
+	var cell := Vector2i(floori(local.x / cell_w), floori(local.y / cell_h))
+	return cell if Rect2i(0, 0, cols, rows).has_point(cell) else Vector2i(-1, -1)
+
+
+func is_terrain_cell(cell: Vector2i) -> bool:
+	if not Rect2i(0, 0, cols, rows).has_point(cell):
+		return false
+	var off := (cell.y * cols + cell.x) * CELL_STRIDE + 13
+	return off < cells.size() and (cells.decode_u8(off) & FLAG_TERRAIN) != 0
+
+
 static func _unpack_color(rgba: int) -> Color:
 	var r := float(rgba & 0xFF) / 255.0
 	var g := float((rgba >> 8) & 0xFF) / 255.0

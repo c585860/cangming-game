@@ -1083,18 +1083,17 @@ func _input(event: InputEvent) -> void:
 
 	elif event is InputEventMouseButton:
 		var mev: InputEventMouseButton = event
+		var mouse_pos := mev.position
 		# Allow top host bar clicks to pass through normally
-		if _top_bar_panel.get_global_rect().has_point(mev.global_position):
+		if _mouse_on_toolbar(mouse_pos) and not _orbit_rmb_down:
 			return
-		var in_active_map := _has_terrain and _use_tiles and _terrain_unoccluded and (
-			(_render_3d and _view_3d != null and _view_3d.visible and _view_3d.get_global_rect().has_point(mev.global_position)) or
-			((not _render_3d) and _gpu_view.visible and _gpu_view.get_global_rect().has_point(mev.global_position))
-		)
+		var terminal_cell: Vector2i = _term_overlay.cell_at_viewport_position(mouse_pos)
+		var in_active_map := _is_mouse_on_map(terminal_cell)
 		if _render_3d and _view_3d != null and mev.button_index == MOUSE_BUTTON_RIGHT:
 			if mev.pressed and in_active_map:
 				_orbit_rmb_down = true
 				_orbit_rmb_dragged = false
-				_orbit_rmb_start = mev.global_position
+				_orbit_rmb_start = mouse_pos
 				_view_3d.set_orbit_dragging(true)
 				get_viewport().set_input_as_handled()
 				return
@@ -1106,9 +1105,10 @@ func _input(event: InputEvent) -> void:
 					get_viewport().set_input_as_handled()
 					return
 				# Quick right-click (no drag) still forwards as normal CCB right-click!
-				var rcell := _map_mouse_to_ccb_cell(mev.global_position, mev.position)
-				engine.send_mouse(3, rcell.x, rcell.y, 0)
-				engine.send_mouse(4, rcell.x, rcell.y, 0)
+				if in_active_map:
+					var rcell := _map_mouse_to_ccb_cell(mouse_pos, terminal_cell)
+					engine.send_mouse(3, rcell.x, rcell.y, 0)
+					engine.send_mouse(4, rcell.x, rcell.y, 0)
 				get_viewport().set_input_as_handled()
 				return
 		if in_active_map:
@@ -1126,7 +1126,7 @@ func _input(event: InputEvent) -> void:
 					_gpu_view.adjust_zoom(-1)
 				get_viewport().set_input_as_handled()
 				return
-		var cell := _map_mouse_to_ccb_cell(mev.global_position, mev.position)
+		var cell := _map_mouse_to_ccb_cell(mouse_pos, terminal_cell)
 		var act := -1
 		if mev.button_index == MOUSE_BUTTON_LEFT:
 			act = 1 if mev.pressed else 2
@@ -1136,30 +1136,34 @@ func _input(event: InputEvent) -> void:
 			act = 5
 		elif mev.pressed and mev.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			act = 6
-		if act >= 0:
+		if act >= 0 and (cell.x >= 0 or act == 2 or act == 4):
 			engine.send_mouse(act, cell.x, cell.y, 0)
 			get_viewport().set_input_as_handled()
 
 	elif event is InputEventMouseMotion:
 		var mm: InputEventMouseMotion = event
+		var mouse_pos := mm.position
 		if _render_3d and _view_3d != null and _orbit_rmb_down:
-			if not _orbit_rmb_dragged and mm.global_position.distance_to(_orbit_rmb_start) >= 4.0:
+			if not _orbit_rmb_dragged and mouse_pos.distance_to(_orbit_rmb_start) >= 4.0:
 				_orbit_rmb_dragged = true
 			_view_3d.note_mouse_look(mm.relative.x, mm.relative.y)
 			get_viewport().set_input_as_handled()
 			return
-		if _top_bar_panel.get_global_rect().has_point(mm.global_position):
+		if _mouse_on_toolbar(mouse_pos):
 			return
-		if _render_3d and _view_3d != null and _view_3d.visible and _terrain_unoccluded:
-			_view_3d.note_mouse_global(mm.global_position)
-		elif (not _render_3d) and _gpu_view != null and _gpu_view.visible and _terrain_unoccluded:
-			_gpu_view.note_mouse_global(mm.global_position)
-		var cell := _map_mouse_to_ccb_cell(mm.global_position, mm.position)
+		var terminal_cell: Vector2i = _term_overlay.cell_at_viewport_position(mouse_pos)
+		var in_active_map := _is_mouse_on_map(terminal_cell)
+		if in_active_map:
+			if _render_3d:
+				_view_3d.note_mouse_global(mouse_pos)
+			else:
+				_gpu_view.note_mouse_global(mouse_pos)
+		var cell := _map_mouse_to_ccb_cell(mouse_pos, terminal_cell)
 		if cell != _last_hover_cell:
 			# Keep modal/ImTui menu hover instant; throttle free-roam map hover so waving the mouse
 			# never floods CCB's worker thread with redundant world snapshots!
 			var now_ms := Time.get_ticks_msec()
-			if (not _terrain_unoccluded) or (mm.button_mask != 0) or (now_ms - _last_hover_ms >= 90):
+			if not in_active_map or mm.button_mask != 0 or now_ms - _last_hover_ms >= 90:
 				_last_hover_cell = cell
 				_last_hover_ms = now_ms
 				engine.send_mouse(0, cell.x, cell.y, 0)
@@ -1206,17 +1210,30 @@ func _remap_3d_direction_key(ev: InputEventKey) -> Array:
 	return [ord(ch), ch]
 
 
-func _map_mouse_to_ccb_cell(global_pos: Vector2, local_pos: Vector2) -> Vector2i:
+func _mouse_on_toolbar(viewport_pos: Vector2) -> bool:
+	var local := _top_bar_panel.make_canvas_position_local(viewport_pos)
+	return Rect2(Vector2.ZERO, _top_bar_panel.size).has_point(local)
+
+
+func _is_mouse_on_map(terminal_cell: Vector2i) -> bool:
+	if not _has_terrain or not _use_tiles or not _terrain_unoccluded or not _last_terrain_rect.has_point(terminal_cell):
+		return false
+	if not _term_overlay.is_terrain_cell(terminal_cell):
+		return false
+	return (_view_3d != null and _view_3d.visible) if _render_3d else _gpu_view.visible
+
+
+func _map_mouse_to_ccb_cell(viewport_pos: Vector2, terminal_cell: Vector2i) -> Vector2i:
 	# When hovering/clicking directly on the 2D or 3D map with no modal covering it,
 	# map world tile coords -> exact w_terrain curses cell so click-to-walk & path preview match 1:1!
-	if _has_terrain and _use_tiles and _terrain_unoccluded:
+	if _is_mouse_on_map(terminal_cell):
 		var world_tile := Vector2i(-99999, -99999)
 		var center_tile := Vector2i.ZERO
-		if _render_3d and _view_3d != null and _view_3d.visible and _view_3d.get_global_rect().has_point(global_pos):
-			world_tile = _view_3d.screen_to_world_tile(global_pos)
+		if _render_3d:
+			world_tile = _view_3d.screen_to_world_tile(viewport_pos)
 			center_tile = _view_3d.get_view_center_tile()
-		elif (not _render_3d) and _gpu_view.visible and _gpu_view.get_global_rect().has_point(global_pos):
-			world_tile = _gpu_view.screen_to_world_tile(global_pos)
+		else:
+			world_tile = _gpu_view.screen_to_world_tile(viewport_pos)
 			center_tile = _gpu_view.get_view_center_tile()
 		if world_tile.x > -90000:
 			@warning_ignore("integer_division")
@@ -1229,12 +1246,7 @@ func _map_mouse_to_ccb_cell(global_pos: Vector2, local_pos: Vector2) -> Vector2i
 				clampi(tx, _last_terrain_rect.position.x, _last_terrain_rect.end.x - 1),
 				clampi(ty, _last_terrain_rect.position.y, _last_terrain_rect.end.y - 1)
 			)
-	var lp := local_pos - Vector2(0.0, float(TOP_BAR_H))
-	@warning_ignore("integer_division")
-	var cx := clampi(int(lp.x) / _cell_w, 0, maxi(0, _grid_cols - 1))
-	@warning_ignore("integer_division")
-	var cy := clampi(int(lp.y) / _cell_h, 0, maxi(0, _grid_rows - 1))
-	return Vector2i(cx, cy)
+	return terminal_cell
 
 
 static func _translate_godot_key(ev: InputEventKey) -> Array:

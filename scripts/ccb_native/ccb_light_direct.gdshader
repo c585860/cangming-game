@@ -202,7 +202,7 @@ float trace_sun_soft(vec2 local_p, float start_z, vec3 ray3, bool allow_self) {
 		+ trace_sun_single(local_p, start_z, r4, allow_self)) * 0.175;
 }
 
-float trace_point_ray(vec2 start_local, vec2 end_local, ivec2 target_cell) {
+float trace_point_ray(vec2 start_local, vec2 end_local, ivec2 target_cell, float receiver_z) {
 	vec2 delta = end_local - start_local;
 	float dist = length(delta);
 	if (dist < 0.08) {
@@ -244,6 +244,9 @@ float trace_point_ray(vec2 start_local, vec2 end_local, ivec2 target_cell) {
 		}
 		vec4 g = texelFetch(geom_tex, cell, 0);
 		int k = int(round(g.g * 255.0));
+		if (receiver_z > 1.0 && mix(1.05, receiver_z, next_t / dist) > g.r * 3.0) {
+			continue;
+		}
 		if (k == 1) {
 			return 0.0;
 		} else if (k == 2) {
@@ -383,9 +386,10 @@ void fragment() {
 				vec2 l_local = lpos - grid_origin;
 				vec2 perp = vec2(-dir2.y, dir2.x) * (0.14 + 0.06 * smoothstep(0.5, 4.5, d2));
 
-				float vis = trace_point_ray(l_local, local_p, own) * 0.50
-					+ trace_point_ray(l_local + perp, local_p, own) * 0.25
-					+ trace_point_ray(l_local - perp, local_p, own) * 0.25;
+				float receiver_z = is_wall ? 1.45 : 0.05;
+				float vis = trace_point_ray(l_local, local_p, own, receiver_z) * 0.50
+					+ trace_point_ray(l_local + perp, local_p, own, receiver_z) * 0.25
+					+ trace_point_ray(l_local - perp, local_p, own, receiver_z) * 0.25;
 				if (vis <= 0.005) {
 					continue;
 				}
