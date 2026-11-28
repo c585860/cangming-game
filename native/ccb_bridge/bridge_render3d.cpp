@@ -1205,7 +1205,8 @@ void capture_scene3d_snapshot(Scene3DSnapshot &out, uint64_t gen, bool has_terra
         const lit_level cll = (dz > 0) ? upper_lit_at(cache, p) : cache.visibility_cache[p.x()][p.y()];
         const bool cll_clear = (cll == lit_level::LOW || cll == lit_level::LIT || cll == lit_level::BRIGHT);
         const TileTone tone = cll_clear ? tone_for(cache, p, cll) : TileTone{1.0f, nv_tint ? 0.0f : 1.0f};
-        const uint16_t sd = tile_seed(p);
+        const uint32_t uid = creature_render_uid(*critter, is_player);
+        const uint16_t sd = static_cast<uint16_t>(uid ^ (uid >> 16));
 
         uint32_t rel_flag = CCB_3D_FLAG_CREATURE_NEUTRAL;
         if (!is_player) {

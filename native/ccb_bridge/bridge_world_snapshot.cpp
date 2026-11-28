@@ -1166,8 +1166,7 @@ void capture_world_snapshot(WorldSnapshot &out, uint64_t gen, bool has_terrain) 
         CcbWorldCreature wc{};
         wc.x = cp.x();
         wc.y = cp.y();
-        wc.uid = is_player ? 1u : static_cast<uint32_t>((reinterpret_cast<uintptr_t>(&critter) >> 3) ^ 0x9E3779B9u);
-        if (wc.uid == 0u) wc.uid = 2u;
+        wc.uid = creature_render_uid(critter, is_player);
         if (is_player) {
             const bool is_m = u.get_gender();
             wc.flags = CCB_CRITTER_PLAYER | (is_m ? CCB_CRITTER_MALE : 0u);

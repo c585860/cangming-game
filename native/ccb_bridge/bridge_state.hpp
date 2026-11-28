@@ -13,7 +13,15 @@
 #include <string>
 #include <vector>
 
+class Creature;
+
 namespace ccb_bridge {
+
+inline uint32_t creature_render_uid(const Creature &creature, bool is_player) {
+    if (is_player) return 1u;
+    const auto uid = static_cast<uint32_t>((reinterpret_cast<uintptr_t>(&creature) >> 3) ^ 0x9E3779B9u);
+    return uid != 0u ? uid : 2u;
+}
 
 struct ShutdownException : public std::exception {
     const char *what() const noexcept override { return "ccb_bridge shutdown requested"; }

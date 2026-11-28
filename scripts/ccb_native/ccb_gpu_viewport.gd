@@ -421,6 +421,10 @@ func _draw_sprite_ccb(canvas: Control, id: String, origin_px: Vector2, tpx: floa
 	return Tiles.draw_at_subtile(canvas, id, origin_px, tpx, roll, subtile, rota, tint, Vector2.ZERO, false, season, layer_mode, male)
 
 
+static func _creature_sprite_seed(uid: int) -> int:
+	return (uid ^ (uid >> 16)) & 0xffff
+
+
 # True 2.5D Y-sorted painter's order so tall 64x80 trees/shrubs/walls are NEVER clipped by neighboring grass!
 func _draw_tiles_subviewport() -> void:
 	_tile_canvas.draw_rect(Rect2(Vector2.ZERO, _tile_canvas.size), Color.BLACK)
@@ -554,8 +558,6 @@ func _draw_tiles_subviewport() -> void:
 							drew_puddle = _draw_sprite_ccb(_tile_canvas, "puddle_water", pos_px, tpx, hash_v, -1, 0, season_key)
 				if not drew_puddle:
 					Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[item_i], pos_px, tpx, hash_v)
-			if item_cnt > 1:
-				_tile_canvas.draw_rect(Rect2(sx + tpx - 5.0, sy + tpx - 5.0, 4.0, 4.0), Color(0.95, 0.85, 0.25, 0.85))
 
 			if vpart_i > 0 and vpart_i < s_len:
 				var vp_packed := tiles_bytes.decode_u8(off + 22)
@@ -563,6 +565,8 @@ func _draw_tiles_subviewport() -> void:
 				var vsub_raw := (vp_packed >> 4) & 0xF
 				var vsub := -1 if vsub_raw == 0 else vsub_raw
 				Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[vpart_i], pos_px, tpx, hash_v, vsub, vrot)
+			if item_cnt > 0:
+				_draw_sprite_ccb(_tile_canvas, "highlight_item", pos_px, tpx, 0, -1, 0, season_key)
 
 		# Creatures standing on row `ty` (rendered at smooth 60fps interpolated visual coordinates!)
 		if creatures_by_row.has(ty):
@@ -577,7 +581,7 @@ func _draw_tiles_subviewport() -> void:
 				var sprite_id := str(cd.get("sprite", ""))
 				var cflags := int(cd.get("flags", 0))
 				var is_male := (cflags & CRITTER_MALE) != 0
-				var hval := int(cd.get("x", 0)) * 31 + int(cd.get("y", 0)) * 17
+				var hval := _creature_sprite_seed(int(cd.get("uid", 0)))
 				if not _draw_sprite_ccb(_tile_canvas, sprite_id, pos_px, tpx, hval, -1, 0, season_key, Color.WHITE, Tiles.LAYER_BOTH, is_male):
 					var col := Color(0.95, 0.25, 0.25) if (cflags & CRITTER_HOSTILE) != 0 else Color(0.3, 0.9, 0.5)
 					_tile_canvas.draw_rect(Rect2(pos_px, Vector2(tpx, tpx)).grow(-4.0), col)
@@ -674,7 +678,7 @@ func _draw_surface_mask() -> void:
 		var sid := _encode_surface_id(tx, ty, true)
 		var cflags := int(cd.get("flags", 0))
 		var is_male := (cflags & CRITTER_MALE) != 0
-		_draw_sprite_ccb(mc, str(cd.get("sprite", "")), pos_px, tpx, int(raw_pos.x) * 31 + int(raw_pos.y) * 17, -1, 0, season_key, sid, Tiles.LAYER_BOTH, is_male)
+		_draw_sprite_ccb(mc, str(cd.get("sprite", "")), pos_px, tpx, _creature_sprite_seed(uid), -1, 0, season_key, sid, Tiles.LAYER_BOTH, is_male)
 
 
 func _draw_world_overlays() -> void:
