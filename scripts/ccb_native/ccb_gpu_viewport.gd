@@ -1,5 +1,7 @@
 extends Control
 
+signal capture_radius_changed(rad_x: int, rad_y: int)
+
 # Godot 4.5 Dual-Channel World Renderer for the real CCB core engine.
 # - Renders unmodified vanilla CCB gfx/ tilesets in true 2.5D Y-sorted painter's order
 #   using real CCB subtile/rotation values, multi-hop looks_like fallbacks, and animated tiles.
@@ -29,7 +31,9 @@ var _tile_canvas: Control
 var _lighting: RtLightingPipeline
 var _effects: WorldEffects
 var _weather_fx: WeatherFx
+var _shake_root: Control
 var _overlay_layer: Control
+var _vfx_add_layer: Control
 var _ui_font: Font
 var _view_origin_world := Vector2.ZERO
 var _view_span_tiles := Vector2(28.0, 20.0)
@@ -37,7 +41,9 @@ var _has_animated_tiles := false
 var _anim_redraw_accum := 0.0
 var _resolved_entries: Array = [] # O(1) pre-resolved tile dictionaries per snapshot string ID!
 var _resolved_tall: PackedByteArray = PackedByteArray()
+var _resolved_field_int_cache: Dictionary = {} # "fd_id|int" -> Dictionary tile entry
 var _resolved_season := ""
+var _last_cap_rad := Vector2i.ZERO
 
 
 func build(font: Font) -> void:
@@ -60,9 +66,15 @@ func build(font: Font) -> void:
 	_tile_canvas.draw.connect(_draw_tiles_subviewport)
 	_world_view.add_child(_tile_canvas)
 
+	# Container shifted by physical camera micro-shake (0 GPU cost, clipped cleanly by self)
+	_shake_root = Control.new()
+	_shake_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shake_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(_shake_root)
+
 	# 2. Real-Time Per-Pixel 2.5D Raymarched Lighting & Continuous Shadowcasting FOV Pipeline
 	_lighting = RtLightingPipeline.new()
-	_lighting.build(self, _world_view.get_texture(), _draw_surface_mask)
+	_lighting.build(_shake_root, _world_view.get_texture(), _draw_surface_mask)
 
 	# 3. Dedicated smooth glide, auto-move routes, combat animations & SCT module
 	_effects = WorldEffects.new()
@@ -70,14 +82,24 @@ func build(font: Font) -> void:
 	# 4. GPU Rain / Snow precipitation overlay masked to outdoor visible tiles
 	_weather_fx = WeatherFx.new()
 	_weather_fx.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	add_child(_weather_fx)
+	_shake_root.add_child(_weather_fx)
 
-	# 5. Animated route, explosion, bullet, hit flash, SCT & targeting overlay layer
+	# 5. Alpha-blended route, volumetric smoke, debris, casings, SCT & targeting overlay layer
 	_overlay_layer = Control.new()
 	_overlay_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_overlay_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_overlay_layer.draw.connect(_draw_world_overlays)
-	add_child(_overlay_layer)
+	_shake_root.add_child(_overlay_layer)
+
+	# 6. Additive luminous combat VFX layer (photorealistic fireballs, muzzle plumes, embers, shockwaves, beams!)
+	_vfx_add_layer = Control.new()
+	_vfx_add_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_vfx_add_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var add_mat := CanvasItemMaterial.new()
+	add_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	_vfx_add_layer.material = add_mat
+	_vfx_add_layer.draw.connect(_draw_additive_vfx)
+	_shake_root.add_child(_vfx_add_layer)
 
 	resized.connect(_on_resized)
 	_on_resized()
@@ -89,9 +111,39 @@ func apply_tileset_dir(dir_path: String, json_file: String, display_name: String
 		_trigger_redraw()
 
 
+func get_required_capture_radius() -> Vector2i:
+	var tpx := float(maxi(16, tile_px))
+	var span_x := maxf(16.0, size.x / tpx)
+	var span_y := maxf(12.0, size.y / tpx)
+	return Vector2i(
+		clampi(int(ceil(span_x * 0.5)) + 5, 16, 34),
+		clampi(int(ceil(span_y * 0.5)) + 5, 12, 24)
+	)
+
+
+func _emit_capture_radius_if_changed() -> void:
+	var req := get_required_capture_radius()
+	if req != _last_cap_rad:
+		_last_cap_rad = req
+		capture_radius_changed.emit(req.x, req.y)
+
+
+func has_high_fps_activity() -> bool:
+	if not _has_world or not visible:
+		return false
+	if _effects != null and _effects.has_high_fps_activity():
+		return true
+	if _lighting != null and _lighting.is_actively_animating():
+		return true
+	if _weather_fx != null and _weather_fx.visible:
+		return true
+	return false
+
+
 func adjust_zoom(delta_step: int) -> void:
 	zoom_idx = clampi(zoom_idx + delta_step, 0, ZOOMS.size() - 1)
 	tile_px = ZOOMS[zoom_idx]
+	_emit_capture_radius_if_changed()
 	_sync_camera_and_lighting(true)
 	_trigger_redraw()
 
@@ -101,6 +153,17 @@ func screen_to_world_tile(global_pos: Vector2) -> Vector2i:
 	var wx := int(floor(_view_origin_world.x + local_p.x / float(tile_px)))
 	var wy := int(floor(_view_origin_world.y + local_p.y / float(tile_px)))
 	return Vector2i(wx, wy)
+
+
+func note_mouse_global(global_pos: Vector2) -> void:
+	if not _has_world or _lighting == null or not visible:
+		return
+	if float(_snapshot.get("player_light", 0.0)) < 12.0:
+		return
+	var local_p := global_pos - get_global_rect().position
+	var wp := Vector2(_view_origin_world.x + local_p.x / float(tile_px), _view_origin_world.y + local_p.y / float(tile_px))
+	var p_center := Vector2(_snapshot.get("player", Vector2i.ZERO)) + Vector2(0.5, 0.5)
+	_lighting.set_player_aim_dir(wp - p_center)
 
 
 func get_view_center_tile() -> Vector2i:
@@ -115,6 +178,7 @@ func _on_resized() -> void:
 		_tile_canvas.size = Vector2(w, h)
 	if _lighting != null:
 		_lighting.resize(Vector2i(w, h))
+	_emit_capture_radius_if_changed()
 	_sync_camera_and_lighting(true)
 	_trigger_redraw()
 
@@ -131,6 +195,41 @@ func update_world_snapshot(snap: Dictionary) -> void:
 	_trigger_redraw()
 
 
+# Lightweight 3D-mode sync: updates world-space Direct/GI/Weather GPU lightmaps & combat effects
+# WITHOUT wasting GPU time redrawing the hidden 2D tile canvas!
+func update_lighting_only(snap: Dictionary) -> void:
+	_snapshot = snap
+	_has_world = bool(snap.get("valid", false))
+	if not _has_world:
+		return
+	if _effects != null:
+		_effects.sync_snapshot(snap)
+	if _lighting != null:
+		var center: Vector2i = snap.get("center", Vector2i.ZERO)
+		# Cover a generous 44x36 world window around camera center for full 3D view shadows & GI!
+		var span3d := Vector2(44.0, 36.0)
+		var orig3d := Vector2(center) + Vector2(0.5, 0.5) - span3d * 0.5
+		_lighting.update_from_snapshot(snap, orig3d, span3d, size.max(Vector2(640.0, 360.0)), tile_px)
+		if _effects != null:
+			_lighting.set_player_visual(
+				_effects.get_player_visual(), orig3d, size.max(Vector2(640.0, 360.0)), tile_px,
+				float(snap.get("player_light", 0.0))
+			)
+
+
+func tick_lighting_only(delta: float, vfx_lights: Array) -> void:
+	if _lighting == null or not _has_world:
+		return
+	_lighting.set_transient_vfx_lights(vfx_lights)
+	_lighting.tick(delta)
+
+
+func get_3d_lighting_bundle() -> Dictionary:
+	if _lighting == null:
+		return {"valid": false}
+	return _lighting.get_3d_lighting_bundle()
+
+
 func _trigger_redraw() -> void:
 	if not _has_world or _world_view == null:
 		return
@@ -139,12 +238,18 @@ func _trigger_redraw() -> void:
 	if _lighting != null:
 		_lighting.trigger_mask_redraw()
 	_overlay_layer.queue_redraw()
+	if _vfx_add_layer != null:
+		_vfx_add_layer.queue_redraw()
 
 
 func _process(delta: float) -> void:
 	if not _has_world or not visible:
 		return
 	var gliding := _effects != null and _effects.tick(delta)
+	if _shake_root != null and _effects != null:
+		var shk := _effects.get_camera_shake_offset()
+		if _shake_root.position != shk:
+			_shake_root.position = shk
 	if gliding:
 		if _lighting != null:
 			_lighting.set_player_visual(
@@ -159,11 +264,16 @@ func _process(delta: float) -> void:
 			_tile_canvas.queue_redraw()
 			_world_view.render_target_update_mode = SubViewport.UPDATE_ONCE
 
-	# Zero-waste idle: only redraw overlay layer when routes, cursor, glide, SCT, or pulsing sound ripples are active!
-	if _overlay_layer != null and _effects != null and _effects.needs_continuous_redraw():
-		_overlay_layer.queue_redraw()
+	# Zero-waste idle: only redraw overlay/VFX layers when routes, cursor, glide, SCT, or combat VFX are active!
+	if _effects != null and _effects.needs_continuous_redraw():
+		if _overlay_layer != null:
+			_overlay_layer.queue_redraw()
+		if _vfx_add_layer != null:
+			_vfx_add_layer.queue_redraw()
 
 	if _lighting != null:
+		if _effects != null:
+			_lighting.set_transient_vfx_lights(_effects.get_active_vfx_lights())
 		_lighting.tick(delta)
 	Tiles.finish_frame()
 
@@ -172,7 +282,10 @@ func _preresolve_snapshot_strings() -> void:
 	var strings: PackedStringArray = _snapshot.get("strings", PackedStringArray())
 	var s_len := strings.size()
 	var season_names := ["spring", "summer", "autumn", "winter"]
-	_resolved_season = season_names[clampi(int(_snapshot.get("season", 0)), 0, 3)]
+	var next_season: String = season_names[clampi(int(_snapshot.get("season", 0)), 0, 3)]
+	if next_season != _resolved_season:
+		_resolved_field_int_cache.clear()
+	_resolved_season = next_season
 	_resolved_entries.resize(s_len)
 	_resolved_tall.resize(s_len)
 	for i in range(s_len):
@@ -185,6 +298,53 @@ func _preresolve_snapshot_strings() -> void:
 		var entry := Tiles.get_tile_entry(rid)
 		_resolved_entries[i] = entry
 		_resolved_tall[i] = 1 if bool(entry.get("tall", false)) else 0
+
+
+static func _is_airborne_field(fld_id: String) -> bool:
+	return ("fire" in fld_id) or ("smoke" in fld_id) or ("gas" in fld_id) or ("fog" in fld_id) \
+		or ("haze" in fld_id) or ("dust" in fld_id) or ("electric" in fld_id) or ("plasma" in fld_id) \
+		or ("laser" in fld_id) or ("flame" in fld_id) or ("dazzl" in fld_id) or ("incense" in fld_id) \
+		or ("cold_air" in fld_id) or ("hot_air" in fld_id) or ("bee" in fld_id) or ("fatigue" in fld_id) \
+		or ("incendiary" in fld_id)
+
+
+func _resolve_field_entry(fld_id: String, fld_int: int, fallback_entry: Dictionary) -> Dictionary:
+	var key := "%s|%d" % [fld_id, fld_int]
+	var cached = _resolved_field_int_cache.get(key)
+	if cached != null:
+		return cached
+	var rid := Tiles.resolve_field_tile_id(fld_id, fld_int, _resolved_season)
+	var entry := Tiles.get_tile_entry(rid) if not rid.is_empty() else fallback_entry
+	if _resolved_field_int_cache.size() < 512:
+		_resolved_field_int_cache[key] = entry
+	return entry
+
+
+func _draw_field_tile(canvas: Control, fld_id: String, fallback_entry: Dictionary, pos_px: Vector2,
+		tpx: float, hash_v: int, fld_int: int, fld_sub: int, fld_rot: int) -> void:
+	var entry := _resolve_field_entry(fld_id, fld_int, fallback_entry)
+	var sub_arg := -1 if fld_sub >= 8 else fld_sub
+	if Tiles.draw_resolved_tile(canvas, entry, pos_px, tpx, hash_v, sub_arg, fld_rot):
+		return
+	# Authentic procedural fallback (NEVER a solid opaque square that hides underlying items/ground!)
+	var center := pos_px + Vector2(tpx * 0.5, tpx * 0.5)
+	if "fire" in fld_id or "flame" in fld_id:
+		var r := tpx * (0.28 + 0.08 * float(clampi(fld_int, 1, 3)))
+		canvas.draw_circle(center, r, Color(1.0, 0.42, 0.08, 0.36))
+		canvas.draw_circle(center + Vector2(0.0, -r * 0.15), r * 0.52, Color(1.0, 0.82, 0.25, 0.62))
+	elif "blood" in fld_id or "gibs" in fld_id:
+		var col := Color(0.58, 0.06, 0.07, 0.68) if "blood" in fld_id else Color(0.52, 0.14, 0.12, 0.72)
+		var drop_cnt := 2 + clampi(fld_int, 1, 3) * 2
+		for d in range(drop_cnt):
+			var h1 := (hash_v ^ (d * 2654435761)) & 0xFFFF
+			var ang := float(h1 & 255) / 255.0 * TAU
+			var dist := (float((h1 >> 8) & 255) / 255.0) * tpx * 0.30
+			var rad := tpx * (0.06 + 0.04 * float((h1 >> 4) & 3) / 3.0)
+			canvas.draw_circle(center + Vector2(cos(ang), sin(ang)) * dist, rad, col)
+	elif "smoke" in fld_id or "fog" in fld_id or "gas" in fld_id or "haze" in fld_id:
+		var sc := Color(0.50, 0.53, 0.58, 0.18 + 0.08 * float(clampi(fld_int, 1, 3)))
+		canvas.draw_circle(center + Vector2(-tpx * 0.12, -tpx * 0.06), tpx * 0.30, sc)
+		canvas.draw_circle(center + Vector2(tpx * 0.14, tpx * 0.08), tpx * 0.26, sc)
 
 
 func _sync_camera_and_lighting(rebuild_lighting: bool) -> void:
@@ -204,6 +364,7 @@ func _sync_camera_and_lighting(rebuild_lighting: bool) -> void:
 				_effects.get_player_visual(), _view_origin_world, size, tile_px,
 				float(_snapshot.get("player_light", 0.0))
 			)
+			_effects.sync_environment(_lighting.get_3d_lighting_bundle())
 		var wp := _lighting.get_weather_state()
 		if _weather_fx != null:
 			var rmask: PackedByteArray = _snapshot.get("rain_mask", PackedByteArray())
@@ -300,11 +461,13 @@ func _draw_tiles_subviewport() -> void:
 			if not Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[ter_i], pos_px, tpx, hash_v, sub_arg, ter_rot, Color.WHITE, Vector2.ZERO, false, lmode):
 				_tile_canvas.draw_rect(Rect2(pos_px, Vector2(tpx, tpx)), Color(0.11, 0.13, 0.11))
 
-	# PASS 2: Y-sorted foreground row-by-row (O(1) pre-resolved array lookup + vehicle open/broken subtile support!)
+	# PASS 2: Y-sorted foreground row-by-row matching exact vanilla cata_tiles.cpp layer order:
+	# tall_ter -> furniture -> traps -> ground fields (blood/acid/gibs/web) -> items/corpses -> vehicles -> creatures -> airborne fields (fire/smoke/gas)
 	for ty in range(min_ty, max_ty + 1):
 		var wy := origin.y + ty
 		var sy := (float(wy) - _view_origin_world.y) * tpx
 		var row_idx := ty * grid_sz.x
+		var airborne_row: Array = []
 		for tx in range(min_tx, max_tx + 1):
 			var off := (row_idx + tx) * stride
 			if tiles_bytes.decode_u8(off + 16) == 0:
@@ -312,7 +475,6 @@ func _draw_tiles_subviewport() -> void:
 			var wx := origin.x + tx
 			var sx := (float(wx) - _view_origin_world.x) * tpx
 			var pos_px := Vector2(sx, sy)
-			var rect := Rect2(sx, sy, tpx, tpx)
 			var hash_v := wx * 73856093 ^ wy * 19349663
 
 			var ter_i := tiles_bytes.decode_u16(off + 0)
@@ -337,7 +499,38 @@ func _draw_tiles_subviewport() -> void:
 				Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[furn_i], pos_px, tpx, hash_v, fsub_arg, furn_rot)
 
 			if trap_i > 0 and trap_i < s_len:
-				Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[trap_i], pos_px, tpx, hash_v)
+				var tr_packed := tiles_bytes.decode_u8(off + 47)
+				var tr_rot := tr_packed & 0xF
+				var tr_sub_raw := (tr_packed >> 4) & 0xF
+				var tr_sub := (tr_sub_raw - 1) if tr_sub_raw > 0 else -1
+				Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[trap_i], pos_px, tpx, hash_v, tr_sub, tr_rot)
+
+			# Ground-level fields (blood splatters, gibs, acid, bile, slime, oil, webs) render UNDER items, corpses & vehicles!
+			if field_i > 0 and field_i < s_len:
+				var fld_id := strings[field_i]
+				var fld_int := tiles_bytes.decode_u8(off + 23)
+				var fld_sub := tiles_bytes.decode_u8(off + 45)
+				var fld_rot := tiles_bytes.decode_u8(off + 46)
+				if _is_airborne_field(fld_id):
+					airborne_row.append([fld_id, _resolved_entries[field_i], pos_px, hash_v, fld_int, fld_sub, fld_rot])
+				else:
+					_draw_field_tile(_tile_canvas, fld_id, _resolved_entries[field_i], pos_px, tpx, hash_v, fld_int, fld_sub, fld_rot)
+
+			if corpse_i > 0 and corpse_i < s_len:
+				if not Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[corpse_i], pos_px, tpx, hash_v):
+					_draw_sprite_ccb(_tile_canvas, "corpse", pos_px, tpx, hash_v, -1, 0, season_key)
+			elif item_i > 0 and item_i < s_len:
+				var drew_puddle := false
+				if ter_i > 0 and ter_i < s_len:
+					var t_s := strings[ter_i]
+					if t_s == "t_puddle" or t_s == "t_puddle_underground":
+						var it_s := strings[item_i]
+						if it_s == "water" or it_s == "water_clean" or it_s == "water_murky":
+							drew_puddle = _draw_sprite_ccb(_tile_canvas, "puddle_water", pos_px, tpx, hash_v, -1, 0, season_key)
+				if not drew_puddle:
+					Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[item_i], pos_px, tpx, hash_v)
+			if item_cnt > 1:
+				_tile_canvas.draw_rect(Rect2(sx + tpx - 5.0, sy + tpx - 5.0, 4.0, 4.0), Color(0.95, 0.85, 0.25, 0.85))
 
 			if vpart_i > 0 and vpart_i < s_len:
 				var vp_packed := tiles_bytes.decode_u8(off + 22)
@@ -345,24 +538,6 @@ func _draw_tiles_subviewport() -> void:
 				var vsub_raw := (vp_packed >> 4) & 0xF
 				var vsub := -1 if vsub_raw == 0 else vsub_raw
 				Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[vpart_i], pos_px, tpx, hash_v, vsub, vrot)
-
-			if corpse_i > 0 and corpse_i < s_len:
-				if not Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[corpse_i], pos_px, tpx, hash_v):
-					_draw_sprite_ccb(_tile_canvas, "corpse", pos_px, tpx, hash_v, -1, 0, season_key)
-			elif item_i > 0 and item_i < s_len:
-				Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[item_i], pos_px, tpx, hash_v)
-			if item_cnt > 1:
-				_tile_canvas.draw_rect(Rect2(sx + tpx - 5.0, sy + tpx - 5.0, 4.0, 4.0), Color(0.95, 0.85, 0.25, 0.85))
-
-			if field_i > 0 and field_i < s_len:
-				if not Tiles.draw_resolved_tile(_tile_canvas, _resolved_entries[field_i], pos_px, tpx, hash_v):
-					var fld_id := strings[field_i]
-					if "fire" in fld_id:
-						_tile_canvas.draw_rect(rect.grow(-4.0), Color(1.0, 0.45, 0.08, 0.65))
-					elif "blood" in fld_id:
-						_tile_canvas.draw_rect(rect.grow(-6.0), Color(0.55, 0.05, 0.05, 0.55))
-					elif "smoke" in fld_id:
-						_tile_canvas.draw_rect(rect, Color(0.45, 0.48, 0.52, 0.45))
 
 		# Creatures standing on row `ty` (rendered at smooth 60fps interpolated visual coordinates!)
 		if creatures_by_row.has(ty):
@@ -393,6 +568,11 @@ func _draw_tiles_subviewport() -> void:
 					var nwield := str(cd.get("wielded", ""))
 					if not nwield.is_empty():
 						_draw_sprite_ccb(_tile_canvas, "overlay_wielded_" + nwield, pos_px, tpx, 0, -1, 0, season_key, Color.WHITE, Tiles.LAYER_BOTH, is_male)
+
+		# Airborne volumetric fields (fire, smoke, gas, fog, electricity) render cleanly above items/vehicles/row
+		for af_var in airborne_row:
+			var af: Array = af_var
+			_draw_field_tile(_tile_canvas, str(af[0]), af[1], af[2], tpx, int(af[3]), int(af[4]), int(af[5]), int(af[6]))
 
 	_has_animated_tiles = Tiles.consume_animated_flag()
 
@@ -476,3 +656,9 @@ func _draw_world_overlays() -> void:
 	if not _has_world or _effects == null:
 		return
 	_effects.draw_overlays(_overlay_layer, _snapshot, _view_origin_world, float(tile_px), _ui_font)
+
+
+func _draw_additive_vfx() -> void:
+	if not _has_world or _effects == null:
+		return
+	_effects.draw_additive_vfx(_vfx_add_layer, _view_origin_world, float(tile_px))

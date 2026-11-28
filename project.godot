@@ -1,20 +1,26 @@
 config_version=5
 
 [application]
-config/name="沧灵城 · 武侠江湖"
-config/description="江南水乡沧灵城 — 经典武侠新手村独立原型"
+config/name="Cataclysm:EmperorCOOP 2.0"
+config/description="Cataclysm:EmperorCOOP 2.0"
+config/icon="res://art/app_icon.png"
+boot_splash/show_image=false
+boot_splash/bg_color=Color(0, 0, 0, 1)
+boot_splash/fullsize=false
+boot_splash/use_filter=false
 config/use_custom_user_dir=true
 config/custom_user_dir_name="CanglingCity"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.5", "GL Compatibility")
 
 [display]
-window/size/viewport_width=1160
-window/size/viewport_height=760
-window/size/window_width_override=1160
-window/size/window_height_override=760
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/window_width_override=1280
+window/size/window_height_override=720
 window/stretch/mode="canvas_items"
-window/stretch/aspect="keep"
+window/stretch/aspect="expand"
+window/stretch/scale_mode="fractional"
 
 [input_devices]
 pointing/emulate_mouse_from_touch=true

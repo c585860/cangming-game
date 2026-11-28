@@ -25,15 +25,23 @@ static var _tiles: Dictionary = {}
 static var _sheets: Array[Dictionary] = []
 static var _sprites: Dictionary = {}
 static var _decoded: Dictionary = {}
+static var _decoded_stamps: Dictionary = {}
 static var _page_stamps: Dictionary = {}
 static var _pinned_pages: Dictionary = {}
 static var _looks_like: Dictionary = {}
 static var _resolved_cache: Dictionary = {}
 static var _tall_cache: Dictionary = {}
+static var _sprite_3d_cache: Dictionary = {}
+static var _fallback_white_tex: ImageTexture = null
 static var _frame_id := 0
 static var _attempted := false
 static var _prewarmed := false
 static var _used_animated_this_frame := false
+
+const MAX_DECODED_ATLASES := 2
+const DECODED_TTL_MS := 2500
+const DEFAULT_MAX_RESIDENT_PAGES := 72
+const DEFAULT_PAGE_MAX_AGE_MS := 120000
 
 
 static func consume_animated_flag() -> bool:
@@ -43,7 +51,17 @@ static func consume_animated_flag() -> bool:
 
 
 static func ccb_gfx_dir() -> String:
+	var exe_dir := OS.get_executable_path().get_base_dir().simplify_path()
+	var rel_gfx1 := exe_dir.path_join("ccb_data/gfx").simplify_path()
+	if DirAccess.dir_exists_absolute(rel_gfx1):
+		return rel_gfx1
+	var rel_gfx2 := exe_dir.path_join("../ccb_data/gfx").simplify_path()
+	if DirAccess.dir_exists_absolute(rel_gfx2):
+		return rel_gfx2
 	var proj := ProjectSettings.globalize_path("res://").simplify_path()
+	var local_gfx := proj.path_join("Cataclysm-Cleanwater-Bomb/gfx").simplify_path()
+	if DirAccess.dir_exists_absolute(local_gfx):
+		return local_gfx
 	var sibling := proj.path_join("../Cataclysm-Cleanwater-Bomb/gfx").simplify_path()
 	if DirAccess.dir_exists_absolute(sibling):
 		return sibling
@@ -113,10 +131,12 @@ static func _reset_catalog_caches() -> void:
 	_sheets.clear()
 	_sprites.clear()
 	_decoded.clear()
+	_decoded_stamps.clear()
 	_page_stamps.clear()
 	_pinned_pages.clear()
 	_resolved_cache.clear()
 	_tall_cache.clear()
+	_sprite_3d_cache.clear()
 	_attempted = false
 	_prewarmed = false
 
@@ -288,17 +308,32 @@ static func _definition(entry: Dictionary, offset: Vector2i, scale: float, rotat
 static func _page(sheet_idx: int, sheet: Dictionary, page: int, rows_per_page: int) -> Texture2D:
 	var pages: Dictionary = sheet["pages"]
 	var stamp_key := (sheet_idx << 16) | (page & 0xffff)
-	_page_stamps[stamp_key] = _frame_id
+	var now_ms := Time.get_ticks_msec()
+	_page_stamps[stamp_key] = now_ms
 	if pages.has(page):
 		return pages[page]
 	var file: String = sheet["file"]
 	if not _decoded.has(file):
+		# Keep at most MAX_DECODED_ATLASES raw PNGs resident simultaneously to prevent RAM spikes
+		while _decoded.size() >= MAX_DECODED_ATLASES:
+			var oldest_f := ""
+			var oldest_t := 1 << 62
+			for df: String in _decoded:
+				var dt: int = int(_decoded_stamps.get(df, 0))
+				if dt < oldest_t:
+					oldest_t = dt
+					oldest_f = df
+			if oldest_f.is_empty():
+				break
+			_decoded.erase(oldest_f)
+			_decoded_stamps.erase(oldest_f)
 		var image := Image.new()
 		if image.load_png_from_buffer(FileAccess.get_file_as_bytes(file)) != OK:
 			push_error("Could not decode tileset atlas: " + file)
 			_decoded[file] = null
 		else:
 			_decoded[file] = image
+	_decoded_stamps[file] = now_ms
 	var source: Image = _decoded[file]
 	if source == null:
 		return null
@@ -311,8 +346,21 @@ static func _page(sheet_idx: int, sheet: Dictionary, page: int, rows_per_page: i
 	return texture
 
 
-static func finish_frame() -> void:
+static func clear_decoded_cache() -> void:
 	_decoded.clear()
+	_decoded_stamps.clear()
+
+
+static func finish_frame() -> void:
+	if not _decoded.is_empty():
+		var now_ms := Time.get_ticks_msec()
+		var expired: Array[String] = []
+		for df: String in _decoded:
+			if now_ms - int(_decoded_stamps.get(df, 0)) >= DECODED_TTL_MS:
+				expired.append(df)
+		for df in expired:
+			_decoded.erase(df)
+			_decoded_stamps.erase(df)
 	_frame_id += 1
 
 
@@ -353,27 +401,68 @@ static func prewarm_game_sprites() -> void:
 	for key in _page_stamps:
 		_pinned_pages[key] = true
 	_decoded.clear()
+	_decoded_stamps.clear()
 
 
-static func trim_unused_pages(max_age_frames := 1800) -> int:
+static func trim_unused_pages(max_age_ms := DEFAULT_PAGE_MAX_AGE_MS, max_pages := DEFAULT_MAX_RESIDENT_PAGES) -> int:
+	var now_ms := Time.get_ticks_msec()
 	var freed := 0
+	var total_pages := 0
+	var unpinned_live: Array = [] # [last_used_ms, sheet_idx, page_num]
+
 	for s_idx in range(_sheets.size()):
 		var pages: Dictionary = _sheets[s_idx]["pages"]
 		var stale: Array[int] = []
 		for page_num: int in pages:
 			var stamp_key := (s_idx << 16) | (page_num & 0xffff)
 			if _pinned_pages.has(stamp_key):
+				total_pages += 1
 				continue
 			var last_used: int = int(_page_stamps.get(stamp_key, 0))
-			if _frame_id - last_used >= max_age_frames:
+			if max_age_ms > 0 and (now_ms - last_used >= max_age_ms):
 				stale.append(page_num)
+			else:
+				total_pages += 1
+				unpinned_live.append([last_used, s_idx, page_num])
 		for page_num in stale:
 			pages.erase(page_num)
 			_page_stamps.erase((s_idx << 16) | (page_num & 0xffff))
 			freed += 1
+
+	# Enforce hard resident LRU page budget so long exploration sessions never bloat VRAM/RAM!
+	if max_pages > 0 and total_pages > max_pages and not unpinned_live.is_empty():
+		unpinned_live.sort_custom(func(a: Array, b: Array) -> bool: return int(a[0]) < int(b[0]))
+		var to_drop := mini(unpinned_live.size(), total_pages - max_pages)
+		for i in range(to_drop):
+			var rec: Array = unpinned_live[i]
+			var s_idx := int(rec[1])
+			var p_num := int(rec[2])
+			(_sheets[s_idx]["pages"] as Dictionary).erase(p_num)
+			_page_stamps.erase((s_idx << 16) | (p_num & 0xffff))
+			freed += 1
+
 	if freed > 0:
 		_sprites.clear()
+		_sprite_3d_cache.clear()
+	if _resolved_cache.size() > 8192:
+		_resolved_cache.clear()
+	if _tall_cache.size() > 8192:
+		_tall_cache.clear()
 	return freed
+
+
+static func get_cache_stats() -> Dictionary:
+	var pages_cnt := 0
+	for s in _sheets:
+		pages_cnt += (s["pages"] as Dictionary).size()
+	return {
+		"pages": pages_cnt,
+		"decoded": _decoded.size(),
+		"sprites": _sprites.size(),
+		"sprites_3d": _sprite_3d_cache.size(),
+		"resolved": _resolved_cache.size(),
+		"tiles": _tiles.size(),
+	}
 
 
 static func has_tile(id: String) -> bool:
@@ -522,6 +611,20 @@ static func resolve_tile_id(id: String, season := "", male := true) -> String:
 	return found
 
 
+static func resolve_field_tile_id(id: String, intensity: int, season := "") -> String:
+	if id.is_empty():
+		return ""
+	var clamped_i := clampi(intensity, 1, 3)
+	var int_id := "%s_int%d" % [id, clamped_i]
+	if _tiles.has(int_id):
+		return int_id
+	if not season.is_empty():
+		var int_s := "%s_season_%s" % [int_id, season]
+		if _tiles.has(int_s):
+			return int_s
+	return resolve_tile_id(id, season, true)
+
+
 static func get_tile_entry(resolved_id: String) -> Dictionary:
 	if resolved_id.is_empty():
 		return {}
@@ -534,10 +637,17 @@ static func draw_resolved_tile(board: Control, tile_in: Dictionary, origin: Vect
 	if tile_in.is_empty():
 		return false
 	var tile: Dictionary = tile_in
-	if subtile_idx >= 0 and subtile_idx < SUBTILE_KEYS.size() and tile.has("joins"):
-		var sub: Dictionary = tile["joins"].get(SUBTILE_KEYS[subtile_idx], {})
-		if not sub.is_empty():
-			tile = sub
+	if tile.has("joins"):
+		var joins: Dictionary = tile["joins"]
+		if subtile_idx >= 0 and subtile_idx < SUBTILE_KEYS.size():
+			var sub: Dictionary = joins.get(SUBTILE_KEYS[subtile_idx], {})
+			if not sub.is_empty():
+				tile = sub
+		elif subtile_idx < 0 and joins.has("unconnected"):
+			# Never accidentally render a multitile base placeholder square (e.g. fd_blood solid red block)!
+			var unc: Dictionary = joins.get("unconnected", {})
+			if not unc.is_empty():
+				tile = unc
 	var rotates: bool = bool(tile.get("rotates", false))
 	var angle := rota if rotates else 0
 	var use_roll := roll
@@ -695,3 +805,193 @@ static func draw_at_subtile(board: Control, id: String, origin: Vector2, cell_si
 	if resolved.is_empty():
 		return false
 	return draw_resolved_tile(board, _tiles[resolved], origin, cell_size, roll, subtile_idx, rota, tint, offset, flip, layer_mode)
+
+
+static func get_fallback_white_tex() -> Texture2D:
+	if _fallback_white_tex == null:
+		var img := Image.create(2, 2, false, Image.FORMAT_RGBA8)
+		img.fill(Color.WHITE)
+		_fallback_white_tex = ImageTexture.create_from_image(img)
+	return _fallback_white_tex
+
+
+# Computes & caches exact CCB render3d.cpp sprite_info metrics (atlas UV, opaque-cropped ground UV,
+# base_drop fraction, transparency flag, pixel dimensions) ONCE per unique sprite index.
+static func _sprite_3d_metrics(index: int) -> Dictionary:
+	var cached = _sprite_3d_cache.get(index)
+	if cached != null:
+		return cached
+	var sp := _sprite(index)
+	if sp.is_empty():
+		var empty_d := {}
+		_sprite_3d_cache[index] = empty_d
+		return empty_d
+	var tex: Texture2D = sp[0]
+	var reg: Rect2 = sp[1]
+	var tsz := Vector2(tex.get_size())
+	if tsz.x <= 0.0 or tsz.y <= 0.0:
+		var empty_d2 := {}
+		_sprite_3d_cache[index] = empty_d2
+		return empty_d2
+
+	var u0 := reg.position.x / tsz.x
+	var v0 := reg.position.y / tsz.y
+	var u1 := reg.end.x / tsz.x
+	var v1 := reg.end.y / tsz.y
+	var px_w := int(reg.size.x)
+	var px_h := int(reg.size.y)
+	var aspect := float(px_w) / float(maxi(1, px_h))
+
+	var gu0 := u0
+	var gv0 := v0
+	var gu1 := u1
+	var gv1 := v1
+	var base_drop := 0.0
+	var has_trans := false
+
+	var img := tex.get_image()
+	if img != null and px_w > 0 and px_h > 0:
+		var rx0 := clampi(int(reg.position.x), 0, img.get_width() - 1)
+		var ry0 := clampi(int(reg.position.y), 0, img.get_height() - 1)
+		var rx1 := clampi(rx0 + px_w, rx0, img.get_width())
+		var ry1 := clampi(ry0 + px_h, ry0, img.get_height())
+		var min_x := px_w
+		var min_y := px_h
+		var max_x := -1
+		var max_y := -1
+		var opaque_cnt := 0
+		for py in range(ry0, ry1):
+			for px in range(rx0, rx1):
+				if img.get_pixel(px, py).a >= 0.12:
+					opaque_cnt += 1
+					var lx := px - rx0
+					var ly := py - ry0
+					if lx < min_x: min_x = lx
+					if ly < min_y: min_y = ly
+					if lx > max_x: max_x = lx
+					if ly > max_y: max_y = ly
+		if max_x >= min_x and max_y >= min_y:
+			var ow := float(max_x - min_x + 1)
+			var oh := float(max_y - min_y + 1)
+			var dw := float(px_w)
+			var dh := float(px_h)
+			gu0 = u0 + (u1 - u0) * (float(min_x) / dw)
+			gu1 = u0 + (u1 - u0) * (float(max_x + 1) / dw)
+			gv0 = v0 + (v1 - v0) * (float(min_y) / dh)
+			gv1 = v0 + (v1 - v0) * (float(max_y + 1) / dh)
+			base_drop = clampf(1.0 - float(max_y + 1) / dh, 0.0, 1.0)
+			has_trans = (opaque_cnt * 20 < px_w * px_h * 19) or (ow * oh * 20.0 < dw * dh * 19.0)
+
+	var info := {
+		"tex": tex,
+		"u0": u0, "v0": v0, "u1": u1, "v1": v1,
+		"gu0": gu0, "gv0": gv0, "gu1": gu1, "gv1": gv1,
+		"base_drop": base_drop,
+		"has_trans": has_trans,
+		"px_w": px_w,
+		"px_h": px_h,
+		"aspect": aspect,
+	}
+	_sprite_3d_cache[index] = info
+	return info
+
+
+static func _pick_3d_index_and_turn(value: Variant, roll: int, angle: int, allow_turn: bool) -> Array:
+	var picked: Variant = _pick(value, roll)
+	var turn := 0
+	var index := -1
+	if picked is Array:
+		if picked.is_empty():
+			return [-1, 0]
+		if picked.size() == 1:
+			index = int(picked[0])
+			if allow_turn:
+				turn = posmod(angle, 4)
+		else:
+			index = int(picked[posmod(angle, picked.size())])
+	elif picked is int or picked is float:
+		index = int(picked)
+		if allow_turn:
+			turn = posmod(angle, 4)
+	return [index, turn]
+
+
+# Resolves a CCB tile ID + subtile + rotation + pick mode into 3D GPU atlas coordinates & metrics.
+# pick_mode: 0=FG, 1=BG, 2=GROUND (bg else fg, opaque-cropped), 3=FIELD (intensity), 4=OVERLAY
+static func resolve_3d_sprite(id: String, season: String, roll: int, subtile_idx: int, rota: int,
+		pick_mode: int, male := true, field_intensity := 1) -> Dictionary:
+	if id.is_empty():
+		return {}
+	if not _attempted:
+		_load_catalog()
+	var resolved := resolve_field_tile_id(id, field_intensity, season) if pick_mode == 3 else resolve_tile_id(id, season, male)
+	if resolved.is_empty():
+		return {}
+	var base_tile: Dictionary = _tiles.get(resolved, {})
+	if base_tile.is_empty():
+		return {}
+	var tile: Dictionary = base_tile
+	if tile.has("joins"):
+		var joins: Dictionary = tile["joins"]
+		if subtile_idx >= 0 and subtile_idx < SUBTILE_KEYS.size():
+			var sub: Dictionary = joins.get(SUBTILE_KEYS[subtile_idx], {})
+			if not sub.is_empty():
+				tile = sub
+		elif subtile_idx < 0 and joins.has("unconnected"):
+			var unc: Dictionary = joins.get("unconnected", {})
+			if not unc.is_empty():
+				tile = unc
+
+	var rotates: bool = bool(tile.get("rotates", false))
+	var angle := rota if rotates else 0
+	var use_roll := roll
+	if bool(tile.get("animated", false)):
+		_used_animated_this_frame = true
+		@warning_ignore("integer_division")
+		use_roll = roll + int(Time.get_ticks_msec() / 50)
+
+	var idx_turn := [-1, 0]
+	var used_bg := false
+	if pick_mode == 1: # BG only (fallback to base tile bg if subtile lacks bg)
+		idx_turn = _pick_3d_index_and_turn(tile["bg"], use_roll, angle, rotates)
+		if int(idx_turn[0]) < 0 and tile != base_tile:
+			idx_turn = _pick_3d_index_and_turn(base_tile["bg"], use_roll, angle, rotates)
+		used_bg = int(idx_turn[0]) >= 0
+	elif pick_mode == 2: # GROUND: prefer bg (or base bg), else fg
+		idx_turn = _pick_3d_index_and_turn(tile["bg"], use_roll, angle, false)
+		if int(idx_turn[0]) < 0 and tile != base_tile:
+			idx_turn = _pick_3d_index_and_turn(base_tile["bg"], use_roll, angle, false)
+		if int(idx_turn[0]) >= 0:
+			used_bg = true
+		else:
+			idx_turn = _pick_3d_index_and_turn(tile["fg"], use_roll, angle, rotates)
+	else: # FG / FIELD / OVERLAY (fallback to bg only if fg empty on pick_mode==0)
+		idx_turn = _pick_3d_index_and_turn(tile["fg"], use_roll, angle, rotates)
+		if int(idx_turn[0]) < 0 and pick_mode == 0:
+			idx_turn = _pick_3d_index_and_turn(tile["bg"], use_roll, angle, rotates)
+			used_bg = int(idx_turn[0]) >= 0
+
+	var spr_idx := int(idx_turn[0])
+	if spr_idx < 0:
+		return {}
+	var m := _sprite_3d_metrics(spr_idx)
+	if m.is_empty():
+		return {}
+	var off_v: Vector2i = tile.get("offset", Vector2i.ZERO)
+	return {
+		"tex": m["tex"],
+		"u0": float(m["u0"]), "v0": float(m["v0"]),
+		"u1": float(m["u1"]), "v1": float(m["v1"]),
+		"gu0": float(m["gu0"]), "gv0": float(m["gv0"]),
+		"gu1": float(m["gu1"]), "gv1": float(m["gv1"]),
+		"base_drop": float(m["base_drop"]),
+		"has_trans": bool(m["has_trans"]),
+		"px_w": int(m["px_w"]),
+		"px_h": int(m["px_h"]),
+		"aspect": float(m["aspect"]),
+		"offset": off_v,
+		"rot4": int(idx_turn[1]),
+		"used_bg": used_bg,
+		"has_bg": (tile["bg"] is int and int(tile["bg"]) >= 0) or (tile["bg"] is Array and not (tile["bg"] as Array).is_empty()),
+		"has_fg": (tile["fg"] is int and int(tile["fg"]) >= 0) or (tile["fg"] is Array and not (tile["fg"] as Array).is_empty()),
+	}

@@ -27,10 +27,14 @@ uniform float sky_energy = 0.75;
 uniform float cloud_cover = 0.0;
 uniform bool is_underground = false;
 uniform float wind_time = 0.0;
+uniform vec2 wind_dir = vec2(0.85, 0.25);
+uniform float wind_speed = 4.0;
+uniform float mist_level = 0.16;
 
 uniform int point_light_count = 0;
 uniform vec4 point_light_pos_rad[16];  // xy=world center, z=radius, w=energy
 uniform vec4 point_light_col_mode[16]; // rgb=true emitter color, a=flicker
+uniform vec4 point_light_cone[16];     // xy=unit dir, z=cone_cos (<= -0.5 = omni), w=volumetric_beam
 
 const float STORY_HEIGHT = 2.75;
 const float WIN_SILL = 0.72;
@@ -40,6 +44,29 @@ float hash21(vec2 p) {
 	vec3 h = fract(vec3(p.xyx) * 0.1031);
 	h += dot(h, h.yzx + 33.33);
 	return fract((h.x + h.y) * h.z);
+}
+
+float smooth_noise2(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(
+		mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+		mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+		f.y
+	);
+}
+
+// Large-scale wind-drifting overhead cloud shadow field (P0.2 Moving Cloud Shadows!)
+float eval_cloud_shadow(vec2 wp) {
+	float spd = 0.18 + clamp(wind_speed * 0.018, 0.0, 0.95);
+	vec2 drift = wind_dir * (wind_time * spd);
+	vec2 p = wp * 0.048 - drift;
+	float n = smooth_noise2(p) * 0.62 + smooth_noise2(p * 2.15 + vec2(7.3, -4.1)) * 0.38;
+	float thresh = mix(0.84, 0.24, clamp(cloud_cover, 0.0, 1.0));
+	float occ = smoothstep(thresh - 0.16, thresh + 0.18, n);
+	// Soft realistic shadow floor (clouds dim direct sun shafts cleanly without blacking out the ground)
+	return mix(1.0, mix(0.46, 0.22, clamp(cloud_cover, 0.0, 1.0)), occ * smoothstep(0.08, 0.35, cloud_cover));
 }
 
 float eval_sun_obstacle(vec4 data, ivec2 cell, vec2 from_p, vec2 to_p, float z0, float z1, bool is_receiver) {
@@ -280,10 +307,13 @@ void fragment() {
 			z_recv = clamp(geom.r * 1.4, 0.25, 1.35);
 		}
 
-		// 1. Direct Sunlight & Moonlight (physically attenuated by clouds & weather!)
+		// 1. Direct Sunlight & Moonlight (with wind-drifting overhead cloud shadows!)
 		float sun_vis = 0.0;
 		if (!is_underground && sun_energy > 0.004 && (kind != 1 || ext_wall)) {
 			sun_vis = trace_sun_soft(sun_origin, z_recv, sun_ray, is_wall || kind >= 5);
+			if (sun_vis > 0.01 && cloud_cover > 0.08) {
+				sun_vis *= eval_cloud_shadow(world_p);
+			}
 		}
 		float moon_vis = 0.0;
 		if (!is_underground && moon_energy > 0.004 && (kind != 1 || ext_wall)) {
@@ -316,20 +346,36 @@ void fragment() {
 				}
 				vec4 pr = point_light_pos_rad[i];
 				vec4 cm = point_light_col_mode[i];
+				vec4 cn = point_light_cone[i];
 				float radius = pr.z;
 				float energy = pr.w;
 				if (energy <= 0.001 || radius <= 0.1) {
 					continue;
 				}
 				vec2 lpos = pr.xy;
-				float d2 = length(world_p - lpos);
+				vec2 delta_l = world_p - lpos;
+				float d2 = length(delta_l);
 				if (d2 >= radius) {
 					continue;
+				}
+				vec2 dir2 = (d2 > 0.001) ? (delta_l / d2) : vec2(1.0, 0.0);
+				// P0.1 Directional spotlight shaping for vehicle headlights & floodlights (with soft near-lamp spill!)
+				float spot = 1.0;
+				float beam_vol = 0.0;
+				if (cn.z > -0.5) {
+					float c_align = dot(dir2, cn.xy);
+					float cone_shape = smoothstep(cn.z - 0.16, cn.z + 0.08, c_align);
+					float near_spill = 0.24 * exp(-d2 * 0.85);
+					spot = max(cone_shape, near_spill);
+					if (spot < 0.015) {
+						continue;
+					}
+					float fog_w = clamp(mist_level * 1.15 + (1.0 - sky_energy) * 0.45 + (is_underground ? 0.40 : 0.0), 0.10, 1.0);
+					beam_vol = cone_shape * (1.0 - smoothstep(0.5, radius * 0.92, d2)) * fog_w * cn.w;
 				}
 				float phase = lpos.x * 1.73 + lpos.y * 2.41;
 				float wave = 1.0 + (sin(wind_time * 6.4 + phase) * 0.55 + sin(wind_time * 13.7 - phase) * 0.45) * (0.09 * cm.a);
 				vec2 l_local = lpos - grid_origin;
-				vec2 dir2 = (d2 > 0.001) ? (world_p - lpos) / d2 : vec2(1.0, 0.0);
 				vec2 perp = vec2(-dir2.y, dir2.x) * (0.14 + 0.06 * smoothstep(0.5, 4.5, d2));
 
 				float vis = trace_point_ray(l_local, local_p, own, is_wall) * 0.50
@@ -344,8 +390,8 @@ void fragment() {
 				// Warm blackbody core shift on flames; crisp saturated hue on consoles/LEDs/bioluminescence
 				float warm = clamp((cm.r - cm.b) * 1.5, 0.0, 1.0);
 				vec3 col = mix(cm.rgb, vec3(1.0, 0.94, 0.80), exp(-d2 * d2 * 1.6) * 0.42 * warm);
-				float raw_e = energy * wave * atten * vis;
-				direct += col * (1.0 - exp(-raw_e * 0.165)) * 1.28;
+				float raw_e = energy * wave * atten * vis * spot;
+				direct += col * ((1.0 - exp(-raw_e * 0.165)) * 1.28 + beam_vol * vis * 0.26);
 			}
 		}
 

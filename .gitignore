@@ -1,5 +1,7 @@
 .godot/
 build/
+release/
+Cataclysm-Cleanwater-Bomb/
 playtest/
 bin/
 .vs/
@@ -17,3 +19,5 @@ __pycache__/
 *.o
 *.dll
 *.exe
+*.rar
+*.zip

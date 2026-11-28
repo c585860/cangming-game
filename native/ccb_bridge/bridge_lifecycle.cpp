@@ -4,6 +4,7 @@
 #include "cached_options.h"
 #include "cata_allocator.h"
 #include "cata_imgui.h"
+#include "catacharset.h"
 #include "compatibility.h"
 #include "crash.h"
 #include "cursesdef.h"
@@ -314,6 +315,90 @@ CCB_API void ccb_push_key(int key_code, const char *utf8_text, int ctrl, int alt
     st.input_cv.notify_one();
 }
 
+CCB_API void ccb_push_text_input(const char *utf8_text) {
+    if (!utf8_text || utf8_text[0] == '\0') {
+        return;
+    }
+    auto &st = ccb_bridge::state();
+    const char *ptr = utf8_text;
+    int len = static_cast<int>(std::strlen(utf8_text));
+    {
+        std::lock_guard<std::mutex> lk(st.input_mtx);
+        while (len > 0) {
+            const char *prev = ptr;
+            const uint32_t cp = UTF8_getch(&ptr, &len);
+            if (cp == UNKNOWN_UNICODE || cp == 0 || ptr <= prev) {
+                continue;
+            }
+            ccb_bridge::HostEvent ev{};
+            ev.kind = ccb_bridge::HostEventKind::TextInput;
+            ev.key_code = static_cast<int>(cp);
+            ev.utf8_text.assign(prev, static_cast<size_t>(ptr - prev));
+            st.input_queue.push_back(std::move(ev));
+        }
+    }
+    st.input_cv.notify_one();
+}
+
+CCB_API void ccb_push_ime_edit(const char *utf8_edit) {
+    auto &st = ccb_bridge::state();
+    ccb_bridge::HostEvent ev{};
+    ev.kind = ccb_bridge::HostEventKind::ImeEdit;
+    if (utf8_edit && utf8_edit[0] != '\0') {
+        ev.utf8_text = utf8_edit;
+    }
+    {
+        std::lock_guard<std::mutex> lk(st.input_mtx);
+        // Coalesce consecutive ImeEdit updates so live Pinyin typing never lags behind
+        if (!st.input_queue.empty() && st.input_queue.back().kind == ccb_bridge::HostEventKind::ImeEdit) {
+            st.input_queue.back().utf8_text = std::move(ev.utf8_text);
+        } else {
+            st.input_queue.push_back(std::move(ev));
+        }
+    }
+    st.input_cv.notify_one();
+}
+
+CCB_API int ccb_get_loading_state(CcbLoadingState *out_state) {
+    if (!out_state) {
+        return 0;
+    }
+    auto &st = ccb_bridge::state();
+    std::lock_guard<std::mutex> lk(st.loading_mtx);
+    *out_state = st.loading_state;
+    return st.loading_state.active ? 1 : 0;
+}
+
+CCB_API int ccb_copy_world_vfx(CcbWorldVfx *out_vfx, int max_vfx) {
+    auto &st = ccb_bridge::state();
+    std::lock_guard<std::mutex> lk(st.vfx_mtx);
+    const int total = static_cast<int>(st.vfx_ring.size());
+    if (out_vfx && max_vfx > 0 && total > 0) {
+        const int n = std::min(total, max_vfx);
+        const int start = total - n;
+        for (int i = 0; i < n; ++i) {
+            out_vfx[i] = st.vfx_ring[static_cast<size_t>(start + i)];
+        }
+        return n;
+    }
+    return total;
+}
+
+CCB_API int ccb_copy_audio_events(CcbAudioEvent *out_events, int max_events) {
+    auto &st = ccb_bridge::state();
+    std::lock_guard<std::mutex> lk(st.audio_mtx);
+    const int total = static_cast<int>(st.audio_ring.size());
+    if (out_events && max_events > 0 && total > 0) {
+        const int n = std::min(total, max_events);
+        const int start = total - n;
+        for (int i = 0; i < n; ++i) {
+            out_events[i] = st.audio_ring[static_cast<size_t>(start + i)];
+        }
+        return n;
+    }
+    return total;
+}
+
 CCB_API void ccb_push_mouse(int action, int cell_x, int cell_y, int wheel) {
     auto &st = ccb_bridge::state();
     ccb_bridge::HostEvent ev{};
@@ -344,6 +429,36 @@ CCB_API void ccb_push_resize(int cols, int rows) {
 
 CCB_API uint64_t ccb_get_generation(void) {
     return ccb_bridge::state().generation.load(std::memory_order_acquire);
+}
+
+CCB_API uint64_t ccb_get_world_generation(void) {
+    return ccb_bridge::state().world_generation.load(std::memory_order_acquire);
+}
+
+CCB_API uint64_t ccb_get_scene3d_generation(void) {
+    return ccb_bridge::state().scene3d_generation.load(std::memory_order_acquire);
+}
+
+CCB_API uint64_t ccb_get_audio_generation(void) {
+    return ccb_bridge::state().next_audio_id.load(std::memory_order_acquire);
+}
+
+CCB_API void ccb_set_world_capture_radius(int rad_x, int rad_y) {
+    auto &st = ccb_bridge::state();
+    const int rx = std::clamp(rad_x, 16, 34);
+    const int ry = std::clamp(rad_y, 12, 24);
+    const int prev_x = st.capture_rad_x.exchange(rx, std::memory_order_acq_rel);
+    const int prev_y = st.capture_rad_y.exchange(ry, std::memory_order_acq_rel);
+    if (st.running.load(std::memory_order_acquire) && (rx > prev_x || ry > prev_y)) {
+        st.force_world_refresh.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lk(st.input_mtx);
+            ccb_bridge::HostEvent ev{};
+            ev.kind = ccb_bridge::HostEventKind::Refresh3D;
+            st.input_queue.push_back(ev);
+        }
+        st.input_cv.notify_one();
+    }
 }
 
 CCB_API int ccb_copy_terminal_frame(CcbTermHeader *out_header, CcbTermCell *out_cells, int max_cells) {
@@ -471,6 +586,54 @@ CCB_API int ccb_copy_looks_like_table(char *out_buf, int max_bytes) {
         return n;
     }
     return total;
+}
+
+CCB_API void ccb_set_render3d_mode(int enabled, int same_level_only) {
+    auto &st = ccb_bridge::state();
+    const bool next_en = enabled != 0;
+    const bool next_same = same_level_only != 0;
+    const bool prev_en = st.render3d_enabled.exchange(next_en, std::memory_order_acq_rel);
+    const bool prev_same = st.render3d_same_level_only.exchange(next_same, std::memory_order_acq_rel);
+    if (st.running.load(std::memory_order_acquire) && (next_en != prev_en || (next_en && next_same != prev_same))) {
+        st.force_world_refresh.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lk(st.input_mtx);
+            ccb_bridge::HostEvent ev{};
+            ev.kind = ccb_bridge::HostEventKind::Refresh3D;
+            st.input_queue.push_back(ev);
+        }
+        st.input_cv.notify_one();
+    }
+}
+
+CCB_API int ccb_copy_scene3d_snapshot(
+    CcbScene3DHeader *out_header,
+    CcbScene3DItem *out_items, int max_items,
+    char *out_strings, int max_strings_bytes,
+    CcbScene3DLight *out_lights, int max_lights)
+{
+    auto &st = ccb_bridge::state();
+    std::lock_guard<std::mutex> lk(st.snap_mtx);
+    const auto &sc = st.published_scene3d;
+    if (out_header) {
+        *out_header = sc.header;
+    }
+    if (!sc.header.valid) {
+        return 0;
+    }
+    if (out_items && max_items > 0 && !sc.items.empty()) {
+        const int n = std::min(max_items, static_cast<int>(sc.items.size()));
+        std::memcpy(out_items, sc.items.data(), static_cast<size_t>(n) * sizeof(CcbScene3DItem));
+    }
+    if (out_strings && max_strings_bytes > 0 && !sc.strings.empty()) {
+        const int n = std::min(max_strings_bytes, static_cast<int>(sc.strings.size()));
+        std::memcpy(out_strings, sc.strings.data(), static_cast<size_t>(n));
+    }
+    if (out_lights && max_lights > 0 && !sc.lights.empty()) {
+        const int n = std::min(max_lights, static_cast<int>(sc.lights.size()));
+        std::memcpy(out_lights, sc.lights.data(), static_cast<size_t>(n) * sizeof(CcbScene3DLight));
+    }
+    return 1;
 }
 
 } // extern "C"

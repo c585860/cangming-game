@@ -47,6 +47,7 @@ uniform vec2 player_eye = vec2(0.0);
 uniform vec2 player_feet = vec2(0.0);
 uniform vec4 player_light_pos_rad = vec4(-999.0, -999.0, 5.0, 0.0);
 uniform vec4 player_light_col_mode = vec4(1.0, 0.74, 0.38, 0.5);
+uniform vec4 player_light_cone = vec4(1.0, 0.0, -1.0, 0.0); // xy=facing dir, z=cone_cos (<= -0.5 omni), w=volumetric_beam
 
 float hash21(vec2 p) {
 	vec3 h = fract(vec3(p.xyx) * 0.1031);
@@ -154,6 +155,21 @@ vec3 eval_portable_light(vec2 world_p, vec2 local_p, ivec2 own_cell, bool is_wal
 	float wave = 1.0 + (sin(wind_time * 7.2) * 0.6 + sin(wind_time * 16.5) * 0.4) * (0.10 * flicker);
 	vec2 l_local = lpos - grid_origin;
 	vec2 dir2 = (d2 > 0.001) ? (world_p - lpos) / d2 : vec2(1.0, 0.0);
+	// P0.1 Focused directional flashlight cone with soft foot-spill & raycast-occluded volumetric Tyndall beam!
+	float spot = 1.0;
+	float vol_beam = 0.0;
+	if (player_light_cone.z > -0.5) {
+		float c_align = dot(dir2, player_light_cone.xy);
+		float cone = smoothstep(player_light_cone.z - 0.20, player_light_cone.z + 0.08, c_align);
+		float near_spill = 0.28 * exp(-d2 * 0.62);
+		spot = max(cone, near_spill);
+		if (spot < 0.015) {
+			return vec3(0.0);
+		}
+		float vol_core = smoothstep(player_light_cone.z - 0.12, player_light_cone.z + 0.16, c_align);
+		float vol_dist = smoothstep(0.15, 0.85, d2) * (1.0 - smoothstep(radius * 0.20, radius * 0.95, d2));
+		vol_beam = vol_core * vol_dist * player_light_cone.w;
+	}
 	vec2 perp = vec2(-dir2.y, dir2.x) * 0.12;
 	float vis = trace_hand_light(l_local, local_p, own_cell, is_wall) * 0.50
 		+ trace_hand_light(l_local + perp, local_p, own_cell, is_wall) * 0.25
@@ -170,7 +186,12 @@ vec3 eval_portable_light(vec2 world_p, vec2 local_p, ivec2 own_cell, bool is_wal
 	if (d2 < 2.0) {
 		halo_out = col * exp(-d2 * d2 * 2.5) * vis * wave * (0.04 + 0.002 * energy);
 	}
-	return col * (1.0 - exp(-(energy * wave * atten * vis * ndl) * 0.145));
+	if (vol_beam > 0.002) {
+		// Subtle swirling dust motes inside the Tyndall flashlight beam!
+		float dust = 0.84 + 0.16 * smooth_noise2(world_p * 3.8 + vec2(wind_time * 0.22, -wind_time * 0.15));
+		halo_out += col * (vol_beam * vis * dust * 0.18);
+	}
+	return col * (1.0 - exp(-(energy * wave * atten * vis * ndl * spot) * 0.145));
 }
 
 // ACES-inspired filmic tone mapper preserving saturated colored reflections & crisp concrete highlights
@@ -322,13 +343,19 @@ void fragment() {
 					vec3 glass_refl = mix(sky_color * (0.42 + 0.52 * sky_energy), env_refl_col, 0.48);
 					lit += sun_color * spec_g + glass_refl * (0.30 + 0.12 * sheen_g);
 				} else if (mat_id == 4 || own_vis.a > 0.25) {
-					float w1 = smooth_noise2(world_p * 3.2 + vec2(wind_time * 0.65, -wind_time * 0.42));
-					float w2 = smooth_noise2(world_p * 6.4 + vec2(-wind_time * 0.48, wind_time * 0.72));
-					float caustic = smoothstep(0.52, 0.90, (w1 + w2) * 0.5);
-					vec3 water_sky = mix(vec3(0.18, 0.28, 0.48) * max(moon_energy, 0.25), sky_color * (0.58 + 0.48 * sky_energy), sky_day);
-					vec3 water_refl = mix(water_sky, env_refl_col, 0.48);
-					lit = mix(lit, water_refl * 0.88 + lit * 0.44, 0.38);
-					lit += (sun_color * sun_vis * sun_energy + env_refl_col * 0.55) * caustic * 0.36;
+					// Chroma-mask water reflection strictly to actual cool/blue-teal water pixels so dirt puddles
+					// (t_puddle + murky water) and grassy riverbanks NEVER wash out into white 32x32 squares!
+					float blue_lead = (raw.b - raw.r) + 0.35 * (raw.g - raw.r);
+					float water_mask = smoothstep(0.015, 0.14, blue_lead) * smoothstep(0.04, 0.18, raw.b + raw.g);
+					if (water_mask > 0.01) {
+						float w1 = smooth_noise2(world_p * 3.2 + vec2(wind_time * 0.65, -wind_time * 0.42));
+						float w2 = smooth_noise2(world_p * 6.4 + vec2(-wind_time * 0.48, wind_time * 0.72));
+						float caustic = smoothstep(0.56, 0.92, (w1 + w2) * 0.5);
+						vec3 water_sky = mix(vec3(0.14, 0.24, 0.44) * max(moon_energy, 0.22), sky_color * (0.42 + 0.36 * sky_energy), sky_day);
+						vec3 water_refl = mix(water_sky, env_refl_col * 0.72, 0.35);
+						lit = mix(lit, water_refl * 0.55 + lit * 0.68, 0.24 * water_mask);
+						lit += (sun_color * sun_vis * sun_energy + env_refl_col * 0.35) * caustic * (0.20 * water_mask);
+					}
 				} else if (mat_id == 5 && !indoors && !is_underground && wetness > 0.06) {
 					float damp = smooth_noise2(world_p * 1.45) * wetness;
 					float wet_stone_spec = pow(ndh_sun, 22.0) * sun_vis * sun_energy * 0.22 * damp;
@@ -352,6 +379,12 @@ void fragment() {
 			vec2 cv = (UV - vec2(0.5)) * 2.0;
 			float vig = 1.0 - 0.065 * smoothstep(0.62, 1.48, dot(cv, cv));
 			lit = filmic_tone_map(lit * vig);
+			// P3.1 Subtle photographic split-tone harmony & ultra-fine 35mm micro film grain (unifies all tilesets cleanly!)
+			float lit_l = dot(lit, vec3(0.2126, 0.7152, 0.0722));
+			vec3 shadow_grade = mix(vec3(0.96, 0.985, 1.03), vec3(1.015, 1.005, 0.985), smoothstep(0.15, 0.75, lit_l));
+			float grain = (hash21(floor(FRAGCOORD.xy * 0.5) + fract(wind_time * 7.3) * 31.0) - 0.5);
+			float grain_amp = mix(0.016, 0.006, smoothstep(0.05, 0.60, lit_l));
+			lit = clamp(lit * shadow_grade + vec3(grain * grain_amp), vec3(0.0), vec3(1.0));
 
 			float raw_luma = dot(raw, vec3(0.299, 0.587, 0.114));
 			vec3 mem_col = mix(raw, vec3(raw_luma), 0.64) * vec3(0.15, 0.18, 0.25);

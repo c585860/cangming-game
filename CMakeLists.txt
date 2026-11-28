@@ -9,7 +9,7 @@ add_subdirectory("${GODOT_CPP_DIR}" godot-cpp)
 
 add_library(cangling SHARED
     native/register.cpp native/world.cpp native/city.cpp native/yangzhou_city.cpp
-    native/core_packs.cpp native/ccb_vanilla.cpp native/ccb_overmap.cpp native/ccb_engine_gd.cpp native/cataclysm_city.cpp native/monsters.cpp
+    native/core_packs.cpp native/ccb_vanilla.cpp native/ccb_overmap.cpp native/ccb_engine_gd.cpp native/ccb_audio_synth.cpp native/cataclysm_city.cpp native/monsters.cpp
     native/buildings.cpp native/plan.cpp native/terrain.cpp native/streets.cpp
     native/street_plots.cpp native/navigation.cpp native/interactions.cpp native/props.cpp
     native/save.cpp native/city_survey.cpp native/building_types.cpp native/items.cpp
