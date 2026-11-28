@@ -1,0 +1,67 @@
+<!-- CCB-DOC-MOVED-START -->
+> [!IMPORTANT] **Migration in progress / 迁移中**
+>
+> Stable document ID / 稳定文档 ID: `json.wounds`
+> 中文: https://crimsoncrossbunker.github.io/CCB-Docs/reference/json/wounds/
+> English: https://crimsoncrossbunker.github.io/CCB-Docs/en/reference/json/wounds/
+> Migration start date / 开始迁移日期: `2026-08-02`
+> Source commit referenced by the last migration record / 上次迁移记录参考 commit: `0378ca2b84303cf614c617c9d9eaa50138cd21ff`
+> CCB-Docs is still a work in progress; the links above are migration targets.
+> CCB-Docs 仍在整理中；上方链接为迁移目标。
+> Updates to this in-repository body are optional for now, and no comprehensive revision is currently planned. Developers may update it as needed. Some content has not been checked against the current CCB implementation; consult the relevant source code when using or updating it. Documentation may be updated alongside new or changed features. The retained body will serve as a reference for later documentation migration and reorganization, which may rewrite or omit the original text.
+> 本仓库正文暂不列入必须更新项，暂不安排全面整理，是否更新由开发者按实际需要决定。部分内容尚未按当前 CCB 实现核实，使用和更新时应检查相关源码。新增或改动功能时，可同步更新相关文档。保留正文将作为后续文档迁移与整理的参考来源，后续整理不保证原文保留。
+<!-- CCB-DOC-MOVED-END -->
+# Wounds
+
+Wound is a type, that affects specific bodyparts. It's similar in this to effects, but it can be applied only on specific bodyparts, and their ability to be aided/repaired using wound_fix
+
+### wound
+
+```jsonc
+  {
+    "id": "scratch",
+    "type": "wound",
+    "name": { "str": "scratch", "str_pl": "scratches" },
+    "description": "Foobar.",
+    "weight": 10, // weight of a wound, determines the chance of this specific wound to be picked when limb takes damage. Default 1
+    "limit": 2, // limits amount of wounds of this type you can get per limb
+    "damage_types": [ "cut", "bash" ], // only taking these type of damage can apply wound. Mandatory
+    "damage_required": [ 1, 1000 ], // smallest and highest damage that is required for this wound to be applied. Mandatory
+    "pain": [ 1, 10 ], // when wound is applied, it would give character this random amount of pain rolled between this two numbers. Default 0
+    "healing_time": [ "2 hours", "25 days" ], // how long this wound need time to be fully healed. Rolled randomly when applied, supposed to be adjusted by wound_fix.
+            // Default infinite duration
+    "wound_progression": [ { "id": "deep_scratch", "chance": 10 } ], // taking damage on bodypart with this limb may worsen it. chance is range from 0% to 100%
+    "limb_scores": [ { "score": "lift", "value": 0.25 } ], // if wounded part has this limb score, it will be decreased by this amount
+    "whitelist_body_part_types": [ "leg", "arm" ], // if used, this wound can be applied only at bodyparts of this type. Possible values are: head, torso, sensor, mouth, arm, hand, leg, foot, wing, tail, other
+    "blacklist_body_part_types": [ "torso", "sensor" ], // if used, this wound cannot be applied on bodyparts of this type.
+    "whitelist_bp_with_flag": "LIMB_UPPER", // only body parts with this flag can receive the wound.
+    "blacklist_bp_with_flag": "BIONIC_LIMB", // Bodyparts with this flag cannot receive this wound.
+  }
+```
+
+### wound_fix
+
+Wound fix is a way for wounds to be treated
+
+```jsonc
+  {
+    "id": "bandage_the_bleeding",
+    "type": "wound_fix",
+    "name": "bandage the bleeding",
+    "description": "Foobar.",
+    "time": "2 hours", // how long it takes to apply this wound fix
+    "skills": { "mechanics": 1 }, // skills required to apply fix
+    "wounds_removed": [ "scratch" ], // wounds removed when this fix is applied
+    "wounds_added": [ "scratch" ], // wounds added when fix is applied
+    "success_msg": "Tada.",
+    "mod_hp": 10, // if used, the HP of bodypart will be healed by this amount when wound fix is used; negative number will damage the limb instead 
+    "requirements": [ [ "gun_cleaning", 1 ] ], // requirements that dictate tools and materials needed to apply this fix
+    "proficiencies": [
+      {
+        "proficiency": "prof_wound_care", // id of prof required
+        "time_save": 0.9, // multiplies the would fix time by this amount; default 1.0
+        "is_mandatory": true  // if true, lacking this prof would prevent you from using this wound fix
+      }
+    ]
+  }
+```

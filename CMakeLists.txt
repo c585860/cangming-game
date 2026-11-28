@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(cangling LANGUAGES CXX)
 
-set(GODOT_CPP_DIR "" CACHE PATH "godot-cpp 4.5 source directory")
+set(GODOT_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/godot-cpp" CACHE PATH "godot-cpp 4.5 source directory")
 set(GODOTCPP_BUILD_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/native/profile.json" CACHE FILEPATH "Native bindings profile")
 set(GODOTCPP_TARGET template_debug CACHE STRING "Godot build target")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/native/profile.json")

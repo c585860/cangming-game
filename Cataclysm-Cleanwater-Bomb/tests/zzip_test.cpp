@@ -1,0 +1,465 @@
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <ostream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <zstd/zstd.h>
+#include <zstd/common/mem.h>
+
+#include "cata_catch.h"
+#include "cata_scope_helpers.h"
+#include "cata_utility.h"
+#include "filesystem.h"
+#include "mmap_file.h"
+#include "native_file_path.h"
+#include "path_info.h"
+#include "std_hash_fs_path.h"
+#include "zzip.h"
+#include "zzip_stack.h"
+
+namespace
+{
+std::string_view _view( const std::vector<std::byte> &bytes )
+{
+    return std::string_view( reinterpret_cast<const char *>( bytes.data() ), bytes.size() );
+}
+
+std::vector<std::byte> make_bytes( size_t count )
+{
+    std::vector<std::byte> bytes;
+    bytes.reserve( count );
+    for( size_t i = 0; i < count; ++i ) {
+        // NOLINTNEXTLINE(cata-determinism,cert-msc30-c,cert-msc50-cpp,misc-predictable-rand)
+        bytes.push_back( static_cast<std::byte>( rand() %
+                         std::numeric_limits<std::underlying_type_t<std::byte>>::max() ) );
+    }
+    return bytes;
+}
+
+} // namespace
+
+TEST_CASE( "zzip_empty_and_cleared_archives_preserve_metadata", "[zzip][save][regression]" )
+{
+    const size_t capacity = GENERATE( size_t{ 0 }, size_t{ 4096 } );
+    std::shared_ptr<mmap_file> memory = mmap_file::map_writeable_memory( capacity );
+    std::optional<zzip> archive = zzip::load( memory );
+    REQUIRE( archive.has_value() );
+    const size_t initial_content = archive->get_content_size();
+    REQUIRE( initial_content <= archive->get_zzip_size() );
+    REQUIRE( archive->get_entries().empty() );
+    REQUIRE( archive->add_file( std::filesystem::u8path( "memory.json" ), "remembered terrain" ) );
+    REQUIRE( archive->get_content_size() > initial_content );
+    REQUIRE( archive->clear() );
+    REQUIRE( archive->get_entries().empty() );
+    REQUIRE( archive->get_content_size() == initial_content );
+    archive.reset();
+    archive = zzip::load( memory );
+    REQUIRE( archive.has_value() );
+    REQUIRE( archive->get_content_size() == initial_content );
+}
+
+TEST_CASE( "zzip_long_paths_preserve_compressed_save_contents", "[zzip][save][regression]" )
+{
+    const bool relative_path = GENERATE( false, true );
+    const std::filesystem::path root = std::filesystem::absolute(
+                                           std::filesystem::u8path( PATH_INFO::user_dir() ) /
+                                           std::filesystem::u8path( "zzip-long-" + std::string( 240, 'x' ) ) );
+    REQUIRE_FALSE( std::filesystem::exists( native_file_path( root ) ) );
+    on_out_of_scope cleanup( [&]() {
+        std::error_code error;
+        std::filesystem::remove_all( native_file_path( root, true ), error );
+    } );
+    std::filesystem::path directory = root / std::filesystem::u8path( "regions" );
+    while( directory.native().size() < 300 ) {
+        directory /= std::filesystem::u8path( "remembered-terrain-archive-directory" );
+    }
+    REQUIRE( std::filesystem::create_directories( native_file_path( directory ) ) );
+    const std::filesystem::path plain_path = directory / std::filesystem::u8path( "plain-memory.json" );
+    write_to_file( plain_path.generic_u8string(), []( std::ostream & output ) {
+        output << "uncompressed remembered terrain";
+    } );
+    CHECK( read_entire_file( plain_path ) == "uncompressed remembered terrain" );
+    std::filesystem::path archive_path = directory / std::filesystem::u8path( "terrain.zzip" );
+    const std::filesystem::path original_directory = std::filesystem::current_path();
+    on_out_of_scope restore_directory( [&]() {
+        std::filesystem::current_path( original_directory );
+    } );
+    if( relative_path ) {
+        std::filesystem::current_path( root.parent_path() );
+        archive_path = std::filesystem::relative( archive_path );
+    }
+    CAPTURE( relative_path, archive_path );
+    std::optional<zzip> archive = zzip::load( archive_path );
+    REQUIRE( archive.has_value() );
+    const std::filesystem::path entry = std::filesystem::u8path( "region.json" );
+    REQUIRE( archive->add_file( entry, "remembered terrain" ) );
+    archive.reset();
+    archive = zzip::load( archive_path );
+    REQUIRE( archive.has_value() );
+    CHECK( _view( archive->get_file( entry ) ) == "remembered terrain" );
+    REQUIRE( archive->clear() );
+    CHECK( archive->get_entries().empty() );
+    archive.reset();
+
+    std::filesystem::path blocked_archive = directory.filename();
+    blocked_archive += std::filesystem::u8path( ".hot.zzip" );
+    REQUIRE( std::filesystem::create_directory( native_file_path( directory / blocked_archive ) ) );
+    std::shared_ptr<zzip_stack> stack = zzip_stack::load( directory );
+    REQUIRE( stack );
+    REQUIRE_THROWS_AS( stack->add_file( entry, "unwritable" ), std::runtime_error );
+}
+
+TEST_CASE( "zzip_basic_functionality", "[.][zzip]" )
+{
+    std::shared_ptr<mmap_file> mem_file = mmap_file::map_writeable_memory( 0 );
+
+    SECTION( "Text files" ) {
+        std::unordered_map<std::filesystem::path, std::string, std_fs_path_hash> files = {
+            {std::filesystem::u8path( "first.txt" ), "first"},
+            {std::filesystem::u8path( "second.txt" ), "second"},
+            {std::filesystem::u8path( "third.txt" ), "third"},
+        };
+
+        {
+            std::optional<zzip> z = zzip::load( mem_file );
+            REQUIRE( z.has_value() );
+            for( auto& [name, contents] : files ) {
+                REQUIRE( z->add_file( name, contents ) );
+            }
+        }
+        SECTION( "zzip has all expected contents" ) {
+            std::optional<zzip> z = zzip::load( mem_file );
+            REQUIRE( z.has_value() );
+            for( auto& [name, contents] : files ) {
+                std::vector<std::byte> data = z->get_file( name );
+                REQUIRE( _view( data ) == contents );
+            }
+        }
+        SECTION( "zzip has no unexpected contents" ) {
+            std::optional<zzip> z = zzip::load( mem_file );
+            REQUIRE( z.has_value() );
+            for( std::filesystem::path const &entry : z->get_entries() ) {
+                REQUIRE( files.find( entry ) != files.end() );
+            }
+        }
+    }
+    SECTION( "Binary files" ) {
+        std::unordered_map<std::filesystem::path, std::vector<std::byte>, std_fs_path_hash> files{
+            {std::filesystem::u8path( "bytes.bin" ), make_bytes( 1024 )},
+            {std::filesystem::u8path( "bytes2.bin" ), make_bytes( 1024 )},
+            {std::filesystem::u8path( "zeroes.bin" ), std::vector<std::byte>{ 1024, static_cast<std::byte>( 0 ) }},
+        };
+
+        {
+            std::optional<zzip> z = zzip::load( mem_file );
+            REQUIRE( z.has_value() );
+            for( auto& [name, contents] : files ) {
+                z->add_file( name, _view( contents ) );
+            }
+        }
+        SECTION( "zzip has all expected contents" ) {
+            std::optional<zzip> z = zzip::load( mem_file );
+            REQUIRE( z.has_value() );
+            for( auto& [name, contents] : files ) {
+                std::vector<std::byte> data = z->get_file( name );
+                REQUIRE( _view( data ) == _view( contents ) );
+            }
+        }
+        SECTION( "zzip has no unexpected contents" ) {
+            std::optional<zzip> z = zzip::load( mem_file );
+            REQUIRE( z.has_value() );
+            for( std::filesystem::path const &entry : z->get_entries() ) {
+                REQUIRE( files.find( entry ) != files.end() );
+            }
+        }
+    }
+}
+
+TEST_CASE( "zzip_compaction", "[.][zzip]" )
+{
+    std::unordered_map<std::filesystem::path, std::vector<std::byte>, std_fs_path_hash> files{
+        {std::filesystem::u8path( "bytes.bin" ), make_bytes( 1024 )},
+        {std::filesystem::u8path( "bytes2.bin" ), make_bytes( 1024 )},
+        {std::filesystem::u8path( "zeroes.bin" ), std::vector<std::byte>{ 1024, static_cast<std::byte>( 0 ) }},
+    };
+    std::shared_ptr<mmap_file> mem_file = mmap_file::map_writeable_memory( 0 );
+
+    std::optional<zzip> z = zzip::load( mem_file );
+    REQUIRE( z.has_value() );
+    for( auto& [name, contents] : files ) {
+        REQUIRE( z->add_file( name, _view( contents ) ) );
+    }
+
+    SECTION( "Compaction" ) {
+        SECTION( "Compaction saves space" ) {
+            std::shared_ptr<mmap_file> mem_file2 = mmap_file::map_writeable_memory( 0 );
+            z->compact_to( mem_file2 );
+            CHECK( mem_file2->len() < mem_file->len() );
+        }
+        SECTION( "Compaction is deterministic" ) {
+            std::shared_ptr<mmap_file> mem_file2 = mmap_file::map_writeable_memory( 0 );
+            z->compact_to( mem_file2 );
+            std::shared_ptr<mmap_file> mem_file3 = mmap_file::map_writeable_memory( 0 );
+            z->compact_to( mem_file3 );
+            CHECK( mem_file2->len() == mem_file3->len() );
+            CHECK( memcmp( mem_file2->base(), mem_file3->base(), mem_file2->len() ) == 0 );
+        }
+    }
+}
+
+TEST_CASE( "zzip_deletion", "[.][zzip]" )
+{
+    std::unordered_map<std::filesystem::path, std::vector<std::byte>, std_fs_path_hash> files{
+        {std::filesystem::u8path( "bytes.bin" ), make_bytes( 1024 )},
+        {std::filesystem::u8path( "bytes2.bin" ), make_bytes( 1024 )},
+        {std::filesystem::u8path( "zeroes.bin" ), std::vector<std::byte>{ 1024, static_cast<std::byte>( 0 ) }},
+    };
+    std::shared_ptr<mmap_file> mem_file = mmap_file::map_writeable_memory( 0 );
+    REQUIRE( mem_file );
+
+    std::optional<zzip> z = zzip::load( mem_file );
+    REQUIRE( z.has_value() );
+    for( auto& [name, contents] : files ) {
+        REQUIRE( z->add_file( name, _view( contents ) ) );
+    }
+
+    SECTION( "Deletion" ) {
+        std::filesystem::path bytes2_path = std::filesystem::u8path( "bytes2.bin" );
+        SECTION( "Deletion works" ) {
+            REQUIRE( z->delete_files( { bytes2_path } ) );
+            files.erase( bytes2_path );
+
+            for( auto& [name, contents] : files ) {
+                std::vector<std::byte> data = z->get_file( name );
+                CHECK( _view( data ) == _view( contents ) );
+            }
+            for( std::filesystem::path const &entry : z->get_entries() ) {
+                CHECK( files.find( entry ) != files.end() );
+            }
+        }
+        SECTION( "Readding a file after deletion works" ) {
+            REQUIRE( z->delete_files( { bytes2_path } ) );
+            files[bytes2_path] = make_bytes( 512 );
+            z->add_file( bytes2_path, _view( files[bytes2_path] ) );
+
+            for( auto& [name, contents] : files ) {
+                std::vector<std::byte> data = z->get_file( name );
+                CHECK( _view( data ) == _view( contents ) );
+            }
+            for( std::filesystem::path const &entry : z->get_entries() ) {
+                CHECK( files.find( entry ) != files.end() );
+            }
+        }
+        SECTION( "Compaction skips deleted files" ) {
+            std::shared_ptr<mmap_file> mem_file2 = mmap_file::map_writeable_memory( 0 );
+            REQUIRE( z->compact_to( mem_file2 ) );
+
+            z = zzip::load( mem_file2 );
+            REQUIRE( z->delete_files( { bytes2_path } ) );
+
+            std::shared_ptr<mmap_file> mem_file3 = mmap_file::map_writeable_memory( 0 );
+            REQUIRE( z->compact_to( mem_file3 ) );
+
+            CHECK( mem_file3->len() < mem_file2->len() );
+        }
+    }
+}
+
+TEST_CASE( "zzip_corruption_recovery", "[.][zzip]" )
+{
+    std::unordered_map<std::filesystem::path, std::vector<std::byte>, std_fs_path_hash> files{
+        {std::filesystem::u8path( "bytes.bin" ), make_bytes( 1024 )},
+        {std::filesystem::u8path( "bytes2.bin" ), make_bytes( 1024 )},
+        {std::filesystem::u8path( "zeroes.bin" ), std::vector<std::byte>{ 1024, static_cast<std::byte>( 0 ) }},
+    };
+    std::shared_ptr<mmap_file> mem_file = mmap_file::map_writeable_memory( 0 );
+
+    std::optional<zzip> z = zzip::load( mem_file );
+    for( auto& [name, contents] : files ) {
+        z->add_file( name, _view( contents ) );
+    }
+
+    SECTION( "Footer truncated" ) {
+        z.reset();
+        mem_file->resize_file( mem_file->len() - 1 );
+
+        SECTION( "Recovery works" ) {
+            z = zzip::load( mem_file );
+            REQUIRE( z.has_value() );
+
+            for( auto& [name, contents] : files ) {
+                std::vector<std::byte> data = z->get_file( name );
+                CHECK( _view( data ) == _view( contents ) );
+            }
+            for( std::filesystem::path const &entry : z->get_entries() ) {
+                CHECK( files.find( entry ) != files.end() );
+            }
+        }
+    }
+
+    SECTION( "Hash corrupted" ) {
+        z.reset();
+
+        std::array<uint64_t, 2> buf;
+
+        MEM_writeLE64( &buf[0], 0 );
+        MEM_writeLE64( &buf[1], 0 );
+
+        size_t footer_frame_size = ZSTD_writeSkippableFrame(
+                                       mem_file->base(),
+                                       mem_file->len(),
+                                       buf.data(),
+                                       sizeof( buf ),
+                                       /* kFooterChecksumMagic */ 15 );
+        REQUIRE( !ZSTD_isError( footer_frame_size ) );
+
+        SECTION( "Recovery works" ) {
+            z = zzip::load( mem_file );
+            REQUIRE( z.has_value() );
+
+            for( auto& [name, contents] : files ) {
+                CAPTURE( name );
+                std::vector<std::byte> data = z->get_file( name );
+                CHECK( _view( data ) == _view( contents ) );
+            }
+            for( std::filesystem::path const &entry : z->get_entries() ) {
+                CHECK( files.find( entry ) != files.end() );
+            }
+        }
+    }
+
+    SECTION( "Content truncated" ) {
+        SECTION( "Partial recovery works" ) {
+            std::vector<zzip::entry_layout> layout = z->get_layout();
+
+            std::sort( layout.begin(), layout.end(), []( const auto & l, const auto & r ) {
+                return l.offset < r.offset;
+            } );
+
+            for( int i = layout.size() - 1; i > 0; --i ) {
+                const zzip::entry_layout &file_layout = layout[i];
+                CAPTURE( file_layout.path );
+
+                std::unordered_map<std::filesystem::path, bool, std_fs_path_hash> remaining_files;
+                for( int j = 0; j < i; ++j ) {
+                    remaining_files.emplace( layout[j].path, false );
+                }
+
+                for( size_t truncated_len : std::array{ file_layout.len - 1, file_layout.len / 2, static_cast<size_t>( 1 ) } ) {
+                    z.reset();
+
+                    // Truncate each file one byte off the end, in the middle, and one byte from the start
+
+                    mem_file->resize_file( file_layout.offset + truncated_len );
+
+                    z = zzip::load( mem_file );
+                    REQUIRE( z.has_value() );
+
+                    for( std::filesystem::path const &entry : z->get_entries() ) {
+                        CAPTURE( entry );
+                        auto it = remaining_files.find( entry );
+                        CHECK( it != remaining_files.end() );
+                        it->second = true;
+                    }
+                    for( auto& [file, found] : remaining_files ) {
+                        CAPTURE( file );
+                        CHECK( found );
+                        found = false;
+                    }
+                }
+            }
+        }
+
+        SECTION( "Older versions of files are recoverable" ) {
+            std::unordered_map<std::filesystem::path, std::vector<std::byte>, std_fs_path_hash> files2{
+                {std::filesystem::u8path( "bytes.bin" ), make_bytes( 1024 )},
+                {std::filesystem::u8path( "bytes2.bin" ), make_bytes( 1024 )},
+                {std::filesystem::u8path( "zeroes.bin" ), std::vector<std::byte>{ 1024, static_cast<std::byte>( 1 ) }},
+            };
+
+            for( auto& [name, contents] : files2 ) {
+                z->add_file( name, _view( contents ) );
+            }
+
+            std::vector<zzip::entry_layout> layout = z->get_layout();
+
+            std::sort( layout.begin(), layout.end(), []( const zzip::entry_layout & l,
+            const zzip::entry_layout & r ) {
+                return l.offset < r.offset;
+            } );
+
+            for( int i = layout.size() - 1; i > 0; --i ) {
+                const zzip::entry_layout &file_layout = layout[i];
+                CAPTURE( file_layout.path );
+
+                std::unordered_map<std::filesystem::path, bool, std_fs_path_hash> remaining_new_files;
+                for( int j = 0; j < i; ++j ) {
+                    remaining_new_files.emplace( layout[j].path, false );
+                }
+
+                size_t truncated_len = file_layout.len / 2;
+
+                z.reset();
+                // Truncate each overwritten file, verify when we reload we get the older copy.
+                mem_file->resize_file( file_layout.offset + truncated_len );
+
+                z = zzip::load( mem_file );
+                REQUIRE( z.has_value() );
+
+                for( std::filesystem::path const &entry : z->get_entries() ) {
+                    CAPTURE( entry );
+                    auto it = remaining_new_files.find( entry );
+                    if( it == remaining_new_files.end() ) {
+                        auto it2 = files.find( entry );
+                        CHECK( it2 != files.end() );
+                        CHECK( _view( it2->second ) == _view( z->get_file( entry ) ) );
+                    } else {
+                        CHECK( _view( files2[entry] ) == _view( z->get_file( entry ) ) );
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE( "zzip_repeated_entries_preserve_latest_content", "[zzip][save][regression]" )
+{
+    const std::filesystem::path name = std::filesystem::u8path( "map.json" );
+    std::shared_ptr<mmap_file> memory = mmap_file::map_writeable_memory( 4096 );
+    std::optional<zzip> archive = zzip::load( memory );
+    REQUIRE( archive );
+    const std::string original( 32768, 'a' );
+    REQUIRE( archive->add_file( name, original ) );
+    const size_t written = archive->get_content_size();
+    for( int i = 0; i < 3; ++i ) {
+        REQUIRE( archive->add_file( name, original ) );
+        CHECK( _view( archive->get_file( name ) ) == original );
+    }
+    archive.reset();
+    archive = zzip::load( memory );
+    REQUIRE( archive );
+    REQUIRE( archive->add_file( name, original ) );
+    CHECK( _view( archive->get_file( name ) ) == original );
+    std::string changed = original;
+    changed.back() = 'b';
+    REQUIRE( archive->add_file( name, changed ) );
+    CHECK( archive->get_content_size() > written );
+    CHECK( _view( archive->get_file( name ) ) == changed );
+}

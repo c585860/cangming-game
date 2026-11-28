@@ -1,0 +1,65 @@
+#pragma once
+#ifndef CATA_SRC_NORTH_AMERICA_TRANSPORT_H
+#define CATA_SRC_NORTH_AMERICA_TRANSPORT_H
+
+#include <array>
+#include <cstddef>
+#include <vector>
+
+#include "coordinates.h"
+#include "type_id.h"
+
+class mapgendata;
+
+namespace north_america
+{
+
+enum class urban_road { none, local, collector, arterial };
+
+inline constexpr int max_road_flanks = 3;
+
+struct road_cell {
+    unsigned lanes = 0;
+    std::size_t connections = 0;
+    std::size_t mapped_connections = 0;
+    std::size_t mapped_wide_connections = 0;
+    std::array<unsigned, 4> mapped_lanes{};
+    std::size_t arterial_connections = 0;
+    urban_road street = urban_road::none;
+};
+
+// Connection masks use north, east, south, west. Only the second function
+// downsamples geometry, for the continent-scale map.
+std::vector<road_cell> road_network( point_abs_omt origin, int width, int height,
+                                     bool include_local_streets = true );
+std::vector<unsigned> chart_roads( point_abs_omt origin, int width, int height, int stride );
+oter_id avenue_flank( bool north_south );
+bool is_avenue_flank( const oter_id &terrain );
+bool draw_mapped_road( mapgendata &dat );
+std::vector<unsigned char> wide_highway_footprint( point_abs_omt origin, int width, int height,
+        bool mapped, bool arterials );
+
+struct wide_bridge_cell {
+    bool present = false;
+    bool approach = false;
+    bool vertical = false;
+    bool lower_end = false;
+};
+
+struct highway_service_site {
+    point_abs_omt position;
+    point facing;
+};
+
+std::vector<highway_service_site> highway_services( point_abs_omt origin, int width, int height,
+        bool city_streets );
+
+std::vector<wide_bridge_cell> wide_bridge_footprint( point_abs_omt origin, int width, int height,
+        bool mapped, bool arterials, const std::vector<unsigned char> &roads );
+oter_id wide_highway_flank( bool north_south );
+void place_wide_highway_surface( mapgendata &dat );
+void connect_wide_road_driveways( mapgendata &dat );
+
+} // namespace north_america
+
+#endif // CATA_SRC_NORTH_AMERICA_TRANSPORT_H
